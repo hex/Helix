@@ -15,21 +15,19 @@ struct MenuBarIcon: View {
 
     private var iconName: String {
         switch health {
-        case .healthy: "arrow.triangle.2.circlepath"
-        case .active: "arrow.triangle.2.circlepath"
+        case .healthy, .active, .partiallyPaused, .paused, .idle: "arrow.triangle.2.circlepath"
         case .warning: "exclamationmark.arrow.triangle.2.circlepath"
-        case .error: "xmark.circle"
-        case .idle: "arrow.triangle.2.circlepath"
+        case .error, .daemonStopped: "xmark.circle"
         }
     }
 
     private var iconColor: Color {
         switch health {
-        case .healthy: .green
+        case .healthy, .partiallyPaused: .green
         case .active: .blue
         case .warning: .orange
-        case .error: .red
-        case .idle: .secondary
+        case .error, .daemonStopped: .red
+        case .paused, .idle: .secondary
         }
     }
 }
