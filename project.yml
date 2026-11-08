@@ -49,7 +49,7 @@ targets:
         LSApplicationCategoryType: public.app-category.developer-tools
         CFBundleDisplayName: Helix
         CFBundleName: Helix
-        CFBundleShortVersionString: "2026.8.0"
-        CFBundleVersion: "4"
+        CFBundleShortVersionString: "2026.11.0"
+        CFBundleVersion: "5"
         SUFeedURL: "https://raw.githubusercontent.com/hex/Helix/main/appcast.xml"
         SUPublicEDKey: "VJR0Igvi956+S07119jBXK+/rt1QjpUB//YJYx7ZAHs="

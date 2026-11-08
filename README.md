@@ -8,7 +8,7 @@
     <img src="https://img.shields.io/badge/platform-macOS-blue?style=flat-square" alt="Platform">
     <img src="https://img.shields.io/badge/requirements-macOS%2014%2B-fa4e49?style=flat-square" alt="Requirements">
     <img src="https://img.shields.io/badge/swift-5.9-F05138?style=flat-square" alt="Swift">
-    <img src="https://img.shields.io/badge/version-2026.8.0-blue?style=flat-square" alt="Version">
+    <img src="https://img.shields.io/badge/version-2026.11.0-blue?style=flat-square" alt="Version">
     <a href="https://helix.hexul.com"><img src="https://img.shields.io/badge/website-helix.hexul.com-4A90D9?style=flat-square" alt="Website"></a>
 </p>
 
