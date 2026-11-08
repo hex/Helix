@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		2772C78ED36AD3B2B973B347 /* MarkGlyph.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2326823DBCC07AA4889711E /* MarkGlyph.swift */; };
+		FC5A90AC8591AF9CD848ADB9 /* HelixGlyph.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A8D5AE0EB54798501F4705C /* HelixGlyph.swift */; };
+		20F98E3673DABD31785A2838 /* ArrowsGlyph.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3791F5BD5B419B8B480ED5B /* ArrowsGlyph.swift */; };
 		02B9C9C04F56BD58B0B5BD9D /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98299D98463E70183BF8406A /* SettingsView.swift */; };
 		25E1F6397E277CC3433FEFD7 /* HelixApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CE5AC6C882BDBCDB4C6C41F /* HelixApp.swift */; };
 		2C39B29DD1F9A46BA758003B /* ForwardDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00EF23FC972D666D2E0F4602 /* ForwardDetailView.swift */; };
@@ -33,6 +36,9 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		F2326823DBCC07AA4889711E /* MarkGlyph.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkGlyph.swift; sourceTree = "<group>"; };
+		8A8D5AE0EB54798501F4705C /* HelixGlyph.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HelixGlyph.swift; sourceTree = "<group>"; };
+		D3791F5BD5B419B8B480ED5B /* ArrowsGlyph.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArrowsGlyph.swift; sourceTree = "<group>"; };
 		00EF23FC972D666D2E0F4602 /* ForwardDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ForwardDetailView.swift; sourceTree = "<group>"; };
 		01F769F95F310D70A648C305 /* EditSyncConfigView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditSyncConfigView.swift; sourceTree = "<group>"; };
 		078FBE6104B4D999A8FE0701 /* Helix */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Helix; path = .; sourceTree = SOURCE_ROOT; };
@@ -112,6 +118,9 @@
 		B29E0235E826AAC737A322A2 /* Components */ = {
 			isa = PBXGroup;
 			children = (
+				D3791F5BD5B419B8B480ED5B /* ArrowsGlyph.swift */,
+				8A8D5AE0EB54798501F4705C /* HelixGlyph.swift */,
+				F2326823DBCC07AA4889711E /* MarkGlyph.swift */,
 				2402BC4E72318518442C2C7E /* EndpointPicker.swift */,
 				90A907274BFEF61629F49AD6 /* FlowLayout.swift */,
 				0BFEE0165893EA3FA23A1622 /* LabelEditor.swift */,
@@ -239,6 +248,9 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				20F98E3673DABD31785A2838 /* ArrowsGlyph.swift in Sources */,
+				FC5A90AC8591AF9CD848ADB9 /* HelixGlyph.swift in Sources */,
+				2772C78ED36AD3B2B973B347 /* MarkGlyph.swift in Sources */,
 				C2A594701FCF4EE7CDF33224 /* ConsoleView.swift in Sources */,
 				D30BAB4A4F1C15CE9C3BC537 /* CreateForwardView.swift in Sources */,
 				39041BB1D3F0AD49B96A1DF5 /* CreateSyncView.swift in Sources */,
