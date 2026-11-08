@@ -8,6 +8,8 @@ struct MenuBarPopover: View {
     let store: SessionStore
     @Environment(\.openWindow) private var openWindow
 
+    private static let maxListHeight: CGFloat = 430
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -78,6 +80,7 @@ struct MenuBarPopover: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
             Button("Create Your First Session") {
                 openMainWindow()
             }
@@ -88,7 +91,7 @@ struct MenuBarPopover: View {
 
     private var sessionList: some View {
         ScrollView {
-            LazyVStack(spacing: 0) {
+            VStack(spacing: 0) {
                 ForEach(store.syncSessions) { session in
                     SyncSessionRow(session: session, store: store)
                         .onTapGesture {
@@ -107,14 +110,9 @@ struct MenuBarPopover: View {
                 }
             }
         }
-        .frame(maxHeight: maxListHeight)
-    }
-
-    private var maxListHeight: CGFloat {
-        let rowHeight: CGFloat = 62
-        let count = CGFloat(store.syncSessions.count + store.forwardSessions.count)
-        // Show up to ~7 sessions before scrolling
-        return min(count * rowHeight, 430)
+        // The menu bar window takes its content's minimum height, so the list's height must be rigid.
+        .frame(maxHeight: Self.maxListHeight)
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     private func openMainWindow() {

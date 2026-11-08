@@ -32,6 +32,7 @@ struct HelixApp: App {
                 .task { store.startPolling() }
         }
         .menuBarExtraStyle(.window)
+        .windowResizability(.contentSize)
 
         Window("Helix", id: "main") {
             MainWindow(store: store)
