@@ -16,7 +16,7 @@
 
 ## Features
 
-- **Menu bar status** -- Live icon reflects overall session health at a glance (healthy, syncing, conflicts, errors)
+- **Menu bar status** -- Live icon reflects overall session health at a glance (healthy, syncing, paused, conflicts, errors); pick a monochrome icon set (Arrows, Helix, H Mark) or the colored Legacy one in Settings
 - **Session dashboard** -- Browse, search, and filter all sync and forward sessions in a three-column window
 - **Create sessions** -- Step-by-step wizard for sync sessions; streamlined form for port forwarding
 - **Edit sessions** -- Rename a session, or change its sync mode, ignore rules, symlinks, compression, and watch settings
