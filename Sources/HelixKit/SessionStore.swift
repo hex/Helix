@@ -95,19 +95,17 @@ public final class SessionStore {
         if runningSyncs.isEmpty && runningForwards.isEmpty {
             return .paused
         }
-        let hasDisconnected = runningSyncs.contains { $0.status == "disconnected" || $0.status.hasPrefix("connecting") }
+        let hasDisconnected = runningSyncs.contains { $0.phase == .disconnected || $0.phase == .connecting }
             || runningForwards.contains { $0.source.connected == false || $0.destination.connected == false }
         if hasDisconnected {
             return .error
         }
         let hasConflicts = runningSyncs.contains { !($0.conflicts ?? []).isEmpty }
-        let hasHalted = runningSyncs.contains { $0.status.hasPrefix("halted") || $0.status == "waiting-for-rescan" }
-        if hasConflicts || hasHalted {
+        let hasStalled = runningSyncs.contains { $0.phase == .stalled }
+        if hasConflicts || hasStalled {
             return .warning
         }
-        let hasActive = runningSyncs.contains {
-            ["scanning", "reconciling", "transitioning", "saving"].contains($0.status) || $0.status.hasPrefix("staging")
-        }
+        let hasActive = runningSyncs.contains { $0.phase == .syncing }
         if hasActive {
             return .active
         }
