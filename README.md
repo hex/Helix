@@ -16,7 +16,7 @@
 
 ## Features
 
-- **Menu bar status** -- Live icon reflects overall session health at a glance (healthy, syncing or connecting, a warning for conflicts or a session that cannot connect, errors)
+- **Menu bar status** -- Live icon reflects overall session health at a glance (healthy, syncing or connecting, paused, a warning for conflicts or a session that cannot connect, errors); pick a monochrome icon set (Arrows, Helix, H Mark) or the colored Legacy one in Settings
 - **Menu bar menu** -- Double-click the icon to open the main window. Right-click the icon to open Helix, pause every running sync session, pause them for the minutes you enter, or quit; Resume restores only the sessions Pause All paused, and a timed pause resumes on its own, even after you quit and reopen Helix. Helix records each confirmed pause before starting the next one, even if Mutagen reports a save error. When you edit a session paused by Pause All, the replacement inherits its pause and deadline. Pause All waits for a conflict resolve to finish before pausing that session. It asks you to wait if an edit is running. Resume checks for running sessions on the same endpoints. Local paths under `/tmp` and `/private/tmp` count as the same folder. If a manual Resume finds a match, Helix names it and offers Resume Anyway. A timed pause leaves the session paused and shows the reason until you dismiss it or resume the session. Edits and conflict resolves can restore sessions that were already running together when the operation began.
 - **Session dashboard** -- Browse, search, and filter all sync and forward sessions in a three-column window
 - **Connection errors** -- When a session cannot connect, the detail view shows mutagen's own reason under the status line
