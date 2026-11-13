@@ -27,13 +27,16 @@ enum MenuBarIconStyle: String, CaseIterable, Identifiable {
 }
 
 struct MenuBarIcon: View {
+    static let showsPauseKey = "menuBarShowsPause"
+
     let health: HealthStatus
     @AppStorage(MenuBarIconStyle.storageKey) private var style = MenuBarIconStyle.defaultStyle
+    @AppStorage(showsPauseKey) private var showsPause = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var frame = 0
 
     var body: some View {
-        MenuBarIconImage(style: style, health: health, frame: frame)
+        MenuBarIconImage(style: style, health: shownHealth, frame: frame)
             .task(id: animates) {
                 frame = 0
                 guard animates else { return }
@@ -45,8 +48,12 @@ struct MenuBarIcon: View {
             }
     }
 
+    private var shownHealth: HealthStatus {
+        showsPause ? health : health.ignoringPause
+    }
+
     private var animates: Bool {
-        style != .legacy && health == .active && !reduceMotion
+        style != .legacy && shownHealth == .active && !reduceMotion
     }
 }
 

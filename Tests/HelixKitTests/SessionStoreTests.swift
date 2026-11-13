@@ -238,6 +238,12 @@ struct SessionStoreTests {
         #expect(store.overallHealth == .partiallyPaused)
     }
 
+    @Test("Ignoring pause reports paused states as healthy and keeps the rest", arguments: HealthStatus.allCases)
+    func ignoringPause(status: HealthStatus) {
+        let expected: HealthStatus = (status == .partiallyPaused || status == .paused) ? .healthy : status
+        #expect(status.ignoringPause == expected)
+    }
+
     @MainActor
     private func storeWith(syncs: [SyncSession] = [], forwards: [ForwardSession] = []) async -> SessionStore {
         let store = SessionStore(provider: FakeProvider(syncSessions: syncs, forwardSessions: forwards))

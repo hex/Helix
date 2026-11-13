@@ -13,6 +13,7 @@ struct SettingsView: View {
     @State private var launchAtLogin = false
     @AppStorage("cliPath") private var cliPath = HelixApp.defaultCLIPath
     @AppStorage(MenuBarIconStyle.storageKey) private var iconStyle = MenuBarIconStyle.defaultStyle
+    @AppStorage(MenuBarIcon.showsPauseKey) private var showsPause = true
 
     var body: some View {
         TabView {
@@ -59,9 +60,13 @@ struct SettingsView: View {
                         Text(style.title).tag(style)
                     }
                 }
+                Toggle(isOn: $showsPause) {
+                    Text("Show paused state")
+                    Text("When off, paused sessions look like everything is running normally.")
+                }
                 LabeledContent("Preview") {
                     HStack(spacing: 8) {
-                        ForEach(HealthStatus.allCases, id: \.self) { health in
+                        ForEach(HealthStatus.allCases.filter { showsPause || $0.ignoringPause == $0 }, id: \.self) { health in
                             MenuBarIconImage(style: iconStyle, health: health)
                                 .help(health.title)
                         }
