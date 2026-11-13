@@ -14,6 +14,7 @@ struct SettingsView: View {
     @AppStorage("cliPath") private var cliPath = HelixApp.defaultCLIPath
     @AppStorage(MenuBarIconStyle.storageKey) private var iconStyle = MenuBarIconStyle.defaultStyle
     @AppStorage(MenuBarIcon.showsPauseKey) private var showsPause = true
+    @AppStorage(MenuBarPopover.compactListKey) private var compactList = false
 
     var body: some View {
         TabView {
@@ -72,6 +73,10 @@ struct SettingsView: View {
                         }
                     }
                     .foregroundStyle(.primary)
+                }
+                Toggle(isOn: $compactList) {
+                    Text("Compact session list")
+                    Text("Show only session names in the menu bar popover.")
                 }
             }
 
