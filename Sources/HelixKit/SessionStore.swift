@@ -36,8 +36,10 @@ public enum HealthStatus: Sendable, CaseIterable {
 @MainActor
 @Observable
 public final class SessionStore {
-    public private(set) var syncSessions: [SyncSession] = []
-    public private(set) var forwardSessions: [ForwardSession] = []
+    /// Sync sessions as mutagen lists them, oldest first.
+    private(set) var mutagenSyncSessions: [SyncSession] = []
+    /// Forward sessions as mutagen lists them, oldest first.
+    private(set) var mutagenForwardSessions: [ForwardSession] = []
     public private(set) var daemonRunning = false
     public private(set) var daemonAutoStart = false
     public private(set) var mutagenVersion: String?
@@ -45,17 +47,75 @@ public final class SessionStore {
     public private(set) var refreshCount = 0
     public var pendingSessionSelection: String?
 
+    public var sortMode: SessionSortMode = .manual {
+        didSet { defaults?.set(sortMode.rawValue, forKey: Self.sortModeKey) }
+    }
+    private(set) var syncOrder: [String] = [] {
+        didSet { defaults?.set(syncOrder, forKey: Self.syncOrderKey) }
+    }
+    private(set) var forwardOrder: [String] = [] {
+        didSet { defaults?.set(forwardOrder, forKey: Self.forwardOrderKey) }
+    }
+
+    static let sortModeKey = "sessionSortMode"
+    static let syncOrderKey = "syncSessionOrder"
+    static let forwardOrderKey = "forwardSessionOrder"
+
     private var provider: any SessionProvider
     private var pollingTask: Task<Void, Never>?
     private let fileTransport: FileTransport
+    private let defaults: UserDefaults?
 
-    public init(provider: any SessionProvider, fileTransport: FileTransport = FileTransport()) {
+    /// - Parameter defaults: where the sort mode and the manual order persist; nil keeps them in memory.
+    public init(
+        provider: any SessionProvider,
+        fileTransport: FileTransport = FileTransport(),
+        defaults: UserDefaults? = nil
+    ) {
         self.provider = provider
         self.fileTransport = fileTransport
+        self.defaults = defaults
+        if let defaults {
+            sortMode = defaults.string(forKey: Self.sortModeKey).flatMap(SessionSortMode.init) ?? .manual
+            syncOrder = defaults.stringArray(forKey: Self.syncOrderKey) ?? []
+            forwardOrder = defaults.stringArray(forKey: Self.forwardOrderKey) ?? []
+        }
     }
 
     public func replaceProvider(_ provider: any SessionProvider) {
         self.provider = provider
+    }
+
+    /// Sync sessions in the order the sort mode gives.
+    public var syncSessions: [SyncSession] {
+        SessionOrder.sorted(mutagenSyncSessions, by: sortMode, manualOrder: syncOrder)
+    }
+
+    /// Forward sessions in the order the sort mode gives.
+    public var forwardSessions: [ForwardSession] {
+        SessionOrder.sorted(mutagenForwardSessions, by: sortMode, manualOrder: forwardOrder)
+    }
+
+    /// Moves sync sessions within `syncSessions`. Does nothing outside the manual sort mode.
+    public func moveSyncSessions(fromOffsets offsets: IndexSet, toOffset destination: Int) {
+        guard sortMode == .manual else { return }
+        syncOrder = SessionOrder.moving(
+            fromOffsets: offsets,
+            toOffset: destination,
+            keys: mutagenSyncSessions.map(\.orderKey),
+            manualOrder: syncOrder
+        )
+    }
+
+    /// Moves forward sessions within `forwardSessions`. Does nothing outside the manual sort mode.
+    public func moveForwardSessions(fromOffsets offsets: IndexSet, toOffset destination: Int) {
+        guard sortMode == .manual else { return }
+        forwardOrder = SessionOrder.moving(
+            fromOffsets: offsets,
+            toOffset: destination,
+            keys: mutagenForwardSessions.map(\.orderKey),
+            manualOrder: forwardOrder
+        )
     }
 
     public var totalSessionCount: Int {
@@ -117,10 +177,10 @@ public final class SessionStore {
         do {
             async let syncs = provider.syncList()
             async let forwards = provider.forwardList()
-            let newSyncs = preserveConflicts(old: syncSessions, new: try await syncs)
+            let newSyncs = preserveConflicts(old: mutagenSyncSessions, new: try await syncs)
             let newForwards = try await forwards
-            if syncDigest(newSyncs) != syncDigest(syncSessions) { syncSessions = newSyncs }
-            if forwardDigest(newForwards) != forwardDigest(forwardSessions) { forwardSessions = newForwards }
+            if syncDigest(newSyncs) != syncDigest(mutagenSyncSessions) { mutagenSyncSessions = newSyncs }
+            if forwardDigest(newForwards) != forwardDigest(mutagenForwardSessions) { mutagenForwardSessions = newForwards }
             if !daemonRunning { daemonRunning = true }
             if lastError != nil { lastError = nil }
         } catch {
@@ -135,8 +195,8 @@ public final class SessionStore {
         do {
             async let syncs = provider.syncList()
             async let forwards = provider.forwardList()
-            syncSessions = try await syncs
-            forwardSessions = try await forwards
+            mutagenSyncSessions = try await syncs
+            mutagenForwardSessions = try await forwards
             if !daemonRunning { daemonRunning = true }
             if lastError != nil { lastError = nil }
         } catch {
@@ -168,6 +228,7 @@ public final class SessionStore {
         alpha: String,
         beta: String
     ) async {
+        let keysBefore = mutagenSyncSessions.map(\.orderKey)
         do {
             try await provider.syncTerminate(session.identifier)
         } catch {
@@ -185,6 +246,11 @@ public final class SessionStore {
             // no longer resolves. Hand the replacement back to the list.
             if let recreated = syncSessions.first(where: { !identifiersBefore.contains($0.identifier) }) {
                 pendingSessionSelection = recreated.identifier
+                syncOrder = SessionOrder.replacing(
+                    session.orderKey,
+                    with: recreated.orderKey,
+                    in: SessionOrder.filledIn(syncOrder, with: keysBefore)
+                )
             }
         } catch {
             lastError = "Session terminated but recreation failed: \(error.localizedDescription). Use Create Session to recreate manually."
@@ -223,7 +289,11 @@ public final class SessionStore {
     }
 
     public func terminateSync(_ identifier: String) async {
-        await performAction { try await provider.syncTerminate(identifier) }
+        let key = syncSessions.first { $0.identifier == identifier }?.orderKey
+        guard await performAction({ try await provider.syncTerminate(identifier) }), let key else { return }
+        if !syncSessions.contains(where: { $0.identifier != identifier && $0.orderKey == key }) {
+            syncOrder.removeAll { $0 == key }
+        }
     }
 
     // MARK: - Forward Actions
@@ -237,7 +307,11 @@ public final class SessionStore {
     }
 
     public func terminateForward(_ identifier: String) async {
-        await performAction { try await provider.forwardTerminate(identifier) }
+        let key = forwardSessions.first { $0.identifier == identifier }?.orderKey
+        guard await performAction({ try await provider.forwardTerminate(identifier) }), let key else { return }
+        if !forwardSessions.contains(where: { $0.identifier != identifier && $0.orderKey == key }) {
+            forwardOrder.removeAll { $0 == key }
+        }
     }
 
     // MARK: - Daemon
@@ -257,8 +331,8 @@ public final class SessionStore {
         do {
             try await provider.daemonStop()
             daemonRunning = false
-            syncSessions = []
-            forwardSessions = []
+            mutagenSyncSessions = []
+            mutagenForwardSessions = []
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -701,13 +775,17 @@ public final class SessionStore {
         return hasher.finalize()
     }
 
-    private func performAction(_ action: @Sendable () async throws -> Void) async {
+    /// - Returns: whether the action succeeded.
+    @discardableResult
+    private func performAction(_ action: @Sendable () async throws -> Void) async -> Bool {
         do {
             try await action()
             lastError = nil
             await refresh()
+            return true
         } catch {
             lastError = error.localizedDescription
+            return false
         }
     }
 }

@@ -585,7 +585,9 @@ func makeSyncSession(
     status: String = "watching",
     paused: Bool = false,
     conflicts: [Conflict]? = nil,
-    ignorePaths: [String]? = nil
+    ignorePaths: [String]? = nil,
+    betaHost: String? = nil,
+    successfulCycles: Int = 0
 ) -> SyncSession {
     SyncSession(
         identifier: id,
@@ -596,14 +598,14 @@ func makeSyncSession(
         labels: nil,
         paused: paused,
         status: status,
-        successfulCycles: 0,
+        successfulCycles: successfulCycles,
         mode: "two-way-safe",
         alpha: Endpoint(
             protocol_: "local", user: nil, host: nil, port: nil, path: "/tmp/a",
             connected: true, scanned: true, directories: 0, files: 0, totalFileSize: 0
         ),
         beta: Endpoint(
-            protocol_: "local", user: nil, host: nil, port: nil, path: "/tmp/b",
+            protocol_: betaHost == nil ? "local" : "ssh", user: nil, host: betaHost, port: nil, path: "/tmp/b",
             connected: true, scanned: true, directories: 0, files: 0, totalFileSize: 0
         ),
         ignore: IgnoreConfig(paths: ignorePaths, syntax: nil),
@@ -1422,7 +1424,8 @@ func makeForwardSession(
     id: String,
     name: String?,
     paused: Bool = false,
-    connected: Bool = true
+    connected: Bool = true,
+    destinationHost: String? = "host"
 ) -> ForwardSession {
     ForwardSession(
         identifier: id,
@@ -1433,7 +1436,9 @@ func makeForwardSession(
         labels: nil,
         paused: paused,
         source: ForwardEndpoint(protocol_: "local", user: nil, host: nil, port: nil, connected: connected),
-        destination: ForwardEndpoint(protocol_: "ssh", user: "test", host: "host", port: nil, connected: connected),
+        destination: ForwardEndpoint(
+            protocol_: destinationHost == nil ? "local" : "ssh", user: "test", host: destinationHost, port: nil, connected: connected
+        ),
         sourceEndpoint: "tcp:localhost:8080",
         destinationEndpoint: "tcp:localhost:3000",
         socket: nil
