@@ -16,7 +16,7 @@ struct HelixApp: App {
     init() {
         let path = UserDefaults.standard.string(forKey: "cliPath") ?? Self.defaultCLIPath
         let cli = CLI(executablePath: path)
-        _store = State(initialValue: SessionStore(provider: cli))
+        _store = State(initialValue: SessionStore(provider: cli, defaults: .standard))
         updaterController = SPUStandardUpdaterController(
             startingUpdater: true,
             updaterDelegate: nil,

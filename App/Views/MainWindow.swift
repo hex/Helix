@@ -53,6 +53,19 @@ struct MainWindow: View {
                 }
                 .accessibilityLabel("Create Session")
 
+                Menu {
+                    Picker("Sort By", selection: Bindable(store).sortMode) {
+                        ForEach(SessionSortMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.inline)
+                } label: {
+                    Image(systemName: "arrow.up.arrow.down")
+                }
+                .help("Sort Sessions")
+                .accessibilityLabel("Sort Sessions")
+
                 Button {
                     Task { await store.manualRefresh() }
                 } label: {
@@ -184,6 +197,7 @@ struct MainWindow: View {
                                 selectedForwardSession = nil
                             }
                     }
+                    .onMove(perform: canReorder ? { store.moveSyncSessions(fromOffsets: $0, toOffset: $1) } : nil)
                 }
             }
 
@@ -196,6 +210,7 @@ struct MainWindow: View {
                                 selectedSyncSession = nil
                             }
                     }
+                    .onMove(perform: canReorder ? { store.moveForwardSessions(fromOffsets: $0, toOffset: $1) } : nil)
                 }
             }
         }
@@ -221,6 +236,13 @@ struct MainWindow: View {
     }
 
     // MARK: - Filtering
+
+    /// Dragging rewrites the manual order, so it needs every session of a kind in that order on screen.
+    private var canReorder: Bool {
+        store.sortMode == .manual
+            && searchText.isEmpty
+            && [SidebarFilter.all, .sync, .forward].contains(selectedFilter)
+    }
 
     private var filteredSyncSessions: [SyncSession] {
         var sessions = store.syncSessions
