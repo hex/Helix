@@ -12,6 +12,8 @@ struct SettingsView: View {
     @State private var pollingInterval: Double = 5.0
     @State private var launchAtLogin = false
     @AppStorage("cliPath") private var cliPath = HelixApp.defaultCLIPath
+    @AppStorage(MenuBarIconStyle.storageKey) private var iconStyle = MenuBarIconStyle.defaultStyle
+    @AppStorage(MenuBarIcon.showsPauseKey) private var showsPause = true
 
     var body: some View {
         TabView {
@@ -50,6 +52,27 @@ struct SettingsView: View {
                             launchAtLogin = !enabled
                         }
                     }
+            }
+
+            Section("Menu Bar") {
+                Picker("Icon style", selection: $iconStyle) {
+                    ForEach(MenuBarIconStyle.allCases) { style in
+                        Text(style.title).tag(style)
+                    }
+                }
+                Toggle(isOn: $showsPause) {
+                    Text("Show paused state")
+                    Text("When off, paused sessions look like everything is running normally.")
+                }
+                LabeledContent("Preview") {
+                    HStack(spacing: 8) {
+                        ForEach(HealthStatus.allCases.filter { showsPause || $0.ignoringPause == $0 }, id: \.self) { health in
+                            MenuBarIconImage(style: iconStyle, health: health)
+                                .help(health.title)
+                        }
+                    }
+                    .foregroundStyle(.primary)
+                }
             }
 
             Section("Daemon") {
@@ -162,5 +185,20 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+private extension HealthStatus {
+    var title: String {
+        switch self {
+        case .healthy: "All sessions watching"
+        case .active: "Syncing"
+        case .partiallyPaused: "Some sessions paused"
+        case .paused: "All sessions paused"
+        case .warning: "Conflicts or a halted session"
+        case .error: "A session lost its connection"
+        case .daemonStopped: "Daemon not running"
+        case .idle: "No sessions"
+        }
     }
 }
