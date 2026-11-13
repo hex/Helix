@@ -43,6 +43,14 @@ public enum HealthStatus: Sendable, CaseIterable {
     case error
     case daemonStopped
     case idle
+
+    /// This status with the paused states reported as healthy.
+    public var ignoringPause: HealthStatus {
+        switch self {
+        case .partiallyPaused, .paused: .healthy
+        default: self
+        }
+    }
 }
 
 public enum DaemonStatus: String, Sendable {
