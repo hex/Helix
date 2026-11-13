@@ -1898,7 +1898,8 @@ func makeSyncSession(
     ignorePaths: [String]? = nil,
     alpha: Endpoint = makeEndpoint(path: "/tmp/a"),
     beta: Endpoint = makeEndpoint(path: "/tmp/b"),
-    lastError: String? = nil
+    lastError: String? = nil,
+    successfulCycles: Int = 0
 ) -> SyncSession {
     SyncSession(
         identifier: id,
@@ -1909,7 +1910,7 @@ func makeSyncSession(
         labels: nil,
         paused: paused,
         status: status,
-        successfulCycles: 0,
+        successfulCycles: successfulCycles,
         mode: "two-way-safe",
         alpha: alpha,
         beta: beta,
@@ -3505,7 +3506,8 @@ func makeForwardSession(
     id: String,
     name: String?,
     paused: Bool = false,
-    connected: Bool = true
+    connected: Bool = true,
+    destinationHost: String? = "host"
 ) -> ForwardSession {
     ForwardSession(
         identifier: id,
@@ -3516,7 +3518,9 @@ func makeForwardSession(
         labels: nil,
         paused: paused,
         source: ForwardEndpoint(protocol_: "local", user: nil, host: nil, port: nil, connected: connected),
-        destination: ForwardEndpoint(protocol_: "ssh", user: "test", host: "host", port: nil, connected: connected),
+        destination: ForwardEndpoint(
+            protocol_: destinationHost == nil ? "local" : "ssh", user: "test", host: destinationHost, port: nil, connected: connected
+        ),
         sourceEndpoint: "tcp:localhost:8080",
         destinationEndpoint: "tcp:localhost:3000",
         socket: nil
