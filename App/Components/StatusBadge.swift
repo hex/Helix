@@ -2,6 +2,7 @@
 // ABOUTME: Maps mutagen status strings to semantic colors.
 
 import SwiftUI
+import HelixKit
 
 struct StatusBadge: View {
     let status: String
@@ -22,18 +23,18 @@ struct StatusBadge: View {
     var color: Color {
         if paused { return .secondary }
 
-        switch status {
-        case "watching":
+        switch SyncPhase(status: status) {
+        case .watching:
             return .green
-        case "scanning", "staging", "transitioning", "saving":
+        case .syncing:
             return .blue
-        case "halted":
+        case .stalled:
             return .orange
-        case "connecting":
+        case .connecting:
             return .yellow
-        case "disconnected":
+        case .disconnected:
             return .red
-        default:
+        case .unknown:
             return .secondary
         }
     }

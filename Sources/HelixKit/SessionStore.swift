@@ -22,12 +22,23 @@ public struct GitRepoCheck: Sendable, Equatable {
     }
 }
 
-public enum HealthStatus: Sendable {
+public enum HealthStatus: Sendable, CaseIterable {
     case healthy
     case active
+    case partiallyPaused
+    case paused
     case warning
     case error
+    case daemonStopped
     case idle
+
+    /// This status with the paused states reported as healthy.
+    public var ignoringPause: HealthStatus {
+        switch self {
+        case .partiallyPaused, .paused: .healthy
+        default: self
+        }
+    }
 }
 
 @MainActor
@@ -79,30 +90,35 @@ public final class SessionStore {
         syncSessions.reduce(0) { $0 + ($1.conflicts?.count ?? 0) }
     }
 
+    /// Health of the sessions that are not paused, or a paused state when the user paused some or all of them.
     public var overallHealth: HealthStatus {
         if !daemonRunning {
-            return .error
+            return .daemonStopped
         }
         if syncSessions.isEmpty && forwardSessions.isEmpty {
             return .idle
         }
-        let hasDisconnected = syncSessions.contains { $0.status == "disconnected" }
-            || forwardSessions.contains { $0.source.connected == false || $0.destination.connected == false }
+        let runningSyncs = syncSessions.filter { !$0.paused }
+        let runningForwards = forwardSessions.filter { !$0.paused }
+        if runningSyncs.isEmpty && runningForwards.isEmpty {
+            return .paused
+        }
+        let hasDisconnected = runningSyncs.contains { $0.phase == .disconnected || $0.phase == .connecting }
+            || runningForwards.contains { $0.source.connected == false || $0.destination.connected == false }
         if hasDisconnected {
             return .error
         }
-        let hasConflicts = totalConflictCount > 0
-        let hasHalted = syncSessions.contains { $0.status == "halted" }
-        if hasConflicts || hasHalted {
+        let hasConflicts = runningSyncs.contains { !($0.conflicts ?? []).isEmpty }
+        let hasStalled = runningSyncs.contains { $0.phase == .stalled }
+        if hasConflicts || hasStalled {
             return .warning
         }
-        let hasActive = syncSessions.contains {
-            ["scanning", "staging", "transitioning", "saving"].contains($0.status)
-        }
+        let hasActive = runningSyncs.contains { $0.phase == .syncing }
         if hasActive {
             return .active
         }
-        return .healthy
+        let hasPaused = runningSyncs.count < syncSessions.count || runningForwards.count < forwardSessions.count
+        return hasPaused ? .partiallyPaused : .healthy
     }
 
     public func refresh() async {

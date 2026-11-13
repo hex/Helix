@@ -127,40 +127,50 @@ struct MenuBarPopover: View {
 private struct SyncSessionRow: View {
     let session: SyncSession
     let store: SessionStore
+    @AppStorage(MenuBarPopover.compactListKey) private var compact = false
     @State private var isHovered = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: compact ? .center : .top, spacing: 8) {
             StatusBadge(status: session.status, paused: session.paused)
-                .padding(.top, 5)
+                .padding(.top, compact ? 0 : 5)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(session.name ?? String(session.identifier.prefix(12)))
                     .font(.body)
                     .lineLimit(1)
 
-                Text(endpointSummary)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                if !compact {
+                    Text(endpointSummary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
 
-                HStack(spacing: 8) {
-                    if let cycles = session.successfulCycles, cycles > 0 {
-                        Text("\(cycles) cycles")
+                    HStack(spacing: 8) {
+                        if let cycles = session.successfulCycles, cycles > 0 {
+                            Text("\(cycles) cycles")
+                        }
+                        if let conflicts = session.conflicts, !conflicts.isEmpty {
+                            Text("\(conflicts.count) conflicts")
+                                .foregroundStyle(.orange)
+                        }
                     }
-                    if let conflicts = session.conflicts, !conflicts.isEmpty {
-                        Text("\(conflicts.count) conflicts")
-                            .foregroundStyle(.orange)
-                    }
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
                 }
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
             }
 
             Spacer()
+
+            if compact, let conflicts = session.conflicts, !conflicts.isEmpty {
+                Text("\(conflicts.count) conflicts")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 6)
+        .padding(.vertical, compact ? 4 : 6)
+        .help(compact ? endpointSummary : "")
         .background(isHovered ? Color.primary.opacity(0.06) : Color.clear)
         .contentShape(Rectangle())
         .onHover { isHovered = $0 }
@@ -203,25 +213,28 @@ private struct SyncSessionRow: View {
 private struct ForwardSessionRow: View {
     let session: ForwardSession
     let store: SessionStore
+    @AppStorage(MenuBarPopover.compactListKey) private var compact = false
     @State private var isHovered = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: compact ? .center : .top, spacing: 8) {
             StatusBadge(
                 status: session.source.connected == true ? "watching" : "disconnected",
                 paused: session.paused
             )
-            .padding(.top, 5)
+            .padding(.top, compact ? 0 : 5)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(session.name ?? String(session.identifier.prefix(12)))
                     .font(.body)
                     .lineLimit(1)
 
-                Text(endpointSummary)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                if !compact {
+                    Text(endpointSummary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             }
 
             Spacer()
@@ -231,7 +244,8 @@ private struct ForwardSessionRow: View {
                 .foregroundStyle(.tertiary)
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 6)
+        .padding(.vertical, compact ? 4 : 6)
+        .help(compact ? endpointSummary : "")
         .background(isHovered ? Color.primary.opacity(0.06) : Color.clear)
         .contentShape(Rectangle())
         .onHover { isHovered = $0 }
@@ -253,4 +267,8 @@ private struct ForwardSessionRow: View {
         let dst = session.destinationEndpoint ?? "destination"
         return "\(src) -> \(dst)"
     }
+}
+
+extension MenuBarPopover {
+    static let compactListKey = "menuBarCompactList"
 }
