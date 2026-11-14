@@ -166,7 +166,7 @@ struct MainWindow: View {
     // MARK: - Session List
 
     private var sessionList: some View {
-        List {
+        List(selection: selectedSessionID) {
             if filteredSyncSessions.isEmpty && filteredForwardSessions.isEmpty {
                 ContentUnavailableView(
                     "No Sessions",
@@ -179,10 +179,6 @@ struct MainWindow: View {
                 Section("Sync Sessions") {
                     ForEach(filteredSyncSessions) { session in
                         SyncListRow(session: session, store: store, isSelected: selectedSyncSession?.id == session.id)
-                            .onTapGesture {
-                                selectedSyncSession = session
-                                selectedForwardSession = nil
-                            }
                     }
                 }
             }
@@ -191,16 +187,23 @@ struct MainWindow: View {
                 Section("Forward Sessions") {
                     ForEach(filteredForwardSessions) { session in
                         ForwardListRow(session: session, isSelected: selectedForwardSession?.id == session.id)
-                            .onTapGesture {
-                                selectedForwardSession = session
-                                selectedSyncSession = nil
-                            }
                     }
                 }
             }
         }
         .searchable(text: $searchText, prompt: "Search sessions")
         .navigationSplitViewColumnWidth(min: 250, ideal: 300)
+    }
+
+    private var selectedSessionID: Binding<String?> {
+        Binding {
+            selectedSyncSession?.identifier ?? selectedForwardSession?.identifier
+        } set: { id in
+            selectedSyncSession = store.syncSessions.first { $0.identifier == id }
+            selectedForwardSession = selectedSyncSession == nil
+                ? store.forwardSessions.first { $0.identifier == id }
+                : nil
+        }
     }
 
     // MARK: - Detail
@@ -317,6 +320,7 @@ private struct SyncListRow: View {
     let session: SyncSession
     let store: SessionStore
     let isSelected: Bool
+    @Environment(\.backgroundProminence) private var backgroundProminence
     @State private var gitCheck: GitRepoCheck = GitRepoCheck(status: .unknown)
     @AppStorage("dismissedGitMismatches") private var dismissedJSON = "[]"
 
@@ -327,6 +331,8 @@ private struct SyncListRow: View {
         return !dismissed.contains(session.identifier)
     }
 
+    private var isHighlighted: Bool { backgroundProminence == .increased }
+
     var body: some View {
         HStack(spacing: 8) {
             StatusBadge(status: session.status, paused: session.paused)
@@ -336,12 +342,12 @@ private struct SyncListRow: View {
                     .fontWeight(isSelected ? .semibold : .regular)
                 HStack(spacing: 4) {
                     Text(session.alpha.protocol_)
-                        .foregroundStyle(isSelected ? .white.opacity(0.7) : .blue)
+                        .foregroundStyle(isHighlighted ? .white.opacity(0.7) : .blue)
                     Image(systemName: (session.mode ?? "two-way-safe").hasPrefix("one-way") ? "arrow.right" : "arrow.left.arrow.right")
                         .font(.caption2)
-                        .foregroundStyle(isSelected ? .white.opacity(0.5) : .secondary)
+                        .foregroundStyle(isHighlighted ? .white.opacity(0.5) : .secondary)
                     Text(session.beta.protocol_)
-                        .foregroundStyle(isSelected ? .white.opacity(0.7) : .purple)
+                        .foregroundStyle(isHighlighted ? .white.opacity(0.7) : .purple)
                 }
                 .font(.caption)
 
@@ -352,8 +358,8 @@ private struct SyncListRow: View {
                                 .font(.caption2)
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 1)
-                                .background(isSelected ? .white.opacity(0.2) : .blue.opacity(0.1))
-                                .foregroundStyle(isSelected ? .white.opacity(0.9) : .blue)
+                                .background(isHighlighted ? .white.opacity(0.2) : .blue.opacity(0.1))
+                                .foregroundStyle(isHighlighted ? .white.opacity(0.9) : .blue)
                                 .clipShape(Capsule())
                         }
                     }
@@ -365,7 +371,7 @@ private struct SyncListRow: View {
             if hasVisibleMismatch {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.caption2)
-                    .foregroundStyle(isSelected ? .white.opacity(0.7) : .orange)
+                    .foregroundStyle(isHighlighted ? .white.opacity(0.7) : .orange)
                     .help("Git repository mismatch")
             }
 
@@ -379,13 +385,7 @@ private struct SyncListRow: View {
                     .clipShape(Capsule())
             }
         }
-        .foregroundStyle(isSelected ? .white : .primary)
         .contentShape(Rectangle())
-        .listRowBackground(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(isSelected ? Color.accentColor : Color.clear)
-                .padding(.horizontal, 4)
-        )
         .task(id: "\(session.identifier):\(store.refreshCount)") {
             gitCheck = await store.gitRepoStatus(for: session)
         }
@@ -395,6 +395,9 @@ private struct SyncListRow: View {
 private struct ForwardListRow: View {
     let session: ForwardSession
     let isSelected: Bool
+    @Environment(\.backgroundProminence) private var backgroundProminence
+
+    private var isHighlighted: Bool { backgroundProminence == .increased }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -408,7 +411,7 @@ private struct ForwardListRow: View {
                     .fontWeight(isSelected ? .semibold : .regular)
                 Text("\(session.sourceEndpoint ?? "?") -> \(session.destinationEndpoint ?? "?")")
                     .font(.caption)
-                    .foregroundStyle(isSelected ? .white.opacity(0.7) : .secondary)
+                    .foregroundStyle(isHighlighted ? .white.opacity(0.7) : .secondary)
 
                 if let labels = session.labels, !labels.isEmpty {
                     HStack(spacing: 4) {
@@ -417,8 +420,8 @@ private struct ForwardListRow: View {
                                 .font(.caption2)
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 1)
-                                .background(isSelected ? .white.opacity(0.2) : .blue.opacity(0.1))
-                                .foregroundStyle(isSelected ? .white.opacity(0.9) : .blue)
+                                .background(isHighlighted ? .white.opacity(0.2) : .blue.opacity(0.1))
+                                .foregroundStyle(isHighlighted ? .white.opacity(0.9) : .blue)
                                 .clipShape(Capsule())
                         }
                     }
@@ -429,15 +432,9 @@ private struct ForwardListRow: View {
 
             Image(systemName: "network")
                 .font(.caption)
-                .foregroundStyle(isSelected ? Color.white.opacity(0.5) : Color.secondary)
+                .foregroundStyle(isHighlighted ? Color.white.opacity(0.5) : Color.secondary)
         }
-        .foregroundStyle(isSelected ? .white : .primary)
         .contentShape(Rectangle())
-        .listRowBackground(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(isSelected ? Color.accentColor : Color.clear)
-                .padding(.horizontal, 4)
-        )
     }
 }
 
