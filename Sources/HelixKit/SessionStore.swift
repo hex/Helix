@@ -310,19 +310,20 @@ public final class SessionStore {
         defer { bulkPauseInFlight = false }
         guard await reloadSessions() else { return }
 
-        var paused: [String] = []
+        var paused = bulkPause?.sessionIdentifiers ?? []
+        let existingRecord = paused.isEmpty ? nil : BulkPause(sessionIdentifiers: paused, resumeAt: resumeAt)
+        if bulkPause != existingRecord { bulkPause = existingRecord }
+
         var failures: [String] = []
         for session in syncSessions where !session.paused {
             do {
                 try await provider.syncPause(session.identifier)
-                paused.append(session.identifier)
+                if !paused.contains(session.identifier) { paused.append(session.identifier) }
+                bulkPause = BulkPause(sessionIdentifiers: paused, resumeAt: resumeAt)
             } catch {
                 failures.append("Could not pause \(session.name ?? session.identifier): \(error.localizedDescription)")
             }
         }
-        let pausedEarlier = bulkPause?.sessionIdentifiers ?? []
-        let allPaused = pausedEarlier + paused.filter { !pausedEarlier.contains($0) }
-        bulkPause = allPaused.isEmpty ? nil : BulkPause(sessionIdentifiers: allPaused, resumeAt: resumeAt)
         await finishBulkAction(failures: failures)
     }
 

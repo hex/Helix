@@ -551,6 +551,40 @@ struct BulkPauseTests {
         #expect(nextLaunch.bulkPause == nil)
     }
 
+    @Test("A completed pause can be resumed after relaunch while the batch is still in progress")
+    @MainActor
+    func bulkPausePersistsBetweenRequests() async throws {
+        defer { removeDefaults() }
+        let gate = Gate()
+        let first = makeSyncSession(id: "sync_1", name: "one")
+        let alreadyPaused = makeSyncSession(id: "sync_2", name: "two", paused: true)
+        let last = makeSyncSession(id: "sync_3", name: "three")
+        let provider = RecordingProvider(
+            syncSessions: [first, alreadyPaused, last], failOn: "syncPause:sync_3"
+        ) { identifier in
+            if identifier == "sync_3" { await gate.pass() }
+        }
+        let firstPaused = makeSyncSession(id: "sync_1", name: "one", paused: true)
+        let recovery = RecordingProvider(syncSessions: [firstPaused, alreadyPaused, last])
+        let recoveryDefaults = try #require(UserDefaults(suiteName: suiteName))
+        let deadline = Date(timeIntervalSince1970: 1_800_001_800)
+        let expected = BulkPause(sessionIdentifiers: ["sync_1"], resumeAt: deadline)
+        let store = SessionStore(provider: provider, defaults: defaults)
+        let pausing = Task { await store.pauseAllSync(until: deadline) }
+
+        await gate.reached()
+        let relaunched = SessionStore(provider: recovery, defaults: recoveryDefaults, now: { deadline })
+        let savedWhileWaiting = relaunched.bulkPause
+        await gate.open()
+        await pausing.value
+
+        #expect(savedWhileWaiting == expected)
+        #expect(store.bulkPause == expected)
+        #expect(store.lastError == "Could not pause three: simulated failure")
+        await relaunched.refresh()
+        #expect(recovery.calls == ["syncResume:sync_1"])
+    }
+
     /// A store whose session "sync_2" is held after an unverified replacement, with Pause All
     /// recorded for "sync_1", "sync_2" and "sync_3" until `resumeAt`.
     @MainActor
@@ -835,17 +869,20 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
     private var _flushed = false
     private var _created = false
     private let failOn: String?
+    private let beforeSyncPause: (@Sendable (String) async -> Void)?
 
     init(
         syncSessions: [SyncSession] = [],
         resolvedSyncSessions: [SyncSession]? = nil,
         sessionsAfterCreate: [SyncSession]? = nil,
-        failOn: String? = nil
+        failOn: String? = nil,
+        beforeSyncPause: (@Sendable (String) async -> Void)? = nil
     ) {
         self.syncSessions = syncSessions
         self.resolvedSyncSessions = resolvedSyncSessions
         self.sessionsAfterCreate = sessionsAfterCreate
         self.failOn = failOn
+        self.beforeSyncPause = beforeSyncPause
     }
 
     var calls: [String] {
@@ -887,7 +924,10 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
         lock.unlock()
     }
     func forwardCreate(arguments: [String]) async throws {}
-    func syncPause(_ identifier: String) async throws { try record("syncPause:\(identifier)") }
+    func syncPause(_ identifier: String) async throws {
+        await beforeSyncPause?(identifier)
+        try record("syncPause:\(identifier)")
+    }
     func syncResume(_ identifier: String) async throws { try record("syncResume:\(identifier)") }
     func syncFlush(_ identifier: String) async throws {
         try record("syncFlush:\(identifier)")
