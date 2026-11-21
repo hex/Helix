@@ -159,6 +159,28 @@ struct SyncDetailView: View {
                     .padding(.top, 2)
             }
 
+            if let hold = store.sessionHolds[session.identifier] {
+                Text(hold)
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+                    .padding(.top, 2)
+            }
+
+            if let notice = store.leftoverNotices[session.identifier] {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(notice)
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                        .textSelection(.enabled)
+                    Button("Dismiss") {
+                        store.dismissLeftoverNotice(for: session.identifier)
+                    }
+                    .controlSize(.small)
+                }
+                .padding(.top, 2)
+            }
+
             if let progress = session.transferProgress {
                 transferSection(progress)
             }
@@ -187,13 +209,21 @@ struct SyncDetailView: View {
                 }
             }
 
-            if let error = store.lastError {
+            if let error = errorNotShownAbove {
                 Text(error)
                     .font(.callout)
                     .foregroundStyle(.red)
                     .padding(.top, 2)
             }
         }
+    }
+
+    /// The store's last error, unless it repeats this session's hold or leftover notice shown above.
+    private var errorNotShownAbove: String? {
+        guard let error = store.lastError else { return nil }
+        if store.sessionHolds[session.identifier] == error { return nil }
+        if let notice = store.leftoverNotices[session.identifier], notice.hasSuffix(error) { return nil }
+        return error
     }
 
     private var actionButtons: some View {
@@ -514,7 +544,8 @@ struct SyncDetailView: View {
                             conflict: conflict,
                             session: session,
                             store: store,
-                            onResolveStarted: { markResolving(conflict.root) }
+                            onResolveStarted: { markResolving(conflict.root) },
+                            onResolveEnded: showAgain
                         )
                         .transition(.opacity.combined(with: .scale(scale: 0.95)))
                     }
@@ -566,14 +597,22 @@ struct SyncDetailView: View {
         }
         isBulkResolving = true
         Task {
-            await store.resolveConflicts(session: session, conflicts: conflicts, winner: winner)
+            let unresolved = await store.resolveConflicts(session: session, conflicts: conflicts, winner: winner)
             isBulkResolving = false
+            showAgain(unresolved)
         }
     }
 
     private func markResolving(_ root: String) {
         withAnimation {
             resolvingRoots.insert(root)
+        }
+    }
+
+    /// Brings back the rows of conflicts whose resolve ended without resolving them.
+    private func showAgain(_ unresolvedRoots: Set<String>) {
+        withAnimation {
+            resolvingRoots.subtract(unresolvedRoots)
         }
     }
 
@@ -746,6 +785,8 @@ private struct ConflictCard: View {
     let session: SyncSession
     let store: SessionStore
     var onResolveStarted: (() -> Void)?
+    /// Called with the roots the resolve left unresolved.
+    var onResolveEnded: ((Set<String>) -> Void)?
     @Environment(\.openWindow) private var openWindow
     @State private var isResolving = false
     @State private var alphaInfo: FileInfo?
@@ -884,8 +925,9 @@ private struct ConflictCard: View {
                 onResolveStarted?()
                 Task {
                     isResolving = true
-                    await store.resolveConflict(session: session, conflict: conflict, winner: winner)
+                    let unresolved = await store.resolveConflict(session: session, conflict: conflict, winner: winner)
                     isResolving = false
+                    onResolveEnded?(unresolved)
                 }
             }
             Button("Cancel", role: .cancel) {
