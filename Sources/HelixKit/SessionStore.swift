@@ -322,8 +322,8 @@ public final class SessionStore {
         await finishBulkAction(failures: failures)
     }
 
-    /// Resumes the sessions Pause All paused that are still paused, except held ones. A session that
-    /// fails to resume stays in the record so the next attempt retries it.
+    /// Resumes the sessions Pause All paused that are still paused, except held ones and ones a conflict
+    /// resolve is working on. A session that fails to resume stays in the record so the next attempt retries it.
     public func resumeBulkPause() async {
         guard let record = bulkPause, !bulkPauseInFlight else { return }
         bulkPauseInFlight = true
@@ -333,6 +333,9 @@ public final class SessionStore {
         var unresumed: [String] = []
         var failures: [String] = []
         for session in syncSessions where session.paused && record.sessionIdentifiers.contains(session.identifier) {
+            // A session whose conflict resolve is still moving files leaves the record without being
+            // resumed: the resolve resumes it when it ends, or holds it.
+            if lastResolve[session.identifier] != nil { continue }
             do {
                 // A held session leaves the record without being resumed: its hold keeps it paused from here on.
                 switch try await resumeUnlessHeld(session.identifier) {

@@ -589,6 +589,38 @@ struct BulkPauseTests {
         #expect(store.sessionHolds.keys.sorted() == ["sync_2"])
     }
 
+    @Test("Resume after Pause All leaves a session to its running conflict resolve, which resumes it when it ends")
+    @MainActor
+    func resumeLeavesSessionToRunningResolve() async {
+        defer { removeDefaults() }
+        let conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
+        let gate = Gate()
+        let transport = FileTransport { _, _ in
+            await gate.pass()
+            return ""
+        }
+        let store = SessionStore(
+            provider: RecordingProvider(syncSessions: [makeSyncSession(id: "sync_1", name: "one", conflicts: [conflict])]),
+            fileTransport: transport,
+            defaults: defaults
+        )
+        await store.pauseAllSync()
+        let paused = makeSyncSession(id: "sync_1", name: "one", paused: true, conflicts: [conflict])
+        let provider = MainActorRecordingProvider(syncSessions: [paused])
+        store.replaceProvider(provider)
+
+        let resolve = Task { await store.resolveConflict(session: paused, conflict: conflict, winner: .alpha) }
+        await gate.reached()
+        await store.resumeBulkPause()
+        let callsWhileResolveIsMidway = provider.calls
+        await gate.open()
+        await resolve.value
+
+        #expect(callsWhileResolveIsMidway == ["syncPause:sync_1"])
+        #expect(provider.calls == ["syncPause:sync_1", "syncResume:sync_1", "syncFlush:sync_1"])
+        #expect(store.bulkPause == nil)
+    }
+
     @Test("Pause All during an active bulk pause keeps the first sessions and takes the newer deadline")
     @MainActor
     func secondPauseAllKeepsFirstSessions() async {
