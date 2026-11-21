@@ -20,28 +20,35 @@ public enum ConflictWinner: Sendable {
 }
 
 public struct FileTransport: Sendable {
-    let execute: @Sendable (String, [String]) async throws -> String
+    let runCommand: @Sendable (String, [String]) async throws -> String
 
     public init() {
-        self.execute = { executable, arguments in
-            let cmd = "\(executable) \(arguments.joined(separator: " "))"
-            await MainActor.run { ConsoleLog.shared.log(cmd, level: .command) }
-            do {
-                let result = try await runProcess(executablePath: executable, arguments: arguments)
-                await MainActor.run { ConsoleLog.shared.log(String(result.prefix(200))) }
-                return result
-            } catch let error as CLIError where error.exitCode == 1 {
-                await MainActor.run { ConsoleLog.shared.log("(exit 1)", level: .info) }
-                throw error
-            } catch {
-                await MainActor.run { ConsoleLog.shared.log("FAILED: \(error)", level: .error) }
-                throw error
-            }
+        self.runCommand = { executable, arguments in
+            try await runProcess(executablePath: executable, arguments: arguments)
         }
     }
 
     public init(execute: @escaping @Sendable (String, [String]) async throws -> String) {
-        self.execute = execute
+        self.runCommand = execute
+    }
+
+    /// Runs a command and logs it and its outcome to the console.
+    /// - Parameter exitOneAnswer: what exit status 1 means for a command that answers a yes-or-no
+    ///   question, logged in place of "(exit 1)".
+    private func execute(_ executable: String, _ arguments: [String], exitOneAnswer: String? = nil) async throws -> String {
+        let cmd = "\(executable) \(arguments.joined(separator: " "))"
+        await MainActor.run { ConsoleLog.shared.log(cmd, level: .command) }
+        do {
+            let result = try await runCommand(executable, arguments)
+            await MainActor.run { ConsoleLog.shared.log(String(result.prefix(200))) }
+            return result
+        } catch let error as CLIError where error.exitCode == 1 {
+            await MainActor.run { ConsoleLog.shared.log(exitOneAnswer ?? "(exit 1)", level: .info) }
+            throw error
+        } catch {
+            await MainActor.run { ConsoleLog.shared.log("FAILED: \(error)", level: .error) }
+            throw error
+        }
     }
 
     // MARK: - Copy
@@ -136,18 +143,20 @@ public struct FileTransport: Sendable {
 
     // MARK: - Directory Exists
 
+    private static let noSuchDirectory = "no such directory"
+
     public func directoryExists(endpoint: EndpointURL) async throws -> Bool {
         do {
             switch endpoint {
             case .local(let path):
-                _ = try await execute("/bin/test", ["-d", path])
+                _ = try await execute("/bin/test", ["-d", path], exitOneAnswer: Self.noSuchDirectory)
             case .ssh(let user, let host, let port, let path):
                 var args: [String] = []
                 if let port { args += ["-p", "\(port)"] }
                 args += [sshTarget(user: user, host: host), "test -d \(shellQuoted(path))"]
-                _ = try await execute("/usr/bin/ssh", args)
+                _ = try await execute("/usr/bin/ssh", args, exitOneAnswer: Self.noSuchDirectory)
             case .docker(let container, let path):
-                _ = try await execute("/usr/bin/docker", ["exec", container, "test", "-d", path])
+                _ = try await execute("/usr/bin/docker", ["exec", container, "test", "-d", path], exitOneAnswer: Self.noSuchDirectory)
             }
             return true
         } catch let error as CLIError where error.exitCode == 1 {

@@ -756,11 +756,12 @@ func makeEndpoint(
     path: String,
     files: Int = 0,
     totalFileSize: Int = 0,
-    stagingProgress: StagingProgress? = nil
+    stagingProgress: StagingProgress? = nil,
+    connected: Bool? = true
 ) -> Endpoint {
     Endpoint(
         protocol_: "local", user: nil, host: nil, port: nil, path: path,
-        connected: true, scanned: true, directories: 0, files: files, totalFileSize: totalFileSize,
+        connected: connected, scanned: true, directories: 0, files: files, totalFileSize: totalFileSize,
         stagingProgress: stagingProgress
     )
 }
@@ -1200,6 +1201,22 @@ struct GitRepoStatusTests {
 
         #expect(check.status == .betaOnly)
         #expect(check.subpath.isEmpty)
+    }
+
+    @Test("An endpoint mutagen reports as not connected gets no probe")
+    @MainActor
+    func disconnectedEndpointNotProbed() async {
+        let session = makeSyncSession(
+            id: "sync_1", name: "test", status: "connecting-beta",
+            beta: makeEndpoint(path: "/tmp/b", connected: false)
+        )
+        let recorder = CommandRecorder()
+        let store = SessionStore(provider: FakeProvider(), fileTransport: FileTransport(execute: recorder.execute))
+
+        let check = await store.gitRepoStatus(for: session)
+
+        #expect(recorder.commands.count == 0)
+        #expect(check.status == .unknown)
     }
 
     @Test("Transport error returns unknown")

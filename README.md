@@ -30,7 +30,7 @@
 - **Diff viewer** -- Line and word-level diffs of conflicting files, backed by a Rust engine
 - **Symlink awareness** -- Shows what each side of a symlink conflict points at, and replaces a symlink with a directory where that is the only resolution
 - **Endpoint support** -- Local paths, SSH remotes, and Docker containers with transport-aware file operations
-- **Git mismatch detection** -- Detects when a git repo exists on one sync endpoint but not the other, with automatic fix to initialize the missing side
+- **Git mismatch detection** -- Detects when a git repo exists on one sync endpoint but not the other, with automatic fix to initialize the missing side; checks only while mutagen reports both endpoints connected
 - **Console log** -- Dark-themed (Tokyo Night) panel with timestamped, color-coded CLI output and full multi-line text selection
 - **Keyboard shortcuts** -- `Cmd+N` new sync, `Cmd+Shift+N` new forward, `Cmd+R` refresh
 - **CLI preview** -- Every create/edit form shows the exact `mutagen` command before you run it, with a copy button

@@ -65,7 +65,7 @@ struct SyncDetailView: View {
         .sheet(isPresented: $showEditSheet) {
             EditSyncConfigView(session: session, store: store)
         }
-        .task(id: "\(session.identifier):\(store.refreshCount)") {
+        .task(id: "\(session.identifier):\(store.refreshCount):\(session.alpha.connected == true):\(session.beta.connected == true)") {
             gitCheck = await store.gitRepoStatus(for: session)
             if gitCheck.status == .alphaOnly || gitCheck.status == .betaOnly {
                 let info = await store.gitSourceInfo(for: session, gitCheck: gitCheck)
