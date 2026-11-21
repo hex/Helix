@@ -14,11 +14,12 @@ public struct Endpoint: Codable, Hashable, Sendable {
     public let directories: Int?
     public let files: Int?
     public let totalFileSize: Int?
+    public var stagingProgress: StagingProgress? = nil
 
     enum CodingKeys: String, CodingKey {
         case protocol_ = "protocol"
         case user, host, port, path
-        case connected, scanned, directories, files, totalFileSize
+        case connected, scanned, directories, files, totalFileSize, stagingProgress
     }
 
     public var shortLabel: String {

@@ -55,6 +55,50 @@ struct SyncSessionTests {
         #expect(session.creationTime == "2026-02-04T14:41:09.472233Z")
     }
 
+    @Test("Parses staging progress on the endpoint being staged")
+    func stagingProgress() throws {
+        let data = try loadFixture("sync-list-staging.json")
+        let session = try decoder.decode([SyncSession].self, from: data).first!
+
+        #expect(session.status == "staging-beta")
+        #expect(session.alpha.stagingProgress == nil)
+        #expect(session.beta.stagingProgress == StagingProgress(
+            path: "project/data.bin",
+            receivedSize: 2557935616,
+            expectedSize: 15285403017,
+            receivedFiles: 58796,
+            expectedFiles: 159582,
+            totalReceivedSize: 16435630359
+        ))
+    }
+
+    @Test("Parses staging progress whose zero-valued fields mutagen omits")
+    func stagingProgressOmittedFields() throws {
+        let json = """
+        [{"identifier":"sync_test","version":1,"creationTime":"2026-01-01T00:00:00Z",
+          "creatingVersion":"0.18.1","alpha":{"protocol":"local","path":"/tmp/a",
+          "ignore":{},"symlink":{},"watch":{},"permissions":{},"compression":{},
+          "connected":true,"scanned":true,"directories":2,"files":9,"totalFileSize":8192},
+          "beta":{"protocol":"local","path":"/tmp/b",
+          "ignore":{},"symlink":{},"watch":{},"permissions":{},"compression":{},
+          "connected":true,"scanned":true,
+          "stagingProgress":{"path":"project/data.bin","expectedSize":2048,
+            "receivedFiles":3,"expectedFiles":9,"totalReceivedSize":4096}},
+          "mode":"two-way-safe","ignore":{},"symlink":{},"watch":{},
+          "permissions":{},"compression":{},
+          "paused":false,"status":"staging-beta"}]
+        """
+        let sessions = try decoder.decode([SyncSession].self, from: json.data(using: .utf8)!)
+        #expect(sessions[0].beta.stagingProgress == StagingProgress(
+            path: "project/data.bin",
+            receivedSize: nil,
+            expectedSize: 2048,
+            receivedFiles: 3,
+            expectedFiles: 9,
+            totalReceivedSize: 4096
+        ))
+    }
+
     @Test("Parses alpha endpoint with SSH protocol")
     func alphaEndpoint() throws {
         let data = try loadFixture("sync-list.json")
@@ -330,5 +374,59 @@ struct EdgeCaseTests {
         let sessions = try decoder.decode([SyncSession].self, from: json.data(using: .utf8)!)
         #expect(sessions[0].ignore.paths == nil)
         #expect(sessions[0].symlink.mode == nil)
+    }
+}
+
+@Suite("Transfer progress")
+struct TransferProgressTests {
+
+    @Test("Counts files when the staged set differs from the source tree")
+    func fileCountFraction() {
+        let session = makeSyncSession(
+            id: "sync_1", name: "staging", status: "staging-beta",
+            alpha: makeEndpoint(path: "/tmp/a", files: 10, totalFileSize: 1000),
+            beta: makeEndpoint(path: "/tmp/b", stagingProgress: StagingProgress(
+                path: "project/data.bin", receivedSize: 64, expectedSize: 256,
+                receivedFiles: 1, expectedFiles: 4, totalReceivedSize: 500
+            ))
+        )
+
+        #expect(session.transferProgress == TransferProgress(
+            receivedFiles: 1, expectedFiles: 4,
+            receivedBytes: 500, expectedBytes: nil, fraction: 0.25,
+            currentPath: "project/data.bin", currentReceivedBytes: 64, currentExpectedBytes: 256
+        ))
+    }
+
+    @Test("Counts bytes when the staged set is the whole source tree")
+    func byteFraction() {
+        let session = makeSyncSession(
+            id: "sync_1", name: "staging", status: "staging-alpha",
+            alpha: makeEndpoint(path: "/tmp/a", stagingProgress: StagingProgress(
+                path: nil, receivedSize: nil, expectedSize: nil,
+                receivedFiles: 1, expectedFiles: 4, totalReceivedSize: 750
+            )),
+            beta: makeEndpoint(path: "/tmp/b", files: 4, totalFileSize: 1000)
+        )
+
+        #expect(session.transferProgress == TransferProgress(
+            receivedFiles: 1, expectedFiles: 4,
+            receivedBytes: 750, expectedBytes: 1000, fraction: 0.75,
+            currentPath: nil, currentReceivedBytes: 0, currentExpectedBytes: nil
+        ))
+    }
+
+    @Test("Reports no progress outside a staging status")
+    func noProgressWhileWatching() {
+        let session = makeSyncSession(
+            id: "sync_1", name: "idle", status: "watching",
+            alpha: makeEndpoint(path: "/tmp/a", files: 4, totalFileSize: 1000),
+            beta: makeEndpoint(path: "/tmp/b", stagingProgress: StagingProgress(
+                path: "project/data.bin", receivedSize: 64, expectedSize: 256,
+                receivedFiles: 1, expectedFiles: 4, totalReceivedSize: 500
+            ))
+        )
+
+        #expect(session.transferProgress == nil)
     }
 }

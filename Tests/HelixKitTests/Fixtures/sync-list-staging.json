@@ -1,0 +1,73 @@
+[
+  {
+    "identifier": "sync_StagingFixture00000000000000000000000000000",
+    "version": 1,
+    "creationTime": "2026-01-01T00:00:00.000000Z",
+    "creatingVersion": "0.18.1",
+    "alpha": {
+      "protocol": "local",
+      "path": "/Users/alice/project",
+      "ignore": {},
+      "symlink": {},
+      "watch": {},
+      "permissions": {},
+      "compression": {},
+      "connected": true,
+      "scanned": true,
+      "directories": 21338,
+      "files": 207470,
+      "symbolicLinks": 17,
+      "totalFileSize": 83953809136
+    },
+    "beta": {
+      "protocol": "ssh",
+      "user": "alice",
+      "host": "example.local",
+      "path": "~/project",
+      "ignore": {},
+      "symlink": {},
+      "watch": {},
+      "permissions": {},
+      "compression": {},
+      "connected": true,
+      "scanned": true,
+      "stagingProgress": {
+        "path": "project/data.bin",
+        "receivedSize": 2557935616,
+        "expectedSize": 15285403017,
+        "receivedFiles": 58796,
+        "expectedFiles": 159582,
+        "totalReceivedSize": 16435630359
+      }
+    },
+    "mode": "one-way-safe",
+    "ignore": {
+      "paths": [
+        "node_modules/",
+        "target/",
+        ".venv/",
+        "venv/",
+        "Library/",
+        ".build/",
+        ".gradle/",
+        "DerivedData/",
+        "__pycache__/",
+        ".DS_Store",
+        ".cs/",
+        "/*.git/"
+      ]
+    },
+    "symlink": {
+      "mode": "posix-raw"
+    },
+    "watch": {},
+    "permissions": {},
+    "compression": {},
+    "name": "staging-example",
+    "labels": {
+      "role": "mirror"
+    },
+    "paused": false,
+    "status": "staging-beta"
+  }
+]

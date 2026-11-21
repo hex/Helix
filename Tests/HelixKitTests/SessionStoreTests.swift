@@ -493,7 +493,9 @@ func makeSyncSession(
     status: String = "watching",
     paused: Bool = false,
     conflicts: [Conflict]? = nil,
-    ignorePaths: [String]? = nil
+    ignorePaths: [String]? = nil,
+    alpha: Endpoint = makeEndpoint(path: "/tmp/a"),
+    beta: Endpoint = makeEndpoint(path: "/tmp/b")
 ) -> SyncSession {
     SyncSession(
         identifier: id,
@@ -506,20 +508,27 @@ func makeSyncSession(
         status: status,
         successfulCycles: 0,
         mode: "two-way-safe",
-        alpha: Endpoint(
-            protocol_: "local", user: nil, host: nil, port: nil, path: "/tmp/a",
-            connected: true, scanned: true, directories: 0, files: 0, totalFileSize: 0
-        ),
-        beta: Endpoint(
-            protocol_: "local", user: nil, host: nil, port: nil, path: "/tmp/b",
-            connected: true, scanned: true, directories: 0, files: 0, totalFileSize: 0
-        ),
+        alpha: alpha,
+        beta: beta,
         ignore: IgnoreConfig(paths: ignorePaths, syntax: nil),
         symlink: SymlinkConfig(mode: nil),
         watch: WatchConfig(mode: nil, pollingInterval: nil),
         permissions: PermissionsConfig(mode: nil, defaultFileMode: nil, defaultDirectoryMode: nil, defaultOwner: nil, defaultGroup: nil),
         compression: CompressionConfig(algorithm: nil),
         conflicts: conflicts
+    )
+}
+
+func makeEndpoint(
+    path: String,
+    files: Int = 0,
+    totalFileSize: Int = 0,
+    stagingProgress: StagingProgress? = nil
+) -> Endpoint {
+    Endpoint(
+        protocol_: "local", user: nil, host: nil, port: nil, path: path,
+        connected: true, scanned: true, directories: 0, files: files, totalFileSize: totalFileSize,
+        stagingProgress: stagingProgress
     )
 }
 

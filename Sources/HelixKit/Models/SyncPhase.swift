@@ -34,4 +34,13 @@ public enum SyncPhase: Sendable, Equatable {
 
 extension SyncSession {
     public var phase: SyncPhase { SyncPhase(mutagenStatus: status) }
+
+    /// The endpoint receiving files and the endpoint sending them, while the status names a staging side.
+    var stagingEndpoints: (receiving: Endpoint, sending: Endpoint)? {
+        switch status {
+        case "staging-alpha": return (alpha, beta)
+        case "staging-beta": return (beta, alpha)
+        default: return nil
+        }
+    }
 }
