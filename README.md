@@ -17,6 +17,7 @@
 ## Features
 
 - **Menu bar status** -- Live icon reflects overall session health at a glance (healthy, syncing, conflicts, errors)
+- **Menu bar menu** -- Right-click the icon to open Helix, pause every running sync session, pause them for the minutes you enter, or quit; Resume restores only the sessions Pause All paused, and a timed pause resumes on its own, even after you quit and reopen Helix
 - **Session dashboard** -- Browse, search, and filter all sync and forward sessions in a three-column window
 - **Transfer progress** -- While a session stages files, the detail view shows a progress bar, files and bytes received, and the file mutagen is sending; the session list and menu bar show the same percentage as `mutagen sync list -l`
 - **Create sessions** -- Step-by-step wizard for sync sessions; streamlined form for port forwarding
