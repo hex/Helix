@@ -280,6 +280,23 @@ public struct FileTransport: Sendable {
         return "'\(path)'"
     }
 
+    /// Makes a path exactly one inert word for a POSIX shell on a remote host.
+    /// Single quotes stop every expansion; an embedded single quote is written as `'\''`.
+    /// A leading `~/` becomes `"$HOME"/` followed by the single-quoted rest, so only `$HOME` expands.
+    static func shellWord(_ path: String) -> String {
+        if path == "~" {
+            return "\"$HOME\""
+        }
+        if path.hasPrefix("~/") {
+            return "\"$HOME\"/" + singleQuoted(String(path.dropFirst(2)))
+        }
+        return singleQuoted(path)
+    }
+
+    private static func singleQuoted(_ text: String) -> String {
+        "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
     private func sshTarget(user: String?, host: String) -> String {
         if let user {
             return "\(user)@\(host)"

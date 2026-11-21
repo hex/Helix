@@ -380,6 +380,20 @@ struct FileTransportTildeTests {
     }
 }
 
+@Suite("FileTransport remote shell words")
+struct FileTransportShellWordTests {
+
+    @Test("a single quote inside a path stays part of one quoted word")
+    func embeddedSingleQuote() {
+        #expect(FileTransport.shellWord("/opt/it's.txt") == "'/opt/it'\\''s.txt'")
+    }
+
+    @Test("a home-relative path expands only $HOME and keeps command substitution literal")
+    func homeRelativeCommandSubstitution() {
+        #expect(FileTransport.shellWord("~/$(touch x)") == "\"$HOME\"/'$(touch x)'")
+    }
+}
+
 @Suite("FileTransport error propagation")
 struct FileTransportErrorTests {
 
