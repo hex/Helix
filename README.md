@@ -18,6 +18,7 @@
 
 - **Menu bar status** -- Live icon reflects overall session health at a glance (healthy, syncing, conflicts, errors)
 - **Session dashboard** -- Browse, search, and filter all sync and forward sessions in a three-column window
+- **Transfer progress** -- While a session stages files, the detail view shows a progress bar, files and bytes received, and the file mutagen is sending; the session list and menu bar show the same percentage as `mutagen sync list -l`
 - **Create sessions** -- Step-by-step wizard for sync sessions; streamlined form for port forwarding
 - **Edit sessions** -- Rename a session, or change its sync mode, ignore rules, symlinks, compression, and watch settings
 - **Unique names** -- Rejects a name another session already holds, so `mutagen sync pause <name>` always resolves to one session
