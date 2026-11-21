@@ -40,10 +40,30 @@ struct SessionCommandsUnavailable: LocalizedError {
     var errorDescription: String? { "Start the Mutagen daemon before using session commands." }
 }
 
+enum ObservedMutationState: Equatable {
+    case absent, paused, running, unknown
+
+    var description: String {
+        switch self {
+        case .absent: "is no longer listed"
+        case .paused: "is paused"
+        case .running: "is still running"
+        case .unknown: "could not be verified"
+        }
+    }
+}
+
+struct MutationNotConfirmed: LocalizedError {
+    let cause: any Error
+    let observation: ObservedMutationState
+
+    var errorDescription: String? { cause.localizedDescription }
+}
+
 /// Wraps every provider operation that can start Mutagen implicitly. The underlying provider
 /// is available only here, so commands added to SessionProvider have to go through this boundary.
 @MainActor
-final class ManagedSessionProvider: SessionProvider {
+final class ManagedSessionProvider {
     enum Control {
         case managed, starting, stopping, stopped
     }
@@ -106,12 +126,52 @@ final class ManagedSessionProvider: SessionProvider {
         try await command { try await $0.forwardCreate(arguments: arguments) }
     }
 
+    private func confirmMutation(
+        _ expected: ObservedMutationState,
+        run: () async throws -> Void,
+        observe: () async -> ObservedMutationState
+    ) async throws {
+        do {
+            try await run()
+        } catch {
+            let observed = await observe()
+            guard observed == expected else {
+                throw MutationNotConfirmed(cause: error, observation: observed)
+            }
+        }
+    }
+
+    func observeSyncState(_ identifier: String) async -> ObservedMutationState {
+        // A cancelled caller still needs an answer, and a list must respect the Stop fence.
+        await Task { @MainActor in
+            do {
+                let sessions = try await syncList()
+                guard let session = sessions.first(where: { $0.identifier == identifier }) else { return .absent }
+                return session.paused ? .paused : .running
+            } catch {
+                return .unknown
+            }
+        }.value
+    }
+
     func syncPause(_ identifier: String) async throws {
-        try await command { try await $0.syncPause(identifier) }
+        try await command { provider in
+            try await confirmMutation(.paused) {
+                try await provider.syncPause(identifier)
+            } observe: {
+                await observeSyncState(identifier)
+            }
+        }
     }
 
     func syncResume(_ identifier: String) async throws {
-        try await command { try await $0.syncResume(identifier) }
+        try await command { provider in
+            try await confirmMutation(.running) {
+                try await provider.syncResume(identifier)
+            } observe: {
+                await observeSyncState(identifier)
+            }
+        }
     }
 
     func syncFlush(_ identifier: String) async throws {
@@ -123,7 +183,13 @@ final class ManagedSessionProvider: SessionProvider {
     }
 
     func syncTerminate(_ identifier: String) async throws {
-        try await command { try await $0.syncTerminate(identifier) }
+        try await command { provider in
+            try await confirmMutation(.absent) {
+                try await provider.syncTerminate(identifier)
+            } observe: {
+                await observeSyncState(identifier)
+            }
+        }
     }
 
     func forwardPause(_ identifier: String) async throws {
@@ -138,8 +204,22 @@ final class ManagedSessionProvider: SessionProvider {
         try await command { try await $0.forwardTerminate(identifier) }
     }
 
-    func daemonStart() async throws {
-        try await underlying.daemonStart()
+    private func observeDaemon(_ daemon: any DaemonProcess) async -> ObservedMutationState {
+        await Task {
+            do {
+                return try await daemon.pid() == nil ? .absent : .running
+            } catch {
+                return .unknown
+            }
+        }.value
+    }
+
+    func daemonStart(observing daemon: any DaemonProcess) async throws {
+        try await confirmMutation(.running) {
+            try await underlying.daemonStart()
+        } observe: {
+            await observeDaemon(daemon)
+        }
     }
 
     func waitForPendingCommands() async {
@@ -149,9 +229,14 @@ final class ManagedSessionProvider: SessionProvider {
         }
     }
 
-    func daemonStop() async throws {
+    func daemonStop(observing daemon: any DaemonProcess, checkingStatus: () -> Void) async throws {
         precondition(control == .stopping && !hasPendingCommands)
-        try await underlying.daemonStop()
+        try await confirmMutation(.absent) {
+            try await underlying.daemonStop()
+        } observe: {
+            checkingStatus()
+            return await observeDaemon(daemon)
+        }
     }
 
     func daemonRegister() async throws {

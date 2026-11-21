@@ -101,6 +101,7 @@ public final class SessionStore {
     private var pollingTask: Task<Void, Never>?
     @ObservationIgnored private var pollingInterval: TimeInterval?
     @ObservationIgnored private var stoppedDaemonCheck: UUID?
+    @ObservationIgnored private var isQuitting = false
     private var daemonControl: ManagedSessionProvider.Control {
         get { provider.control }
         set {
@@ -406,6 +407,7 @@ public final class SessionStore {
             return
         } catch {
             guard stoppedDaemonCheck == check else { return }
+            daemonStatus = .unknown
             ConsoleLog.shared.log("Could not check the Mutagen process: \(error.localizedDescription)", level: .error)
         }
     }
@@ -546,9 +548,13 @@ public final class SessionStore {
                 let message = "Could not pause the original session: \(error.localizedDescription)."
                 if error.isCommandInterruption {
                     keepEditRecord = true
-                    return reportInterruptedEdit(message, original: original, replacement: replacement)
+                    let state = (error as? MutationNotConfirmed)?.observation ?? .unknown
+                    return reportInterruptedEdit(
+                        "\(message) Original session \(original) \(state.description).",
+                        original: original, replacement: replacement
+                    )
                 }
-                let recovery = await recoverSyncEdit(original: original, replacement: replacement, activationAttempted: false, provider: provider)
+                let recovery = await recoverSyncEdit(original: original, replacement: replacement, activationAttempted: false)
                 keepEditRecord = !recovery.observedEnd
                 if keepEditRecord { return reportInterruptedEdit("\(message) \(recovery.message)", original: original, replacement: replacement) }
                 return await finishSyncEdit("\(message) \(recovery.message)")
@@ -561,7 +567,7 @@ public final class SessionStore {
                     keepEditRecord = true
                     return reportInterruptedEdit(message, original: original, replacement: replacement)
                 }
-                let recovery = await recoverSyncEdit(original: original, replacement: replacement, activationAttempted: true, provider: provider)
+                let recovery = await recoverSyncEdit(original: original, replacement: replacement, activationAttempted: true)
                 keepEditRecord = !recovery.observedEnd
                 if keepEditRecord { return reportInterruptedEdit("\(message) \(recovery.message)", original: original, replacement: replacement) }
                 return await finishSyncEdit("\(message) \(recovery.message)")
@@ -601,23 +607,27 @@ public final class SessionStore {
     private func recoverSyncEdit(
         original: String,
         replacement: String,
-        activationAttempted: Bool,
-        provider: any SessionProvider
+        activationAttempted: Bool
     ) async -> (message: String, observedEnd: Bool) {
         var messages: [String] = []
         do {
             try await provider.syncTerminate(replacement)
         } catch {
             messages.append("Could not remove edited session \(replacement): \(error.localizedDescription).")
-            if error.isCommandInterruption { return (messages.joined(separator: " "), false) }
-            if activationAttempted {
+            var observed = (error as? MutationNotConfirmed)?.observation ?? .unknown
+            if observed != .paused && !error.isCommandInterruption && activationAttempted {
                 // Mutagen may start reconnecting even when Resume returns an error.
                 do {
                     try await provider.syncPause(replacement)
+                    observed = await provider.observeSyncState(replacement)
                 } catch {
-                    messages.append("Could not confirm that \(replacement) stopped: \(error.localizedDescription). Check both sessions before resuming original session \(original).")
-                    return (messages.joined(separator: " "), false)
+                    observed = (error as? MutationNotConfirmed)?.observation ?? .unknown
+                    messages.append("Could not pause edited session \(replacement): \(error.localizedDescription).")
                 }
+            }
+            guard observed == .absent || observed == .paused else {
+                messages.append("Edited session \(replacement) \(observed.description). Check both sessions before resuming original session \(original).")
+                return (messages.joined(separator: " "), false)
             }
         }
 
@@ -929,17 +939,27 @@ public final class SessionStore {
         schedulePolling(refreshImmediately: false)
     }
 
+    public func prepareToQuit() {
+        isQuitting = true
+        stopPolling()
+        if daemonControl == .stopping {
+            defaults.set(true, forKey: Self.daemonStoppedKey)
+        }
+    }
+
     public func startDaemon() async {
         guard daemonControl == .managed || (daemonControl == .stopped && daemonStatus != .startedOutside) else { return }
         let previousControl = daemonControl
         daemonControl = .starting
         do {
-            try await provider.daemonStart()
+            try await provider.daemonStart(observing: daemonProcess)
             setManagedDaemonStatus(.running)
             await refresh()
             schedulePolling(refreshImmediately: false)
         } catch {
             daemonControl = previousControl
+            let observed = (error as? MutationNotConfirmed)?.observation
+            daemonStatus = observed == .absent ? .stopped : .unknown
             lastError = error.localizedDescription
         }
     }
@@ -972,22 +992,20 @@ public final class SessionStore {
         daemonStopProgress = "Stopping Mutagen."
         defaults.set(true, forKey: Self.daemonStoppedKey)
         do {
-            try await provider.daemonStop()
-        } catch {
-            daemonStopProgress = "Checking whether Mutagen is running."
-            let stopError = "Could not stop Mutagen: \(error.localizedDescription)"
-            do {
-                if try await daemonProcess.pid() != nil {
-                    restoreAfterFailedStop(wasStopped: wasStopped, status: .running, error: stopError)
-                    return false
-                }
-            } catch {
-                restoreAfterFailedStop(
-                    wasStopped: wasStopped, status: .unknown,
-                    error: "\(stopError). Could not verify its status: \(error.localizedDescription)"
-                )
-                return false
+            try await provider.daemonStop(observing: daemonProcess) {
+                daemonStopProgress = "Checking whether Mutagen is running."
             }
+        } catch {
+            let stopError = "Could not stop Mutagen: \(error.localizedDescription)"
+            if (error as? MutationNotConfirmed)?.observation == .running {
+                restoreAfterFailedStop(wasStopped: wasStopped || isQuitting, error: stopError)
+            } else {
+                daemonControl = .stopped
+                daemonStatus = .unknown
+                lastError = "\(stopError) Mutagen's state is unknown."
+                schedulePolling(refreshImmediately: false)
+            }
+            return false
         }
 
         daemonControl = .stopped
@@ -1008,11 +1026,12 @@ public final class SessionStore {
         lastError = nil
     }
 
-    private func restoreAfterFailedStop(wasStopped: Bool, status: DaemonStatus, error: String) {
+    private func restoreAfterFailedStop(wasStopped: Bool, error: String) {
         if wasStopped {
             daemonControl = .stopped
+            daemonStatus = .startedOutside
         } else {
-            setManagedDaemonStatus(status)
+            setManagedDaemonStatus(.running)
         }
         lastError = error
         schedulePolling(refreshImmediately: false)

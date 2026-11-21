@@ -366,8 +366,12 @@ struct ConflictInterruptionDiskTests {
             let suite = "ConflictResumeDeadlineTests.\(UUID().uuidString)"
             let defaults = try #require(UserDefaults(suiteName: suite))
             defer { defaults.removePersistentDomain(forName: suite) }
+            let paused = makeSyncSession(
+                id: fixture.session.identifier, name: fixture.session.name, paused: true,
+                conflicts: [fixture.conflict], alpha: fixture.session.alpha, beta: fixture.session.beta
+            )
             let provider = RecordingProvider(
-                syncSessions: [fixture.session], beforeSyncResume: { _ in
+                syncSessions: [paused], beforeSyncResume: { _ in
                     throw ProcessDeadlineError(executablePath: "/usr/bin/mutagen", deadline: .seconds(15))
                 }
             )

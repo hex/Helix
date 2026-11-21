@@ -2248,7 +2248,8 @@ struct ConflictResolutionTests {
         let store = SessionStore(provider: RecordingProvider(syncSessions: [session]), fileTransport: transportLeavingDestinationUnverified(recordingTo: cmdRecorder), defaults: defaults)
         await store.resolveConflict(session: session, conflict: conflict, winner: .alpha)
         let token = try replaceToken(copiedBeside: "/tmp/b/file.txt", in: cmdRecorder.commands)
-        store.replaceProvider(RecordingProvider(syncSessions: [session], failOn: "syncResume"))
+        let paused = makeSyncSession(id: session.identifier, name: session.name, paused: true, conflicts: [conflict])
+        store.replaceProvider(RecordingProvider(syncSessions: [paused], failOn: "syncResume"))
 
         await store.resumeSync("sync_1")
 

@@ -24,7 +24,8 @@ public struct ProcessDeadlineError: LocalizedError, Sendable {
 
 extension Error {
     var isCommandInterruption: Bool {
-        self is CancellationError || self is ProcessDeadlineError
+        if let mutation = self as? MutationNotConfirmed { return mutation.cause.isCommandInterruption }
+        return self is CancellationError || self is ProcessDeadlineError
     }
 }
 
