@@ -1037,6 +1037,36 @@ struct BulkPauseTests {
         defaults.removePersistentDomain(forName: suiteName)
     }
 
+    @Test("Pause All refuses during a sync edit without pausing unrelated sessions")
+    @MainActor
+    func pauseAllRefusesDuringEdit() async {
+        defer { removeDefaults() }
+        let original = makeSyncSession(id: "sync_1", name: "project")
+        let other = makeSyncSession(id: "sync_2", name: "archive")
+        let gate = Gate()
+        let provider = RecordingProvider(syncSessions: [original, other], duringSyncCreate: { await gate.pass() })
+        let store = SessionStore(provider: provider, defaults: defaults)
+        let editing = Task {
+            await store.recreateSync(
+                original, options: SyncCreateOptions(from: original), alpha: "/srv/project", beta: "/srv/mirror"
+            )
+        }
+        await gate.reached()
+        let callsBeforePauseAll = provider.calls
+
+        await store.pauseAllSync(until: Date(timeIntervalSince1970: 2_000_000_000))
+        let refusal = store.lastError
+        let bulkRecord = store.bulkPause
+        let callsAfterPauseAll = provider.calls
+        await gate.open()
+        let editError = await editing.value
+
+        #expect(refusal == "Wait for the edit to finish before using Pause All.")
+        #expect(bulkRecord == nil)
+        #expect(callsAfterPauseAll == callsBeforePauseAll)
+        #expect(editError == nil)
+    }
+
     @Test("Pause All owns the replacement before a failed original removal")
     @MainActor
     func pausedEditTransfersOwnershipBeforeTermination() async {

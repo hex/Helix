@@ -588,6 +588,10 @@ public final class SessionStore {
             lastError = unavailable.localizedDescription
             return
         }
+        guard sessionBeingEdited == nil else {
+            lastError = "Wait for the edit to finish before using Pause All."
+            return
+        }
         guard !bulkPauseInFlight else { return }
         bulkPauseInFlight = true
         defer { bulkPauseInFlight = false }
@@ -600,7 +604,6 @@ public final class SessionStore {
         var failures: [String] = []
         for session in syncSessions where !session.paused {
             let identifier = session.identifier
-            guard identifier != sessionBeingEdited, identifier != replacementBeingEdited else { continue }
             do {
                 try await provider.syncPause(identifier)
                 let paused = bulkPause?.sessionIdentifiers ?? []
