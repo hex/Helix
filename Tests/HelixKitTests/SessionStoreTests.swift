@@ -589,9 +589,9 @@ struct BulkPauseTests {
         #expect(store.sessionHolds.keys.sorted() == ["sync_2"])
     }
 
-    @Test("Resume after Pause All leaves a session to its running conflict resolve, which resumes it when it ends")
+    @Test("Resume after Pause All does not resume a session while a conflict resolve runs on it, and retries it afterwards")
     @MainActor
-    func resumeLeavesSessionToRunningResolve() async {
+    func resumeWaitsOutRunningResolve() async {
         defer { removeDefaults() }
         let conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
         let gate = Gate()
@@ -609,16 +609,20 @@ struct BulkPauseTests {
         let provider = MainActorRecordingProvider(syncSessions: [paused])
         store.replaceProvider(provider)
 
-        let resolve = Task { await store.resolveConflict(session: paused, conflict: conflict, winner: .alpha) }
+        let resolve = Task { _ = await store.resolveConflict(session: paused, conflict: conflict, winner: .alpha) }
         await gate.reached()
         await store.resumeBulkPause()
         let callsWhileResolveIsMidway = provider.calls
+        let recordWhileResolveIsMidway = store.bulkPause
         await gate.open()
         await resolve.value
+        await store.resumeBulkPause()
 
         #expect(callsWhileResolveIsMidway == ["syncPause:sync_1"])
-        #expect(provider.calls == ["syncPause:sync_1", "syncResume:sync_1", "syncFlush:sync_1"])
+        #expect(recordWhileResolveIsMidway == BulkPause(sessionIdentifiers: ["sync_1"], resumeAt: nil))
+        #expect(provider.calls == ["syncPause:sync_1", "syncResume:sync_1", "syncFlush:sync_1", "syncResume:sync_1"])
         #expect(store.bulkPause == nil)
+        #expect(store.lastError == nil)
     }
 
     @Test("Pause All during an active bulk pause keeps the first sessions and takes the newer deadline")
@@ -1427,8 +1431,8 @@ struct ConflictResolutionTests {
         }
         let store = SessionStore(provider: provider, fileTransport: transport, defaults: defaults)
 
-        let first = Task { await store.resolveConflict(session: session, conflict: c1, winner: .alpha) }
-        let second = Task { await store.resolveConflict(session: session, conflict: c2, winner: .alpha) }
+        let first = Task { _ = await store.resolveConflict(session: session, conflict: c1, winner: .alpha) }
+        let second = Task { _ = await store.resolveConflict(session: session, conflict: c2, winner: .alpha) }
         await gate.reached()
         for _ in 0..<100 { await Task.yield() }
         let callsWhileFirstIsMidway = provider.calls
@@ -1480,8 +1484,8 @@ struct ConflictResolutionTests {
         let cmdRecorder = CommandRecorder()
         let store = SessionStore(provider: provider, fileTransport: transportLeavingDestinationUnverified(recordingTo: cmdRecorder), defaults: defaults)
 
-        let first = Task { await store.resolveConflict(session: session, conflict: c1, winner: .alpha) }
-        let second = Task { await store.resolveConflict(session: session, conflict: c2, winner: .alpha) }
+        let first = Task { _ = await store.resolveConflict(session: session, conflict: c1, winner: .alpha) }
+        let second = Task { _ = await store.resolveConflict(session: session, conflict: c2, winner: .alpha) }
         await first.value
         await second.value
 
