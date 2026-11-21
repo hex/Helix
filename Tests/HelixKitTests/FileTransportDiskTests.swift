@@ -6,11 +6,138 @@ import Foundation
 @testable import HelixKit
 
 /// A directory under the system temporary directory that exists for the length of `body`.
-private func withScratchDirectory<Result>(_ body: (URL) async throws -> Result) async throws -> Result {
+func withScratchDirectory<Result>(_ body: (URL) async throws -> Result) async throws -> Result {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("helix-tests-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
     defer { try? FileManager.default.removeItem(at: directory) }
     return try await body(directory)
+}
+
+/// An executor that runs every command for real, except that the first command `matches` picks throws:
+/// before running it, or after running it when `afterRunning` is set.
+func executorFailing(
+    afterRunning: Bool = false,
+    where matches: @escaping @Sendable (_ executable: String, _ arguments: [String]) -> Bool
+) -> @Sendable (String, [String]) async throws -> String {
+    let failed = FailedOnce()
+    return { executable, arguments in
+        guard matches(executable, arguments), failed.claim() else {
+            return try await runProcess(executablePath: executable, arguments: arguments)
+        }
+        if afterRunning {
+            _ = try await runProcess(executablePath: executable, arguments: arguments)
+        }
+        throw CLIError(exitCode: 255, stderr: "connection lost")
+    }
+}
+
+private final class FailedOnce: @unchecked Sendable {
+    private var hasFailed = false
+    private let lock = NSLock()
+
+    /// True for the first caller only.
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if hasFailed { return false }
+        hasFailed = true
+        return true
+    }
+}
+
+/// The names in `directory` that a replacement leaves behind when it does not finish.
+func replaceSiblings(in directory: URL) throws -> [String] {
+    try FileManager.default.contentsOfDirectory(atPath: directory.path).filter { $0.contains(".helix-") }.sorted()
+}
+
+@Suite("FileTransport replace on disk")
+struct FileTransportReplaceDiskTests {
+
+    private func text(at url: URL) throws -> String {
+        try String(contentsOf: url, encoding: .utf8)
+    }
+
+    @Test("a file replaces a file")
+    func fileOverFile() async throws {
+        try await withScratchDirectory { scratch in
+            let winner = scratch.appendingPathComponent("winner.txt")
+            let loser = scratch.appendingPathComponent("loser.txt")
+            try "winner".write(to: winner, atomically: false, encoding: .utf8)
+            try "loser".write(to: loser, atomically: false, encoding: .utf8)
+
+            try await FileTransport().replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+
+            #expect(try text(at: loser) == "winner")
+            #expect(try text(at: winner) == "winner")
+            #expect(try replaceSiblings(in: scratch) == [])
+        }
+    }
+
+    @Test("a directory replaces a directory without nesting inside it")
+    func directoryOverDirectory() async throws {
+        try await withScratchDirectory { scratch in
+            let winner = scratch.appendingPathComponent("winner")
+            let loser = scratch.appendingPathComponent("loser")
+            try FileManager.default.createDirectory(at: winner, withIntermediateDirectories: false)
+            try FileManager.default.createDirectory(at: loser, withIntermediateDirectories: false)
+            try "winner".write(to: winner.appendingPathComponent("kept.txt"), atomically: false, encoding: .utf8)
+            try "loser".write(to: loser.appendingPathComponent("dropped.txt"), atomically: false, encoding: .utf8)
+
+            try await FileTransport().replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+
+            #expect(try FileManager.default.contentsOfDirectory(atPath: loser.path) == ["kept.txt"])
+            #expect(try text(at: loser.appendingPathComponent("kept.txt")) == "winner")
+            #expect(try replaceSiblings(in: scratch) == [])
+        }
+    }
+
+    @Test("a file replaces a dangling symlink, leaving a regular file")
+    func fileOverDanglingSymlink() async throws {
+        try await withScratchDirectory { scratch in
+            let winner = scratch.appendingPathComponent("winner.txt")
+            let loser = scratch.appendingPathComponent("loser.txt")
+            try "winner".write(to: winner, atomically: false, encoding: .utf8)
+            try FileManager.default.createSymbolicLink(atPath: loser.path, withDestinationPath: "nowhere")
+
+            try await FileTransport().replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+
+            #expect(try FileManager.default.attributesOfItem(atPath: loser.path)[.type] as? FileAttributeType == .typeRegular)
+            #expect(try text(at: loser) == "winner")
+            #expect(try FileManager.default.contentsOfDirectory(atPath: scratch.path).sorted() == ["loser.txt", "winner.txt"])
+        }
+    }
+
+    @Test("a file lands where nothing was")
+    func destinationAbsent() async throws {
+        try await withScratchDirectory { scratch in
+            let winner = scratch.appendingPathComponent("winner.txt")
+            let loser = scratch.appendingPathComponent("loser.txt")
+            try "winner".write(to: winner, atomically: false, encoding: .utf8)
+
+            try await FileTransport().replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+
+            #expect(try text(at: loser) == "winner")
+            #expect(try replaceSiblings(in: scratch) == [])
+        }
+    }
+
+    @Test("a copy that fails partway leaves the destination as it was and no partial copy")
+    func copyFails() async throws {
+        try await withScratchDirectory { scratch in
+            let winner = scratch.appendingPathComponent("winner.txt")
+            let loser = scratch.appendingPathComponent("loser.txt")
+            try "winner".write(to: winner, atomically: false, encoding: .utf8)
+            try "loser".write(to: loser, atomically: false, encoding: .utf8)
+            let transport = FileTransport(execute: executorFailing(afterRunning: true) { executable, _ in executable == "/bin/cp" })
+
+            await #expect(throws: ReplaceError.self) {
+                try await transport.replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+            }
+
+            #expect(try text(at: loser) == "loser")
+            #expect(try FileManager.default.contentsOfDirectory(atPath: scratch.path).sorted() == ["loser.txt", "winner.txt"])
+        }
+    }
 }
 
 @Suite("FileTransport run on disk")
