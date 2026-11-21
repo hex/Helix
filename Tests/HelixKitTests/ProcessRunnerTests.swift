@@ -75,6 +75,149 @@ struct ProcessRunnerTests {
     }
 }
 
+@Suite("Process deadlines")
+struct ProcessDeadlineTests {
+    @Test("A live child is reaped and the caller receives the deadline error")
+    func deadlineEndsRunningChild() async throws {
+        let pidFile = fixturePIDFile()
+        defer { try? FileManager.default.removeItem(at: pidFile) }
+        let duration = Duration.milliseconds(250)
+        let call = Task {
+            try await runBoundedShell(
+                "printf '%s\n' \"$$\" > \"$1\"; exec /bin/sleep 8",
+                pidFile: pidFile, duration: duration
+            )
+        }
+        defer { call.cancel() }
+        let pid = try await processIdentifier(writtenTo: pidFile)
+        defer { endFixture(pid) }
+
+        let failure = await deadlineFailure(of: call)
+
+        #expect(failure == "/bin/sh exceeded its deadline of 0.25 seconds.")
+        #expect(fixtureIsGone(pid))
+    }
+
+    @Test("Cancellation kills a child that ignores SIGTERM")
+    func cancellationEscalatesToKill() async throws {
+        let pidFile = fixturePIDFile()
+        defer { try? FileManager.default.removeItem(at: pidFile) }
+        let call = Task {
+            try await runBoundedShell(
+                "trap '' TERM; printf '%s\n' \"$$\" > \"$1\"; exec /bin/sleep 8",
+                pidFile: pidFile, duration: .seconds(5)
+            )
+        }
+        defer { call.cancel() }
+        let pid = try await processIdentifier(writtenTo: pidFile)
+        defer { endFixture(pid) }
+
+        call.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await withTimeout(seconds: 2) { try await call.value }
+        }
+        #expect(fixtureIsGone(pid))
+    }
+
+    @Test("An exited child cannot leave the caller waiting on inherited stdout")
+    func inheritedPipeHasDeadline() async throws {
+        let pidFile = fixturePIDFile()
+        defer { try? FileManager.default.removeItem(at: pidFile) }
+        let call = Task {
+            try await runBoundedShell(
+                "/bin/sleep 8 & printf '%s\n' \"$!\" > \"$1\"",
+                pidFile: pidFile, duration: .milliseconds(250)
+            )
+        }
+        defer { call.cancel() }
+        let pid = try await processIdentifier(writtenTo: pidFile)
+        defer { endFixture(pid) }
+
+        let failure = await deadlineFailure(of: call)
+
+        #expect(failure == "/bin/sh exceeded its deadline of 0.25 seconds.")
+        #expect(fixtureIsGone(pid))
+    }
+
+    @Test("A fast command returns its full output")
+    func fastCommandSucceeds() async throws {
+        let output = try await withTimeout(seconds: 2) {
+            try await runProcess(executablePath: "/usr/bin/printf", arguments: ["hello"], deadline: .seconds(1))
+        }
+        #expect(output == "hello")
+    }
+}
+
+@Suite("Process registry")
+struct ProcessRegistryTests {
+    @Test("Shutdown kills a tracked child and waits for it to exit")
+    func registryTerminatesRunningChild() async throws {
+        let registry = ProcessRunner()
+        let pidFile = fixturePIDFile()
+        defer { try? FileManager.default.removeItem(at: pidFile) }
+        let call = Task {
+            try await registry.run(
+                executablePath: "/bin/sh",
+                arguments: ["-c", "trap '' TERM; printf '%s\n' \"$$\" > \"$1\"; exec /bin/sleep 8", "helix-test", pidFile.path],
+                deadline: .seconds(6)
+            )
+        }
+        defer { call.cancel() }
+        let pid = try await processIdentifier(writtenTo: pidFile)
+        defer { endFixture(pid) }
+
+        let stopped = try await withTimeout(seconds: 2) { await registry.terminateAll() }
+
+        #expect(stopped == 1)
+        #expect(fixtureIsGone(pid))
+        await #expect(throws: CancellationError.self) {
+            try await withTimeout(seconds: 2) { try await call.value }
+        }
+        await #expect(throws: CancellationError.self) {
+            try await registry.run(executablePath: "/usr/bin/printf", arguments: ["after quit"], deadline: .seconds(1))
+        }
+    }
+
+    @Test("A completed command leaves no child in the registry")
+    func registryIsEmptyAfterCompletion() async throws {
+        let registry = ProcessRunner()
+        let output = try await withTimeout(seconds: 2) {
+            try await registry.run(executablePath: "/usr/bin/printf", arguments: ["finished"], deadline: .seconds(1))
+        }
+        let stopped = try await withTimeout(seconds: 2) { await registry.terminateAll() }
+
+        #expect(output == "finished")
+        #expect(stopped == 0)
+    }
+}
+
+private func runBoundedShell(_ script: String, pidFile: URL, duration: Duration) async throws -> String {
+    try await runProcess(
+        executablePath: "/bin/sh", arguments: ["-c", script, "helix-test", pidFile.path], deadline: duration
+    )
+}
+
+private func fixturePIDFile() -> URL {
+    FileManager.default.temporaryDirectory.appendingPathComponent("helix-process-\(UUID().uuidString).pid")
+}
+
+private func fixtureIsGone(_ pid: pid_t) -> Bool {
+    kill(pid, 0) == -1 && errno == ESRCH
+}
+
+private func endFixture(_ pid: pid_t) {
+    if !fixtureIsGone(pid) { kill(pid, SIGKILL) }
+}
+
+private func deadlineFailure(of call: Task<String, Error>) async -> String {
+    do {
+        let result = try await withTimeout(seconds: 2) { try await call.value }
+        return "Command unexpectedly returned \(result)"
+    } catch {
+        return (error as? TimedOut)?.description ?? error.localizedDescription
+    }
+}
+
 private struct NoProcessIdentifier: Error, CustomStringConvertible {
     let file: URL
     var description: String { "no process identifier was written to \(file.path) within 5 seconds" }
