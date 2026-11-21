@@ -86,6 +86,7 @@ public final class SessionStore {
 
     private let provider: ManagedSessionProvider
     private var pollingTask: Task<Void, Never>?
+    @ObservationIgnored private var pollingInterval: TimeInterval?
     private var daemonControl: ManagedSessionProvider.Control {
         get { provider.control }
         set { provider.control = newValue }
@@ -113,6 +114,7 @@ public final class SessionStore {
     private static let replacementsUnderWayKey = "replacementsUnderWay"
     private static let leftoverNoticesKey = "leftoverNotices"
     private static let daemonBackgroundPriorityKey = "daemonBackgroundPriority"
+    private static let daemonStoppedKey = "daemonStoppedByHelix"
 
     public init(
         provider: any SessionProvider,
@@ -122,6 +124,9 @@ public final class SessionStore {
         daemonProcess: any DaemonProcess = MutagenDaemon(cliPath: CLI.defaultExecutablePath)
     ) {
         self.provider = ManagedSessionProvider(provider)
+        if defaults.bool(forKey: Self.daemonStoppedKey) {
+            self.provider.control = .stopped
+        }
         self.fileTransport = fileTransport
         self.defaults = defaults
         self.now = now
@@ -715,10 +720,12 @@ public final class SessionStore {
         daemonControl = .starting
         do {
             try await provider.daemonStart()
+            defaults.removeObject(forKey: Self.daemonStoppedKey)
             daemonControl = .managed
             daemonRunning = true
             lastError = nil
             await refresh()
+            schedulePollingIfManaged(refreshImmediately: false)
         } catch {
             daemonControl = previousControl
             lastError = error.localizedDescription
@@ -727,13 +734,15 @@ public final class SessionStore {
 
     @discardableResult
     public func stopDaemon() async -> Bool {
-        guard daemonControl == .managed else { return false }
+        guard daemonControl == .managed || (daemonControl == .stopped && daemonRunning) else { return false }
 
         if let operation = operationBlockingDaemonStop {
             lastError = "Wait for the \(operation) to finish before stopping the Mutagen daemon."
             return false
         }
         daemonControl = .stopping
+        defaults.set(true, forKey: Self.daemonStoppedKey)
+        cancelPolling()
 
         // List commands can autostart Mutagen. Discard their results and let the commands finish before Stop.
         let requests = Array(activeSessionLists.values)
@@ -753,7 +762,7 @@ public final class SessionStore {
             lastError = nil
             return true
         } catch {
-            daemonControl = .managed
+            daemonControl = .stopped
             lastError = error.localizedDescription
             return false
         }
@@ -841,6 +850,7 @@ public final class SessionStore {
     }
 
     public func fetchVersion() async {
+        guard daemonControl == .managed else { return }
         do {
             mutagenVersion = try await provider.version()
         } catch {
@@ -1378,18 +1388,34 @@ public final class SessionStore {
     // MARK: - Polling
 
     public func startPolling(interval: TimeInterval = 5.0) {
-        stopPolling()
-        pollingTask = Task { [weak self] in
-            while !Task.isCancelled {
-                await self?.refresh()
-                try? await Task.sleep(for: .seconds(interval))
-            }
-        }
+        cancelPolling()
+        pollingInterval = interval
+        schedulePollingIfManaged(refreshImmediately: true)
     }
 
     public func stopPolling() {
+        pollingInterval = nil
+        cancelPolling()
+    }
+
+    private func cancelPolling() {
         pollingTask?.cancel()
         pollingTask = nil
+    }
+
+    private func schedulePollingIfManaged(refreshImmediately: Bool) {
+        guard daemonControl == .managed, pollingTask == nil, let interval = pollingInterval else { return }
+        pollingTask = Task { [weak self] in
+            if refreshImmediately { await self?.refresh() }
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(interval))
+                } catch {
+                    return
+                }
+                await self?.refresh()
+            }
+        }
     }
 
     // MARK: - Private

@@ -73,7 +73,10 @@ struct SettingsView: View {
                         }
                     } else {
                         Button("Start") {
-                            Task { await store.startDaemon() }
+                            Task {
+                                await store.startDaemon()
+                                if store.daemonRunning { await store.fetchVersion() }
+                            }
                         }
                     }
                 }

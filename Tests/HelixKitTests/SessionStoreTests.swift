@@ -375,9 +375,12 @@ struct SessionStoreTests {
 
     @Test("Daemon start/stop methods work")
     @MainActor
-    func daemonControl() async {
+    func daemonControl() async throws {
+        let suite = "DaemonStopTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
         let provider = FakeProvider()
-        let store = SessionStore(provider: provider)
+        let store = SessionStore(provider: provider, defaults: defaults)
 
         await store.startDaemon()
         #expect(store.lastError == nil)
@@ -465,10 +468,13 @@ struct SessionStoreTests {
 
     @Test("Stop suppresses refreshes until Start restores the daemon and session lists")
     @MainActor
-    func refreshDoesNotUndoDaemonStop() async {
+    func refreshDoesNotUndoDaemonStop() async throws {
+        let suite = "DaemonStopTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
         let sync = makeSyncSession(id: "sync_1", name: "documents")
         let forward = makeForwardSession(id: "fwd_1", name: "preview")
-        let store = SessionStore(provider: FakeProvider(syncSessions: [sync], forwardSessions: [forward]))
+        let store = SessionStore(provider: FakeProvider(syncSessions: [sync], forwardSessions: [forward]), defaults: defaults)
         await store.refresh()
         #expect(store.daemonRunning == true)
 
@@ -485,6 +491,49 @@ struct SessionStoreTests {
         #expect(store.syncSessions.map(\.identifier) == ["sync_1"])
         #expect(store.forwardSessions.map(\.identifier) == ["fwd_1"])
         #expect(store.lastError == nil)
+    }
+
+    @Test("A relaunched store waits for Start and stays stopped after a failed Start")
+    @MainActor
+    func daemonStopPersistsUntilSuccessfulStart() async throws {
+        let suite = "DaemonRelaunchTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let firstProvider = RecordingProvider()
+        let firstLaunch = SessionStore(provider: firstProvider, defaults: defaults)
+        let stopped = await firstLaunch.stopDaemon()
+        #expect(stopped)
+        #expect(firstProvider.calls == ["daemonStop"])
+
+        let failing = RecordingProvider(failOn: "daemonStart", recordQueries: true)
+        let secondLaunch = SessionStore(provider: failing, defaults: defaults)
+        secondLaunch.startPolling(interval: 3600)
+        defer { secondLaunch.stopPolling() }
+        await secondLaunch.refresh()
+        await secondLaunch.manualRefresh()
+        await secondLaunch.fetchVersion()
+        await secondLaunch.pauseSync("sync_1")
+
+        #expect(secondLaunch.daemonRunning == false)
+        #expect(secondLaunch.lastError == "Start the Mutagen daemon before using session commands.")
+        #expect(failing.calls == [])
+        await secondLaunch.startDaemon()
+        #expect(secondLaunch.lastError == "simulated failure")
+        #expect(failing.calls == ["daemonStart"])
+
+        let ready = RecordingProvider(recordQueries: true)
+        let thirdLaunch = SessionStore(provider: ready, defaults: defaults)
+        await thirdLaunch.refresh()
+        #expect(ready.calls == [])
+        await thirdLaunch.startDaemon()
+        #expect(ready.calls.first == "daemonStart")
+        #expect(Set(ready.calls.dropFirst()) == ["syncList", "forwardList"])
+        #expect(thirdLaunch.daemonRunning)
+
+        let afterStart = RecordingProvider(recordQueries: true)
+        let fourthLaunch = SessionStore(provider: afterStart, defaults: defaults)
+        await fourthLaunch.refresh()
+        #expect(Set(afterStart.calls) == ["syncList", "forwardList"])
     }
 
     @Test("Daemon register sets autoStart to true")
@@ -1258,6 +1307,7 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
     private let beforeSyncPause: (@Sendable (String) async -> Void)?
     private let duringSyncCreate: (@Sendable () async throws -> Void)?
     private let beforeSyncTerminate: (@Sendable () async -> Void)?
+    private let recordQueries: Bool
 
     /// - Parameter duringSyncCreate: runs inside each create, after the create is recorded and before it returns.
     init(
@@ -1267,7 +1317,8 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
         failOn: String? = nil,
         beforeSyncPause: (@Sendable (String) async -> Void)? = nil,
         duringSyncCreate: (@Sendable () async throws -> Void)? = nil,
-        beforeSyncTerminate: (@Sendable () async -> Void)? = nil
+        beforeSyncTerminate: (@Sendable () async -> Void)? = nil,
+        recordQueries: Bool = false
     ) {
         self.syncSessions = syncSessions
         self.resolvedSyncSessions = resolvedSyncSessions
@@ -1276,6 +1327,7 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
         self.beforeSyncPause = beforeSyncPause
         self.duringSyncCreate = duringSyncCreate
         self.beforeSyncTerminate = beforeSyncTerminate
+        self.recordQueries = recordQueries
     }
 
     var calls: [String] {
@@ -1295,6 +1347,7 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
     }
 
     func syncList() async throws -> [SyncSession] {
+        if recordQueries { try record("syncList") }
         lock.lock()
         let flushed = _flushed
         let created = _created
@@ -1307,9 +1360,18 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
         }
         return syncSessions
     }
-    func forwardList() async throws -> [ForwardSession] { [] }
-    func daemonRunning() async throws -> Bool { true }
-    func version() async throws -> String { "0.18.1" }
+    func forwardList() async throws -> [ForwardSession] {
+        if recordQueries { try record("forwardList") }
+        return []
+    }
+    func daemonRunning() async throws -> Bool {
+        if recordQueries { try record("daemonRunning") }
+        return true
+    }
+    func version() async throws -> String {
+        if recordQueries { try record("version") }
+        return "0.18.1"
+    }
     func syncCreate(arguments: [String]) async throws -> String {
         try record("syncCreate:\(arguments.joined(separator: " "))")
         lock.withLock { _created = true }
@@ -1338,7 +1400,7 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
     func forwardPause(_ identifier: String) async throws { try record("forwardPause:\(identifier)") }
     func forwardResume(_ identifier: String) async throws { try record("forwardResume:\(identifier)") }
     func forwardTerminate(_ identifier: String) async throws { try record("forwardTerminate:\(identifier)") }
-    func daemonStart() async throws {}
+    func daemonStart() async throws { try record("daemonStart") }
     func daemonStop() async throws { try record("daemonStop") }
     func daemonRegister() async throws {}
     func daemonUnregister() async throws {}
