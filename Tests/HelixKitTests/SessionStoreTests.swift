@@ -536,6 +536,87 @@ struct SessionStoreTests {
         #expect(Set(afterStart.calls) == ["syncList", "forwardList"])
     }
 
+    @Test("A failed Stop checks actual liveness and keeps the matching controls usable",
+          arguments: [true, false])
+    @MainActor
+    func failedStopReconcilesLiveness(daemonPresent: Bool) async throws {
+        let suite = "FailedStopTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let session = makeSyncSession(id: "sync_1", name: "project")
+        let provider = RecordingProvider(syncSessions: [session], failOn: "daemonStop")
+        let daemon = RecordingDaemonProcess(pid: daemonPresent ? 123 : nil)
+        let store = SessionStore(provider: provider, defaults: defaults, daemonProcess: daemon)
+        await store.refresh()
+
+        let stopped = await store.stopDaemon()
+
+        #expect(stopped == !daemonPresent)
+        #expect(store.daemonRunning == daemonPresent)
+        #expect(defaults.bool(forKey: "daemonStoppedByHelix") == !daemonPresent)
+        if daemonPresent {
+            #expect(store.lastError == "Could not stop Mutagen: simulated failure")
+            await store.pauseSync(session.identifier)
+            #expect(provider.calls == ["daemonStop", "syncPause:sync_1"])
+        } else {
+            #expect(store.syncSessions == [])
+            // Restart starts once Stop has confirmed the daemon is gone.
+            if stopped { await store.startDaemon() }
+            #expect(provider.calls == ["daemonStop", "daemonStart"])
+            #expect(store.daemonRunning)
+            #expect(!defaults.bool(forKey: "daemonStoppedByHelix"))
+        }
+    }
+
+    @Test("Stop drains an active command before saving its intent and reports a repeated request")
+    @MainActor
+    func stopWaitsBeforePersistingIntent() async throws {
+        let suite = "StopDrainTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let gate = Gate()
+        let session = makeSyncSession(id: "sync_1", name: "project")
+        let provider = RecordingProvider(
+            syncSessions: [session], beforeSyncPause: { _ in await gate.pass() }, recordQueries: true
+        )
+        let store = SessionStore(provider: provider, defaults: defaults)
+        await store.refresh()
+
+        let command = Task { await store.pauseSync(session.identifier) }
+        await gate.reached()
+        let stop = Task { await store.stopDaemon() }
+        var commandsFenced = false
+        for _ in 0..<100 {
+            let before = provider.calls.count
+            await store.fetchVersion()
+            if provider.calls.count == before {
+                commandsFenced = true
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let progressWhileWaiting = store.daemonStopProgress
+        let persistedWhileWaiting = defaults.bool(forKey: "daemonStoppedByHelix")
+        let attemptedWhileWaiting = provider.calls.contains("daemonStop")
+        let duplicate = commandsFenced ? await store.stopDaemon() : true
+        let refused = store.lastError
+        await gate.open()
+        await command.value
+        let stopped = await stop.value
+
+        #expect(commandsFenced)
+        #expect(progressWhileWaiting == "Waiting for running Mutagen commands to finish.")
+        #expect(!persistedWhileWaiting)
+        #expect(!attemptedWhileWaiting)
+        #expect(!duplicate)
+        #expect(refused == "Mutagen is already stopping.")
+        #expect(stopped)
+        #expect(defaults.bool(forKey: "daemonStoppedByHelix"))
+        #expect(provider.calls.filter { $0 == "daemonStop" } == ["daemonStop"])
+        #expect(store.daemonStopProgress == nil)
+    }
+
     @Test("Daemon register sets autoStart to true")
     @MainActor
     func daemonRegister() async {
@@ -825,6 +906,113 @@ struct LeftoverSyncOriginalTests {
         return store
     }
 
+    @Test("Editing a tracked original directs the user to Remove original")
+    @MainActor
+    func leftoverOriginalRefusesEdit() async throws {
+        let suite = "LeftoverEditTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = await editLeavingOriginal(defaults: defaults)
+        let replacement = makeSyncSession(id: replacementID, name: "project")
+        let provider = RecordingProvider(syncSessions: [pausedOriginal, replacement])
+        store.replaceProvider(provider)
+        var options = SyncCreateOptions(from: pausedOriginal)
+        options.name = "renamed-original"
+
+        let error = await store.recreateSync(
+            pausedOriginal, options: options, alpha: "/srv/project", beta: "/srv/mirror"
+        )
+
+        #expect(error == "Original session sync_original cannot be edited while its edited replacement \(replacementID) is listed. Use Remove original instead.")
+        #expect(provider.calls == [])
+    }
+
+    @Test("A replacement edit hands off protection before attempting to remove the previous replacement")
+    @MainActor
+    func replacementEditCarriesLeftoverPair() async throws {
+        let suite = "LeftoverEditTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = await editLeavingOriginal(defaults: defaults)
+        let previous = makeSyncSession(id: replacementID, name: "project")
+        let edited = makeSyncSession(id: "sync_" + String(repeating: "N", count: 43), name: "renamed")
+        let gate = Gate()
+        let provider = RecordingProvider(
+            syncSessions: [pausedOriginal, previous], sessionsAfterCreate: [pausedOriginal, edited],
+            beforeSyncTerminate: { await gate.pass() }
+        )
+        store.replaceProvider(provider)
+        #expect(store.syncSessionNames(excluding: previous.identifier) == [])
+        var options = SyncCreateOptions(from: previous)
+        options.name = "renamed"
+
+        let editing = Task {
+            await store.recreateSync(previous, options: options, alpha: "/srv/project", beta: "/srv/mirror")
+        }
+        await gate.reached()
+        let persisted = defaults.dictionary(forKey: "leftoverSyncOriginals") as? [String: String]
+        await gate.open()
+        let result = await editing.value
+
+        #expect(result == nil)
+        #expect(persisted == ["sync_original": edited.identifier])
+        #expect(store.leftoverSyncOriginals == ["sync_original": edited.identifier])
+
+        let relaunched = SessionStore(provider: provider, defaults: defaults)
+        let afterEdit = RecordingProvider(syncSessions: [pausedOriginal, edited])
+        relaunched.replaceProvider(afterEdit)
+        await relaunched.resumeSync(pausedOriginal.identifier)
+        #expect(afterEdit.calls == [])
+    }
+
+    @Test("Recovers the interrupted pair even if Helix relaunches again before listing sessions")
+    @MainActor
+    func interruptedEditProtectsOriginalAfterNoticeDismissal() async throws {
+        let suite = "InterruptedSyncEditTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(
+            ["original": original.identifier, "name": "project", "replacement": replacementID],
+            forKey: "syncEditInProgress"
+        )
+        let replacement = makeSyncSession(id: replacementID, name: "project")
+        let provider = RecordingProvider(syncSessions: [pausedOriginal, replacement])
+        let firstLaunch = SessionStore(provider: provider, defaults: defaults)
+        firstLaunch.dismissInterruptedEditNotice()
+        let relaunched = SessionStore(provider: provider, defaults: defaults)
+
+        await relaunched.resumeSync(original.identifier)
+
+        #expect(provider.calls == [])
+        #expect(relaunched.leftoverSyncOriginals == ["sync_original": replacementID])
+        #expect(relaunched.lastError == "Original session sync_original cannot resume while its edited replacement \(replacementID) is listed.")
+        await relaunched.removeLeftoverSyncOriginal(original.identifier)
+        #expect(provider.calls == ["syncTerminate:sync_original"])
+        #expect(relaunched.leftoverSyncOriginals == [:])
+    }
+
+    @Test("Relaunch protects both predecessors when an edit of a replacement was interrupted")
+    @MainActor
+    func interruptedReplacementEditPreservesPairChain() async throws {
+        let suite = "InterruptedSyncEditTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let previous = makeSyncSession(id: replacementID, name: "project", paused: true)
+        let edited = makeSyncSession(id: "sync_" + String(repeating: "N", count: 43), name: "project")
+        defaults.set(["sync_original": previous.identifier], forKey: "leftoverSyncOriginals")
+        defaults.set(
+            ["original": previous.identifier, "name": "project", "replacement": edited.identifier],
+            forKey: "syncEditInProgress"
+        )
+        let provider = RecordingProvider(syncSessions: [pausedOriginal, previous, edited])
+        let store = SessionStore(provider: provider, defaults: defaults)
+
+        await store.refresh()
+
+        #expect(store.leftoverSyncOriginals == ["sync_original": edited.identifier, previous.identifier: edited.identifier])
+        #expect(provider.calls == [])
+    }
+
     @Test("Keeps an original paused while its replacement is listed after relaunch")
     @MainActor
     func leftoverOriginalRefusesResumeAfterRelaunch() async throws {
@@ -896,6 +1084,36 @@ struct BulkPauseTests {
 
     private func removeDefaults() {
         defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    @Test("Pause All refuses during a sync edit without pausing unrelated sessions")
+    @MainActor
+    func pauseAllRefusesDuringEdit() async {
+        defer { removeDefaults() }
+        let original = makeSyncSession(id: "sync_1", name: "project")
+        let other = makeSyncSession(id: "sync_2", name: "archive")
+        let gate = Gate()
+        let provider = RecordingProvider(syncSessions: [original, other], duringSyncCreate: { await gate.pass() })
+        let store = SessionStore(provider: provider, defaults: defaults)
+        let editing = Task {
+            await store.recreateSync(
+                original, options: SyncCreateOptions(from: original), alpha: "/srv/project", beta: "/srv/mirror"
+            )
+        }
+        await gate.reached()
+        let callsBeforePauseAll = provider.calls
+
+        await store.pauseAllSync(until: Date(timeIntervalSince1970: 2_000_000_000))
+        let refusal = store.lastError
+        let bulkRecord = store.bulkPause
+        let callsAfterPauseAll = provider.calls
+        await gate.open()
+        let editError = await editing.value
+
+        #expect(refusal == "Wait for the edit to finish before using Pause All.")
+        #expect(bulkRecord == nil)
+        #expect(callsAfterPauseAll == callsBeforePauseAll)
+        #expect(editError == nil)
     }
 
     @Test("Pause All owns the replacement before a failed original removal")

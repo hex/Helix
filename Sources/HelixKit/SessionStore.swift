@@ -42,6 +42,12 @@ public enum HealthStatus: Sendable {
     case idle
 }
 
+public enum DaemonStatus: String, Sendable {
+    case running = "Running"
+    case stopped = "Stopped"
+    case unknown = "Status unknown"
+}
+
 @MainActor
 @Observable
 public final class SessionStore {
@@ -49,7 +55,9 @@ public final class SessionStore {
 
     public private(set) var syncSessions: [SyncSession] = []
     public private(set) var forwardSessions: [ForwardSession] = []
-    public private(set) var daemonRunning = false
+    public private(set) var daemonStatus = DaemonStatus.stopped
+    public var daemonRunning: Bool { daemonStatus == .running }
+    public private(set) var daemonStopProgress: String?
     public private(set) var daemonAutoStart = false
     public private(set) var mutagenVersion: String?
     public private(set) var lastError: String?
@@ -104,6 +112,9 @@ public final class SessionStore {
     /// The session `recreateSync` is replacing right now. No resolve or resume is started on it meanwhile.
     @ObservationIgnored private var sessionBeingEdited: String?
     @ObservationIgnored private var replacementBeingEdited: String?
+    @ObservationIgnored private var interruptedEditPairs: [String: String] = [:] {
+        didSet { persist(interruptedEditPairs, forKey: Self.interruptedEditPairsKey) }
+    }
     /// The end of the resolve or resume requested last on each session; the next one on that session waits for it.
     @ObservationIgnored private var lastTurn: [String: Task<Void, Never>] = [:]
     /// How many conflict resolves are running or waiting their turn, by session identifier.
@@ -113,6 +124,7 @@ public final class SessionStore {
     @ObservationIgnored private var daemonPriorityInFlight = false
     private static let syncEditInProgressKey = "syncEditInProgress"
     private static let interruptedSyncEditNoticeKey = "interruptedSyncEditNotice"
+    private static let interruptedEditPairsKey = "interruptedSyncEditPairs"
     private static let bulkPauseKey = "bulkPause"
     private static let sessionHoldsKey = "sessionHolds"
     private static let replacementsUnderWayKey = "replacementsUnderWay"
@@ -149,6 +161,7 @@ public final class SessionStore {
         sessionHolds = savedMessages(forKey: Self.sessionHoldsKey, called: "sessions kept paused after a conflict")
         leftoverNotices = savedMessages(forKey: Self.leftoverNoticesKey, called: "originals left on disk after a conflict")
         leftoverSyncOriginals = savedMessages(forKey: Self.leftoverSyncOriginalsKey, called: "original sessions left after an edit")
+        interruptedEditPairs = savedMessages(forKey: Self.interruptedEditPairsKey, called: "interrupted sync edits")
         holdSessionsWhoseReplacementWasCutShort()
         restoreInterruptedEditNotice()
     }
@@ -159,6 +172,9 @@ public final class SessionStore {
         let edit = defaults.dictionary(forKey: Self.syncEditInProgressKey)
         let notice: String
         if let original = edit?["original"] as? String, let name = edit?["name"] as? String {
+            if let replacement = edit?["replacement"] as? String, replacement != original {
+                interruptedEditPairs[original] = replacement
+            }
             let replacementName = edit?["replacementName"] as? String ?? name
             let candidate = replacementName.isEmpty
                 ? "an unnamed paused edited session"
@@ -222,8 +238,13 @@ public final class SessionStore {
     /// - Parameter identifier: the session being renamed, whose own name is not a collision.
     public func syncSessionNames(excluding identifier: String? = nil) -> [String] {
         syncSessions
-            .filter { $0.identifier != identifier }
+            .filter { !isPartOfSyncEdit($0.identifier, editing: identifier) }
             .compactMap(\.name)
+    }
+
+    private func isPartOfSyncEdit(_ identifier: String, editing edited: String?) -> Bool {
+        guard let edited else { return false }
+        return identifier == edited || leftoverSyncOriginals[identifier] == edited
     }
 
     /// Names held by forward sessions. Forwards occupy a namespace of their own —
@@ -295,8 +316,9 @@ public final class SessionStore {
             if force || syncDigest(lists.sync) != syncDigest(syncSessions) { syncSessions = lists.sync }
             if force || forwardDigest(lists.forward) != forwardDigest(forwardSessions) { forwardSessions = lists.forward }
             forgetSessions(notListedIn: lists.sync)
+            recoverInterruptedEditPairs(listed: lists.sync)
             forgetMissingEditPairs(existingEditPairs, listed: lists.sync)
-            if !daemonRunning { daemonRunning = true }
+            if !daemonRunning { daemonStatus = .running }
             if lastError != nil { lastError = nil }
             return true
         } catch is CancellationError {
@@ -305,7 +327,7 @@ public final class SessionStore {
         } catch {
             guard activeSessionLists[id] != nil else { return false }
             if !daemonRunning || lastError != error.localizedDescription {
-                daemonRunning = false
+                daemonStatus = .stopped
                 lastError = error.localizedDescription
             }
             return false
@@ -329,6 +351,23 @@ public final class SessionStore {
                 leftoverSyncOriginals[original] = nil
             }
         }
+    }
+
+    private func recoverInterruptedEditPairs(listed: [SyncSession]) {
+        guard !interruptedEditPairs.isEmpty else { return }
+        let identifiers = Set(listed.map(\.identifier))
+        for (original, replacement) in interruptedEditPairs where identifiers.contains(replacement) {
+            retargetLeftoverOriginals(from: original, to: replacement)
+            if identifiers.contains(original) {
+                leftoverSyncOriginals[original] = replacement
+            }
+        }
+        interruptedEditPairs.removeAll()
+    }
+
+    private func retargetLeftoverOriginals(from original: String, to replacement: String) {
+        let retargeted = leftoverSyncOriginals.mapValues { $0 == original ? replacement : $0 }
+        if retargeted != leftoverSyncOriginals { leftoverSyncOriginals = retargeted }
     }
 
     public func manualRefresh() async {
@@ -407,6 +446,7 @@ public final class SessionStore {
         }
 
         let provider = self.provider
+        let existingEditPairs = leftoverSyncOriginals
         let listed: [SyncSession]
         do {
             listed = try await provider.syncList()
@@ -414,11 +454,17 @@ public final class SessionStore {
             return await finishSyncEdit("Could not check the original session: \(error.localizedDescription).")
         }
 
+        recoverInterruptedEditPairs(listed: listed)
         let original = session.identifier
         guard let current = listed.first(where: { $0.identifier == original }) else {
             return await finishSyncEdit("The original session \(original) is no longer listed by Mutagen.")
         }
-        if let name = options.name, listed.contains(where: { $0.identifier != original && $0.name == name }) {
+        forgetMissingEditPairs(existingEditPairs, listed: listed)
+        if let replacement = leftoverSyncOriginals[original] {
+            let message = "Original session \(original) cannot be edited while its edited replacement \(replacement) is listed. Use Remove original instead."
+            return await finishSyncEdit(message)
+        }
+        if let name = options.name, listed.contains(where: { $0.name == name && !isPartOfSyncEdit($0.identifier, editing: original) }) {
             return await finishSyncEdit("Another sync session already uses the name \"\(name)\". The original session was kept.")
         }
 
@@ -464,6 +510,7 @@ public final class SessionStore {
             }
         }
 
+        retargetLeftoverOriginals(from: original, to: replacement)
         do {
             try await provider.syncTerminate(original)
         } catch {
@@ -542,6 +589,10 @@ public final class SessionStore {
             lastError = unavailable.localizedDescription
             return
         }
+        guard sessionBeingEdited == nil else {
+            lastError = "Wait for the edit to finish before using Pause All."
+            return
+        }
         guard !bulkPauseInFlight else { return }
         bulkPauseInFlight = true
         defer { bulkPauseInFlight = false }
@@ -554,7 +605,6 @@ public final class SessionStore {
         var failures: [String] = []
         for session in syncSessions where !session.paused {
             let identifier = session.identifier
-            guard identifier != sessionBeingEdited, identifier != replacementBeingEdited else { continue }
             do {
                 try await provider.syncPause(identifier)
                 let paused = bulkPause?.sessionIdentifiers ?? []
@@ -690,8 +740,15 @@ public final class SessionStore {
         // The resume takes a turn, so a resolve requested while it is in flight pauses after it.
         let failure: String? = await inTurn(on: identifier) {
             do {
+                if !self.interruptedEditPairs.isEmpty {
+                    let listed = try await self.provider.syncList()
+                    self.recoverInterruptedEditPairs(listed: listed)
+                }
                 if let replacement = self.leftoverSyncOriginals[identifier] {
                     let pair = try await self.checkEditPair(original: identifier, replacement: replacement)
+                    if let currentReplacement = self.leftoverSyncOriginals[identifier] {
+                        return self.leftoverResumeRefusal(original: identifier, replacement: currentReplacement)
+                    }
                     if pair.replacement != nil {
                         return self.leftoverResumeRefusal(original: identifier, replacement: replacement)
                     }
@@ -795,7 +852,7 @@ public final class SessionStore {
             try await provider.daemonStart()
             defaults.removeObject(forKey: Self.daemonStoppedKey)
             daemonControl = .managed
-            daemonRunning = true
+            daemonStatus = .running
             lastError = nil
             await refresh()
             schedulePollingIfManaged(refreshImmediately: false)
@@ -807,38 +864,64 @@ public final class SessionStore {
 
     @discardableResult
     public func stopDaemon() async -> Bool {
-        guard daemonControl == .managed || (daemonControl == .stopped && daemonRunning) else { return false }
+        if daemonControl == .stopping {
+            lastError = "Mutagen is already stopping."
+            return false
+        }
+        guard daemonControl == .managed else { return false }
 
         if let operation = operationBlockingDaemonStop {
             lastError = "Wait for the \(operation) to finish before stopping the Mutagen daemon."
             return false
         }
         daemonControl = .stopping
-        defaults.set(true, forKey: Self.daemonStoppedKey)
+        lastError = nil
         cancelPolling()
+        defer { daemonStopProgress = nil }
 
-        // List commands can autostart Mutagen. Discard their results and let the commands finish before Stop.
-        let requests = Array(activeSessionLists.values)
+        // List commands can autostart Mutagen; their results must not update the UI after Stop begins.
         activeSessionLists.removeAll()
-        for request in requests {
-            _ = await request.result
+        if provider.hasPendingCommands {
+            daemonStopProgress = "Waiting for running Mutagen commands to finish."
+            await provider.waitForPendingCommands()
         }
 
+        daemonStopProgress = "Stopping Mutagen."
+        defaults.set(true, forKey: Self.daemonStoppedKey)
         do {
             try await provider.daemonStop()
-            daemonControl = .stopped
-            daemonRunning = false
-            syncSessions = []
-            forwardSessions = []
-            backgroundPriorityPID = nil
-            setDaemonPriorityError(daemonBackgroundPriorityRequested ? "Mutagen daemon not found." : nil)
-            lastError = nil
-            return true
         } catch {
-            daemonControl = .stopped
-            lastError = error.localizedDescription
-            return false
+            daemonStopProgress = "Checking whether Mutagen is running."
+            let stopError = "Could not stop Mutagen: \(error.localizedDescription)"
+            do {
+                if try await daemonProcess.pid() != nil {
+                    resumeManagingDaemon(status: .running, error: stopError)
+                    return false
+                }
+            } catch {
+                resumeManagingDaemon(
+                    status: .unknown, error: "\(stopError). Could not verify its status: \(error.localizedDescription)"
+                )
+                return false
+            }
         }
+
+        daemonControl = .stopped
+        daemonStatus = .stopped
+        syncSessions = []
+        forwardSessions = []
+        backgroundPriorityPID = nil
+        setDaemonPriorityError(daemonBackgroundPriorityRequested ? "Mutagen daemon not found." : nil)
+        lastError = nil
+        return true
+    }
+
+    private func resumeManagingDaemon(status: DaemonStatus, error: String) {
+        defaults.removeObject(forKey: Self.daemonStoppedKey)
+        daemonStatus = status
+        daemonControl = .managed
+        lastError = error
+        schedulePollingIfManaged(refreshImmediately: false)
     }
 
     private var operationBlockingDaemonStop: String? {
@@ -1050,7 +1133,7 @@ public final class SessionStore {
                 self.lastError = hold
                 return roots
             }
-            if let replacement = self.leftoverSyncOriginals[identifier] {
+            if let replacement = self.leftoverSyncOriginals[identifier] ?? self.interruptedEditPairs[identifier] {
                 self.lastError = self.leftoverResumeRefusal(original: identifier, replacement: replacement)
                 return roots
             }
