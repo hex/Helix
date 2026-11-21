@@ -642,9 +642,9 @@ public final class SessionStore {
     // MARK: - Git Repo Detection
 
     public func gitRepoStatus(for session: SyncSession) async -> GitRepoCheck {
-        // Probe only endpoints mutagen holds a connection to: the rest are paused or unreachable,
-        // and one side alone cannot show a mismatch.
-        guard session.alpha.connected != false, session.beta.connected != false else {
+        // A session that should be connected and is not has an unreachable endpoint; probing it
+        // only opens connections that fail. A paused session is disconnected by design and is still probed.
+        guard session.paused || (session.alpha.connected != false && session.beta.connected != false) else {
             return GitRepoCheck(status: .unknown)
         }
         let alphaGit = appendingSubpath(to: session.alpha.endpointURL, subpath: ".git")
