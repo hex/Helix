@@ -7,7 +7,6 @@ import HelixKit
 struct StatusBadge: View {
     let status: String
     let paused: Bool
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(status: String, paused: Bool = false) {
         self.status = status
@@ -18,12 +17,7 @@ struct StatusBadge: View {
         Image(systemName: "circle.fill")
             .font(.system(size: 8))
             .foregroundStyle(color)
-            .symbolEffect(.pulse, isActive: isWorking && !reduceMotion)
             .accessibilityLabel(label)
-    }
-
-    private var isWorking: Bool {
-        !paused && SyncPhase(mutagenStatus: status) == .working
     }
 
     var color: Color {
