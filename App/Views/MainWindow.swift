@@ -332,8 +332,16 @@ private struct SyncListRow: View {
             StatusBadge(status: session.status, paused: session.paused)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(session.name ?? String(session.identifier.prefix(12)))
-                    .fontWeight(isSelected ? .semibold : .regular)
+                HStack(spacing: 6) {
+                    Text(session.name ?? String(session.identifier.prefix(12)))
+                        .fontWeight(isSelected ? .semibold : .regular)
+                    if hasVisibleMismatch {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.caption2)
+                            .foregroundStyle(isSelected ? .white.opacity(0.7) : .orange)
+                            .help("Git repository mismatch")
+                    }
+                }
                 HStack(spacing: 4) {
                     Text(session.alpha.protocol_)
                         .foregroundStyle(isSelected ? .white.opacity(0.7) : .blue)
@@ -378,13 +386,6 @@ private struct SyncListRow: View {
                     .monospacedDigit()
                     .frame(minWidth: 30, alignment: .trailing)
                     .foregroundStyle(isSelected ? .white.opacity(0.7) : .secondary)
-            }
-
-            if hasVisibleMismatch {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.caption2)
-                    .foregroundStyle(isSelected ? .white.opacity(0.7) : .orange)
-                    .help("Git repository mismatch")
             }
 
             if let conflicts = session.conflicts, !conflicts.isEmpty {
