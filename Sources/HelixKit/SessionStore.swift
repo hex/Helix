@@ -45,6 +45,12 @@ public enum HealthStatus: Sendable {
 @MainActor
 @Observable
 public final class SessionStore {
+    private enum DaemonControl {
+        case managed, starting, stopping, stopped
+    }
+
+    private typealias SessionLists = (sync: [SyncSession], forward: [ForwardSession])
+
     public private(set) var syncSessions: [SyncSession] = []
     public private(set) var forwardSessions: [ForwardSession] = []
     public private(set) var daemonRunning = false
@@ -76,6 +82,8 @@ public final class SessionStore {
 
     private var provider: any SessionProvider
     private var pollingTask: Task<Void, Never>?
+    @ObservationIgnored private var daemonControl = DaemonControl.managed
+    @ObservationIgnored private var activeSessionLists: [UUID: Task<SessionLists, Error>] = [:]
     private let fileTransport: FileTransport
     private let defaults: UserDefaults
     private let now: () -> Date
@@ -191,24 +199,35 @@ public final class SessionStore {
         if await reloadSessions(), let resumeAt = bulkPause?.resumeAt, now() >= resumeAt {
             await resumeBulkPause()
         }
+        guard daemonControl == .managed else { return }
         await reapplyDaemonBackgroundPriority()
     }
 
-    /// Fetches the session lists. Returns false when the daemon could not be reached.
+    /// Updates session lists while Helix is managing the daemon.
     @discardableResult
-    private func reloadSessions() async -> Bool {
-        do {
+    private func reloadSessions(force: Bool = false) async -> Bool {
+        guard daemonControl == .managed else { return false }
+
+        let id = UUID()
+        let request = Task<SessionLists, Error> { [provider] in
             async let syncs = provider.syncList()
             async let forwards = provider.forwardList()
-            let newSyncs = try await syncs
-            let newForwards = try await forwards
-            if syncDigest(newSyncs) != syncDigest(syncSessions) { syncSessions = newSyncs }
-            if forwardDigest(newForwards) != forwardDigest(forwardSessions) { forwardSessions = newForwards }
-            forgetSessions(notListedIn: newSyncs)
+            return try await (syncs, forwards)
+        }
+        activeSessionLists[id] = request
+        defer { activeSessionLists.removeValue(forKey: id) }
+
+        do {
+            let lists = try await request.value
+            guard activeSessionLists[id] != nil else { return false }
+            if force || syncDigest(lists.sync) != syncDigest(syncSessions) { syncSessions = lists.sync }
+            if force || forwardDigest(lists.forward) != forwardDigest(forwardSessions) { forwardSessions = lists.forward }
+            forgetSessions(notListedIn: lists.sync)
             if !daemonRunning { daemonRunning = true }
             if lastError != nil { lastError = nil }
             return true
         } catch {
+            guard activeSessionLists[id] != nil else { return false }
             if !daemonRunning || lastError != error.localizedDescription {
                 daemonRunning = false
                 lastError = error.localizedDescription
@@ -227,20 +246,7 @@ public final class SessionStore {
     }
 
     public func manualRefresh() async {
-        do {
-            async let syncs = provider.syncList()
-            async let forwards = provider.forwardList()
-            syncSessions = try await syncs
-            forwardSessions = try await forwards
-            forgetSessions(notListedIn: syncSessions)
-            if !daemonRunning { daemonRunning = true }
-            if lastError != nil { lastError = nil }
-        } catch {
-            if !daemonRunning || lastError != error.localizedDescription {
-                daemonRunning = false
-                lastError = error.localizedDescription
-            }
-        }
+        await reloadSessions(force: true)
         refreshCount += 1
     }
 
@@ -447,19 +453,35 @@ public final class SessionStore {
     // MARK: - Daemon
 
     public func startDaemon() async {
+        guard daemonControl == .managed || daemonControl == .stopped else { return }
+        let previousControl = daemonControl
+        daemonControl = .starting
         do {
             try await provider.daemonStart()
+            daemonControl = .managed
             daemonRunning = true
             lastError = nil
             await refresh()
         } catch {
+            daemonControl = previousControl
             lastError = error.localizedDescription
         }
     }
 
     public func stopDaemon() async {
+        guard daemonControl == .managed else { return }
+        daemonControl = .stopping
+
+        // List commands can autostart Mutagen. Discard their results and let the commands finish before Stop.
+        let requests = Array(activeSessionLists.values)
+        activeSessionLists.removeAll()
+        for request in requests {
+            _ = await request.result
+        }
+
         do {
             try await provider.daemonStop()
+            daemonControl = .stopped
             daemonRunning = false
             syncSessions = []
             forwardSessions = []
@@ -467,6 +489,7 @@ public final class SessionStore {
             setDaemonPriorityError(daemonBackgroundPriorityRequested ? "Mutagen daemon not found." : nil)
             lastError = nil
         } catch {
+            daemonControl = .managed
             lastError = error.localizedDescription
         }
     }

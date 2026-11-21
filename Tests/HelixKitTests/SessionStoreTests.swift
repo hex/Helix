@@ -320,6 +320,30 @@ struct SessionStoreTests {
         #expect(store.lastError == nil)
     }
 
+    @Test("Stop suppresses refreshes until Start restores the daemon and session lists")
+    @MainActor
+    func refreshDoesNotUndoDaemonStop() async {
+        let sync = makeSyncSession(id: "sync_1", name: "documents")
+        let forward = makeForwardSession(id: "fwd_1", name: "preview")
+        let store = SessionStore(provider: FakeProvider(syncSessions: [sync], forwardSessions: [forward]))
+        await store.refresh()
+        #expect(store.daemonRunning == true)
+
+        await store.stopDaemon()
+        await store.refresh()
+        #expect(store.daemonRunning == false)
+        #expect(store.syncSessions == [])
+        await store.manualRefresh()
+        #expect(store.daemonRunning == false)
+        #expect(store.forwardSessions == [])
+
+        await store.startDaemon()
+        #expect(store.daemonRunning == true)
+        #expect(store.syncSessions.map(\.identifier) == ["sync_1"])
+        #expect(store.forwardSessions.map(\.identifier) == ["fwd_1"])
+        #expect(store.lastError == nil)
+    }
+
     @Test("Daemon register sets autoStart to true")
     @MainActor
     func daemonRegister() async {

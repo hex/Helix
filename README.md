@@ -37,6 +37,7 @@
 - **Auto-update** -- Built-in Sparkle integration checks for updates from the menu bar
 - **Launch at login** -- Optional login item via SMAppService
 - **Configurable polling** -- Adjust refresh interval from 2 to 30 seconds
+- **Daemon controls** -- Stop in Settings suspends automatic and manual refreshes until you click Start. This applies while Helix is open.
 - **Background priority** -- Mutagen yields CPU and disk while the Mac is busy, which can slow transfers. Settings shows whether the priority applied and why it failed. Helix retries a saved request after a daemon restart.
 - **Text size** -- Adjustable text size (System Default, Small, Medium, Large, Extra Large) in Settings
 
