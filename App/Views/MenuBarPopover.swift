@@ -117,8 +117,7 @@ struct MenuBarPopover: View {
 
     private func openMainWindow() {
         NSApp.keyWindow?.close()
-        openWindow(id: "main")
-        NSApp.activate(ignoringOtherApps: true)
+        showMainWindow(using: openWindow)
     }
 }
 

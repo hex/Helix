@@ -14,6 +14,7 @@
 		3464F8E91741A8BE46F11BA1 /* HelixKit in Frameworks */ = {isa = PBXBuildFile; productRef = 313C9AA3D5A9CD038EF2DF8A /* HelixKit */; };
 		39041BB1D3F0AD49B96A1DF5 /* CreateSyncView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5109622A83040BAC39A7B120 /* CreateSyncView.swift */; };
 		446048282ADF4FDAA1FE2651 /* RemoteDirectoryBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31CD952F1C1FD8E39BFFE6B9 /* RemoteDirectoryBrowser.swift */; };
+		4A808AFC2641F57FEE95B4BE /* StatusItemMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B1699D97D01722CBF082981 /* StatusItemMenu.swift */; };
 		5DDE83060B5C93A12CA7E757 /* SyncModePicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 891C37B09E27AEF0D77BD41B /* SyncModePicker.swift */; };
 		5E7722A6240EFDC19E3EF1FC /* StatusBadge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7B9C9847DC36C9AEC8903D8 /* StatusBadge.swift */; };
 		90BFC7B4462546B4B085EAC6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B89BDB8EDDE71EC0F994D15F /* Assets.xcassets */; };
@@ -36,6 +37,7 @@
 		00EF23FC972D666D2E0F4602 /* ForwardDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ForwardDetailView.swift; sourceTree = "<group>"; };
 		01F769F95F310D70A648C305 /* EditSyncConfigView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditSyncConfigView.swift; sourceTree = "<group>"; };
 		078FBE6104B4D999A8FE0701 /* Helix */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Helix; path = .; sourceTree = SOURCE_ROOT; };
+		0B1699D97D01722CBF082981 /* StatusItemMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusItemMenu.swift; sourceTree = "<group>"; };
 		0BFEE0165893EA3FA23A1622 /* LabelEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LabelEditor.swift; sourceTree = "<group>"; };
 		2402BC4E72318518442C2C7E /* EndpointPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EndpointPicker.swift; sourceTree = "<group>"; };
 		29E457D9C31B4632004EA418 /* CreateForwardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreateForwardView.swift; sourceTree = "<group>"; };
@@ -103,6 +105,7 @@
 				B89BDB8EDDE71EC0F994D15F /* Assets.xcassets */,
 				9CE5AC6C882BDBCDB4C6C41F /* HelixApp.swift */,
 				D1B659FFDBAC7D3C71504DF1 /* Info.plist */,
+				0B1699D97D01722CBF082981 /* StatusItemMenu.swift */,
 				B29E0235E826AAC737A322A2 /* Components */,
 				DE3BBCB0A94175BE31F26F32 /* Views */,
 			);
@@ -255,6 +258,7 @@
 				446048282ADF4FDAA1FE2651 /* RemoteDirectoryBrowser.swift in Sources */,
 				02B9C9C04F56BD58B0B5BD9D /* SettingsView.swift in Sources */,
 				5E7722A6240EFDC19E3EF1FC /* StatusBadge.swift in Sources */,
+				4A808AFC2641F57FEE95B4BE /* StatusItemMenu.swift in Sources */,
 				E4937A08B36ADF273DB76377 /* SyncDetailView.swift in Sources */,
 				5DDE83060B5C93A12CA7E757 /* SyncModePicker.swift in Sources */,
 				AFD90EC354D70157A8DEC39C /* SyncOptionsForm.swift in Sources */,
