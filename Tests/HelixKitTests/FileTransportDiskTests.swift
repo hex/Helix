@@ -307,7 +307,8 @@ struct FileTransportReplaceDiskTests {
             let unusedCopy = scratch.appendingPathComponent(siblings[0])
             #expect(siblings[0].hasPrefix("loser.txt.helix-incoming-"))
             #expect(error.aftermath == .destinationUnchanged)
-            #expect(error.localizedDescription == "Could not move \(unusedCopy.path) into place at \(loser.path): connection lost. Then could not remove the copy at \(unusedCopy.path): permission denied. \(loser.path) is unchanged, and the unused copy is still at \(unusedCopy.path)")
+            #expect(error.incomingCopy == .unverified(path: unusedCopy.path))
+            #expect(error.localizedDescription == "Could not move \(unusedCopy.path) into place at \(loser.path): connection lost. Then could not remove the copy at \(unusedCopy.path): permission denied. \(loser.path) is unchanged, and the unused copy may still be at \(unusedCopy.path)")
             #expect(try text(at: loser) == "loser")
             #expect(try text(at: unusedCopy) == "winner")
         }
@@ -334,6 +335,44 @@ struct FileTransportReplaceDiskTests {
 
 @Suite("Conflict interruptions on disk")
 struct ConflictInterruptionDiskTests {
+    @Test("A partial incoming copy with failed cleanup holds the session", arguments: [false, true])
+    @MainActor
+    func failedCleanupHoldsSession(bulk: Bool) async throws {
+        try await withScratchDirectory { scratch in
+            let fixture = try LocalConflictFixture(in: scratch)
+            let suite = "IncompleteCopyTests.\(UUID().uuidString)"
+            let defaults = try #require(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let provider = RecordingProvider(syncSessions: [fixture.session])
+            let transport = FileTransport { executable, arguments in
+                if executable == "/bin/cp" {
+                    let incoming = try #require(arguments.last)
+                    try "partial".write(toFile: incoming, atomically: false, encoding: .utf8)
+                    throw CLIError(exitCode: 1, stderr: "copy failed")
+                }
+                if executable == "/bin/rm" { throw CLIError(exitCode: 1, stderr: "permission denied") }
+                return try await runProcess(executablePath: executable, arguments: arguments)
+            }
+            let store = SessionStore(provider: provider, fileTransport: transport, defaults: defaults)
+
+            let unresolved = if bulk {
+                await store.resolveConflicts(session: fixture.session, conflicts: [fixture.conflict], winner: .alpha)
+            } else {
+                await store.resolveConflict(session: fixture.session, conflict: fixture.conflict, winner: .alpha)
+            }
+
+            let parent = fixture.loser.deletingLastPathComponent()
+            let sibling = try #require(try replaceSiblings(in: parent).first)
+            let incoming = parent.appendingPathComponent(sibling)
+            #expect(try String(contentsOf: incoming, encoding: .utf8) == "partial")
+            #expect(try String(contentsOf: fixture.loser, encoding: .utf8) == "loser")
+            #expect(unresolved == ["file.txt"])
+            #expect(provider.calls == ["syncPause:sync_1"])
+            #expect(store.sessionHolds["sync_1"]?.contains(incoming.path) == true)
+            #expect(store.lastError == store.sessionHolds["sync_1"])
+        }
+    }
+
     @Test("An interrupted copy and cleanup leave both a journal and a hold")
     @MainActor
     func cancelledCopyKeepsRecoveryRecord() async throws {

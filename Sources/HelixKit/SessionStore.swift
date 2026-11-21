@@ -1431,6 +1431,9 @@ public final class SessionStore {
             }
             switch error.aftermath {
             case .destinationUnchanged:
+                if case .unverified = error.incomingCopy {
+                    return holdAfterConflictInterruption(error.localizedDescription, session: session, root: conflict.root)
+                }
                 replacementsUnderWay[session.identifier] = nil
                 throw error
             case .destinationUnverified:

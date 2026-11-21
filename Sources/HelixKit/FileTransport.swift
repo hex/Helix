@@ -32,6 +32,11 @@ public struct ReplaceError: LocalizedError {
         case destinationUnverified
     }
 
+    public enum IncomingCopy: Sendable, Equatable {
+        case absent
+        case unverified(path: String)
+    }
+
     public let source: String
     public let destination: String
     public let incoming: String
@@ -39,6 +44,13 @@ public struct ReplaceError: LocalizedError {
     public let aftermath: Aftermath
     public let failure: StepFailure
     public let recoveryFailures: [StepFailure]
+
+    public var incomingCopy: IncomingCopy {
+        if aftermath == .destinationUnverified || recoveryFailures.contains(where: { $0.step == .removeCopy }) {
+            return .unverified(path: incoming)
+        }
+        return .absent
+    }
 
     var wasInterrupted: Bool {
         failure.cause.isCommandInterruption || recoveryFailures.contains { $0.cause.isCommandInterruption }
@@ -59,11 +71,12 @@ public struct ReplaceError: LocalizedError {
         case (.destinationUnverified, _):
             return "Nothing was deleted: look for the original at \(setAside) and for the replacement at \(incoming)"
         case (.destinationUnchanged, .setOriginalAside), (.destinationUnchanged, .moveCopyIntoPlace):
-            let copyRemains = recoveryFailures.contains { $0.step == .removeCopy }
-            return copyRemains
-                ? "\(destination) is unchanged, and the unused copy is still at \(incoming)"
-                : "\(destination) is unchanged"
+            if case .unverified(let path) = incomingCopy {
+                return "\(destination) is unchanged, and the unused copy may still be at \(path)"
+            }
+            return "\(destination) is unchanged"
         case (.destinationUnchanged, _):
+            if case .unverified(let path) = incomingCopy { return "The unused copy may still be at \(path)" }
             return nil
         }
     }
