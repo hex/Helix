@@ -1,5 +1,5 @@
 // ABOUTME: Menu shown on right-clicking the menu bar icon: open Helix, pause or resume all syncs, quit.
-// ABOUTME: Watches right clicks on the status bar button, since MenuBarExtra offers no hook for them.
+// ABOUTME: Watches right clicks and double clicks on the status bar button, since MenuBarExtra offers no hook for them.
 
 import AppKit
 import SwiftUI
@@ -37,14 +37,22 @@ final class StatusItemMenuController: NSObject {
         self.store = store
         self.openWindow = openWindow
         super.init()
-        monitor = NSEvent.addLocalMonitorForEvents(matching: .rightMouseDown) { [weak self] event in
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.rightMouseDown, .leftMouseDown]) { [weak self] event in
             // Local monitors run on the main thread.
             MainActor.assumeIsolated {
                 guard let self, let button = Self.statusBarButton(in: event.window?.contentView) else {
                     return event
                 }
-                self.showMenu(below: button)
-                return nil
+                if event.type == .rightMouseDown {
+                    self.showMenu(below: button)
+                    return nil
+                }
+                // The first click of a double click opened the popover; the second is passed on
+                // so the status item closes it again, and the main window opens in its place.
+                if event.clickCount == 2 {
+                    self.openHelix()
+                }
+                return event
             }
         }
     }
@@ -112,7 +120,7 @@ final class StatusItemMenuController: NSObject {
 
         let alert = NSAlert()
         alert.messageText = "Pause all sync sessions"
-        alert.informativeText = "Minutes until they resume on their own, even if Helix is quit in the meantime."
+        alert.informativeText = "Minutes until they resume. If Helix is quit before then, they resume the next time it is opened."
         let pauseButton = alert.addButton(withTitle: "Pause")
         alert.addButton(withTitle: "Cancel")
 
