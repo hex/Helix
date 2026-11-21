@@ -20,6 +20,7 @@
 - **Menu bar menu** -- Right-click the icon to open Helix, pause every running sync session, pause them for the minutes you enter, or quit; Resume restores only the sessions Pause All paused, and a timed pause resumes on its own, even after you quit and reopen Helix. Helix saves each completed pause before starting the next one.
 - **Session dashboard** -- Browse, search, and filter all sync and forward sessions in a three-column window
 - **Connection errors** -- When a session cannot connect, the detail view shows mutagen's own reason under the status line
+- **Sync diagnostics** -- See scan and transition errors by endpoint and path. The detail view shows how many problems and conflicts Mutagen omitted, and running sessions with problems show a warning in the status icon.
 - **Transfer progress** -- While a session stages files, the detail view shows a progress bar, files and bytes received, and the file mutagen is sending; the session list and menu bar show the same percentage as `mutagen sync list -l`
 - **Create sessions** -- Step-by-step wizard for sync sessions; streamlined form for port forwarding
 - **Edit sessions** -- Rename a session or change its sync mode, ignore rules, symlinks, compression, and watch settings. Helix prepares a paused replacement before removing the original. The replacement starts with fresh sync history.

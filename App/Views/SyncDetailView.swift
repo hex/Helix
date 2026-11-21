@@ -27,6 +27,9 @@ struct SyncDetailView: View {
             VStack(alignment: .leading, spacing: 20) {
                 headerSection
                 endpointsSection
+                if session.alpha.hasProblems || session.beta.hasProblems {
+                    endpointProblemsSection
+                }
                 if (gitCheck.status == .alphaOnly || gitCheck.status == .betaOnly) && gitCheck.hasRemote && !isGitMismatchDismissed {
                     gitMismatchBanner
                 }
@@ -34,6 +37,11 @@ struct SyncDetailView: View {
                 if !visibleConflicts.isEmpty {
                     conflictsSection(visibleConflicts)
                         .transition(.opacity)
+                } else if let excluded = session.excludedConflicts, excluded > 0 {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Conflicts").font(.headline)
+                        omittedCount(excluded)
+                    }
                 }
                 dangerZone
             }
@@ -426,6 +434,57 @@ struct SyncDetailView: View {
         }
     }
 
+    // MARK: - Endpoint Problems
+
+    private var endpointProblemsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Endpoint Problems")
+                .font(.headline)
+            endpointProblems(session.alpha, title: "Alpha")
+            endpointProblems(session.beta, title: "Beta")
+        }
+    }
+
+    private func endpointProblems(_ endpoint: Endpoint, title: String) -> some View {
+        Group {
+            problemList("\(title) Scan", problems: endpoint.scanProblems ?? [], excluded: endpoint.excludedScanProblems ?? 0)
+            problemList("\(title) Transition", problems: endpoint.transitionProblems ?? [], excluded: endpoint.excludedTransitionProblems ?? 0)
+        }
+    }
+
+    @ViewBuilder
+    private func problemList(_ title: String, problems: [SyncProblem], excluded: UInt64) -> some View {
+        if !problems.isEmpty || excluded > 0 {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title)
+                    .font(.callout)
+                    .fontWeight(.semibold)
+                ForEach(problems.indices, id: \.self) { index in
+                    let problem = problems[index]
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(problem.path.flatMap { $0.isEmpty ? nil : $0 } ?? "(sync root)")
+                            .font(.caption.monospaced())
+                        Text(problem.error ?? "No error message supplied.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .textSelection(.enabled)
+                }
+                if excluded > 0 { omittedCount(excluded) }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+            .background(.background.secondary)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
+    private func omittedCount(_ count: UInt64) -> some View {
+        Text("\(count.formatted()) more not shown by mutagen")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+    }
+
     // MARK: - Configuration
 
     private var configurationSection: some View {
@@ -505,6 +564,10 @@ struct SyncDetailView: View {
                     showResetConfirmation = true
                 }
                 .controlSize(.small)
+            }
+
+            if let excluded = session.excludedConflicts, excluded > 0 {
+                omittedCount(excluded)
             }
 
             resolutionGuidance

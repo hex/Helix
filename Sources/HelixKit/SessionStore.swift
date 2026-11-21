@@ -183,10 +183,11 @@ public final class SessionStore {
         if hasDisconnected {
             return .error
         }
-        let hasConflicts = totalConflictCount > 0
+        let hasConflicts = running.contains { $0.conflicts?.isEmpty == false || ($0.excludedConflicts ?? 0) > 0 }
+        let hasProblems = running.contains { $0.alpha.hasProblems || $0.beta.hasProblems }
         let hasHalted = running.contains { $0.phase == .halted }
         let failsToConnect = running.contains { $0.phase == .connecting && !($0.lastError ?? "").isEmpty }
-        if hasConflicts || hasHalted || failsToConnect {
+        if hasConflicts || hasProblems || hasHalted || failsToConnect {
             return .warning
         }
         let hasActive = running.contains { $0.phase == .working || $0.phase == .connecting }
@@ -1182,10 +1183,15 @@ public final class SessionStore {
             hasher.combine(s.paused)
             hasher.combine(s.mode)
             hasher.combine(s.conflicts ?? [])
-            hasher.combine(s.alpha.connected)
-            hasher.combine(s.beta.connected)
-            hasher.combine(s.alpha.stagingProgress)
-            hasher.combine(s.beta.stagingProgress)
+            hasher.combine(s.excludedConflicts)
+            for endpoint in [s.alpha, s.beta] {
+                hasher.combine(endpoint.connected)
+                hasher.combine(endpoint.stagingProgress)
+                hasher.combine(endpoint.scanProblems)
+                hasher.combine(endpoint.excludedScanProblems)
+                hasher.combine(endpoint.transitionProblems)
+                hasher.combine(endpoint.excludedTransitionProblems)
+            }
             hasher.combine(s.lastError)
         }
         return hasher.finalize()

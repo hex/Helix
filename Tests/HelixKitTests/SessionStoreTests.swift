@@ -238,6 +238,52 @@ struct SessionStoreTests {
         #expect(store.overallHealth == .healthy)
     }
 
+    @Test("Refresh publishes problems with the same paths and warns only for running sessions")
+    @MainActor
+    func refreshPublishesEndpointProblems() async throws {
+        let fixture = try #require(Bundle.module.url(
+            forResource: "sync-list-diagnostics", withExtension: "json", subdirectory: "Fixtures"
+        ))
+        let json = try String(contentsOf: fixture, encoding: .utf8)
+        let decoder = JSONDecoder()
+        let initial = try decoder.decode(SyncSession.self, from: Data(json.utf8))
+        #expect(initial.alpha.scanProblems == [SyncProblem(path: "restricted", error: "permission denied")])
+        #expect(initial.alpha.excludedScanProblems == 2)
+        #expect(initial.beta.transitionProblems == [SyncProblem(path: "old.txt", error: "directory not empty")])
+        #expect(initial.beta.excludedTransitionProblems == 3)
+        #expect(initial.excludedConflicts == 4)
+        #expect(initial.beta.scanProblems == nil)
+        #expect(initial.beta.excludedScanProblems == nil)
+        let updatedJSON = json.replacingOccurrences(of: "permission denied", with: "operation not permitted")
+        let updated = try decoder.decode(SyncSession.self, from: Data(updatedJSON.utf8))
+        #expect(initial != updated)
+
+        let payload = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        let problemsOnly = payload.filter { $0.key != "conflicts" && $0.key != "excludedConflicts" }
+        let problemSession = try decoder.decode(SyncSession.self, from: JSONSerialization.data(withJSONObject: problemsOnly))
+        let store = SessionStore(provider: FakeProvider(syncSessions: [problemSession]))
+        await store.refresh()
+        #expect(store.overallHealth == .warning)
+
+        store.replaceProvider(FakeProvider(syncSessions: [initial]))
+        await store.refresh()
+        store.replaceProvider(FakeProvider(syncSessions: [updated]))
+        await store.refresh()
+        #expect(store.syncSessions == [updated])
+
+        let countedJSON = updatedJSON.replacingOccurrences(of: "\"excludedConflicts\": 4", with: "\"excludedConflicts\": 5")
+        let counted = try decoder.decode(SyncSession.self, from: Data(countedJSON.utf8))
+        store.replaceProvider(FakeProvider(syncSessions: [counted]))
+        await store.refresh()
+        #expect(store.syncSessions.first?.excludedConflicts == 5)
+
+        let pausedJSON = countedJSON.replacingOccurrences(of: "\"paused\": false", with: "\"paused\": true")
+        let paused = try decoder.decode(SyncSession.self, from: Data(pausedJSON.utf8))
+        store.replaceProvider(FakeProvider(syncSessions: [paused]))
+        await store.refresh()
+        #expect(store.overallHealth == .healthy)
+    }
+
     @Test("Total session count includes both sync and forward")
     @MainActor
     func totalCount() async {

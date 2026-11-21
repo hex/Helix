@@ -24,6 +24,7 @@ public struct SyncSession: Codable, Identifiable, Hashable, Sendable {
     public let permissions: PermissionsConfig
     public let compression: CompressionConfig
     public var conflicts: [Conflict]?
+    public var excludedConflicts: UInt64? = nil
     /// Why mutagen last failed to connect or synchronize; absent when it reports no error.
     public var lastError: String? = nil
 }
