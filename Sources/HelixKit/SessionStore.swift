@@ -112,6 +112,7 @@ public final class SessionStore {
     /// The session `recreateSync` is replacing right now. No resolve or resume is started on it meanwhile.
     @ObservationIgnored private var sessionBeingEdited: String?
     @ObservationIgnored private var replacementBeingEdited: String?
+    @ObservationIgnored private var hasUnreviewedSyncEdit = false
     @ObservationIgnored private var interruptedEditPairs: [String: String] = [:] {
         didSet { persist(interruptedEditPairs, forKey: Self.interruptedEditPairsKey) }
     }
@@ -431,6 +432,9 @@ public final class SessionStore {
             return message
         }
         guard sessionBeingEdited == nil else { return "Another sync edit is already in progress." }
+        guard !hasUnreviewedSyncEdit else {
+            return "Reopen Helix to review the interrupted sync edit before starting another edit."
+        }
         guard !bulkPauseInFlight else { return "Wait for Pause All or Resume to finish before editing a session." }
         // Mutagen parses numeric byte sizes as floating point before converting to an integer.
         if let size = options.maxStagingFileSize, let bytes = UInt64(size),
@@ -479,13 +483,19 @@ public final class SessionStore {
         var edit = ["original": original, "name": sessionName]
         if staged.name != sessionName { edit["replacementName"] = staged.name ?? "" }
         defaults.set(edit, forKey: Self.syncEditInProgressKey)
-        defer { defaults.removeObject(forKey: Self.syncEditInProgressKey) }
+        var keepEditRecord = false
+        defer {
+            if !keepEditRecord { defaults.removeObject(forKey: Self.syncEditInProgressKey) }
+        }
 
         let replacement: String
         do {
             replacement = try await provider.syncCreate(arguments: staged.arguments(alpha: alpha, beta: beta))
         } catch {
-            return await finishSyncEdit(syncCreateFailure(error, name: options.name, originalKept: true))
+            let message = syncCreateFailure(error, name: options.name, originalKept: true)
+            keepEditRecord = error.isCommandInterruption
+            if keepEditRecord { return reportInterruptedEdit(message) }
+            return await finishSyncEdit(message)
         }
         guard !listed.contains(where: { $0.identifier == replacement }) else {
             return await finishSyncEdit("Mutagen returned existing session identifier \(replacement). The original session was kept.")
@@ -499,14 +509,28 @@ public final class SessionStore {
             do {
                 try await provider.syncPause(original)
             } catch {
+                let message = "Could not pause the original session: \(error.localizedDescription)."
+                if error.isCommandInterruption {
+                    keepEditRecord = true
+                    return reportInterruptedEdit(message, original: original, replacement: replacement)
+                }
                 let recovery = await recoverSyncEdit(original: original, replacement: replacement, activationAttempted: false, provider: provider)
-                return await finishSyncEdit("Could not pause the original session: \(error.localizedDescription). \(recovery)")
+                keepEditRecord = !recovery.observedEnd
+                if keepEditRecord { return reportInterruptedEdit("\(message) \(recovery.message)", original: original, replacement: replacement) }
+                return await finishSyncEdit("\(message) \(recovery.message)")
             }
             do {
                 try await provider.syncResume(replacement)
             } catch {
+                let message = "Could not start the edited session: \(error.localizedDescription)."
+                if error.isCommandInterruption {
+                    keepEditRecord = true
+                    return reportInterruptedEdit(message, original: original, replacement: replacement)
+                }
                 let recovery = await recoverSyncEdit(original: original, replacement: replacement, activationAttempted: true, provider: provider)
-                return await finishSyncEdit("Could not start the edited session: \(error.localizedDescription). \(recovery)")
+                keepEditRecord = !recovery.observedEnd
+                if keepEditRecord { return reportInterruptedEdit("\(message) \(recovery.message)", original: original, replacement: replacement) }
+                return await finishSyncEdit("\(message) \(recovery.message)")
             }
         }
 
@@ -514,6 +538,13 @@ public final class SessionStore {
         do {
             try await provider.syncTerminate(original)
         } catch {
+            if error.isCommandInterruption {
+                keepEditRecord = true
+                return reportInterruptedEdit(
+                    "Could not confirm removal of the original session \(original): \(error.localizedDescription).",
+                    original: original, replacement: replacement
+                )
+            }
             leftoverSyncOriginals[original] = replacement
             return await finishSyncEdit(
                 "The edited session \(replacement) is ready. Could not remove original session \(original): \(error.localizedDescription).",
@@ -523,24 +554,35 @@ public final class SessionStore {
         return await finishSyncEdit(nil, replacement: replacement)
     }
 
+    private func reportInterruptedEdit(_ message: String, original: String? = nil, replacement: String? = nil) -> String {
+        hasUnreviewedSyncEdit = true
+        if let original, let replacement {
+            interruptedEditPairs[original] = replacement
+        }
+        let notice = "\(message) Reopen Helix to review the interrupted edit."
+        lastError = notice
+        return notice
+    }
+
     private func recoverSyncEdit(
         original: String,
         replacement: String,
         activationAttempted: Bool,
         provider: any SessionProvider
-    ) async -> String {
+    ) async -> (message: String, observedEnd: Bool) {
         var messages: [String] = []
         do {
             try await provider.syncTerminate(replacement)
         } catch {
             messages.append("Could not remove edited session \(replacement): \(error.localizedDescription).")
+            if error.isCommandInterruption { return (messages.joined(separator: " "), false) }
             if activationAttempted {
                 // Mutagen may start reconnecting even when Resume returns an error.
                 do {
                     try await provider.syncPause(replacement)
                 } catch {
                     messages.append("Could not confirm that \(replacement) stopped: \(error.localizedDescription). Check both sessions before resuming original session \(original).")
-                    return messages.joined(separator: " ")
+                    return (messages.joined(separator: " "), false)
                 }
             }
         }
@@ -555,8 +597,9 @@ public final class SessionStore {
             }
         } catch {
             messages.append("Original session \(original) was kept. Could not resume it: \(error.localizedDescription).")
+            return (messages.joined(separator: " "), false)
         }
-        return messages.joined(separator: " ")
+        return (messages.joined(separator: " "), true)
     }
 
     private func finishSyncEdit(_ message: String?, replacement: String? = nil) async -> String? {
@@ -756,6 +799,7 @@ public final class SessionStore {
                 try await self.provider.syncResume(identifier)
                 // The hold ends inside the turn, before a resolve waiting behind this resume can set another.
                 self.sessionHolds[identifier] = nil
+                self.replacementsUnderWay[identifier] = nil
                 return nil
             } catch {
                 return error.localizedDescription
@@ -1342,8 +1386,21 @@ public final class SessionStore {
 
         if winnerDeletedRoot {
             ConsoleLog.shared.log("  action: REMOVE \(loserURL.formatted)")
-            try await fileTransport.remove(endpoint: loserURL)
-            return .applied
+            replacementsUnderWay[session.identifier] = "Helix quit while removing \(loserURL.formatted); check whether that path was partly deleted."
+            do {
+                try await fileTransport.remove(endpoint: loserURL)
+                replacementsUnderWay[session.identifier] = nil
+                return .applied
+            } catch {
+                if error.isCommandInterruption {
+                    return holdAfterConflictInterruption(
+                        "Could not confirm removal of \(loserURL.formatted): \(error.localizedDescription)",
+                        session: session, root: conflict.root
+                    )
+                }
+                replacementsUnderWay[session.identifier] = nil
+                throw error
+            }
         }
         guard try await fileTransport.pathExists(endpoint: winnerURL) else {
             return .winnerMissing(winnerURL)
@@ -1353,16 +1410,25 @@ public final class SessionStore {
         replacementsUnderWay[session.identifier] = "Helix quit while replacing \(plan.destination.formatted); check \(plan.incoming.formatted) and \(plan.setAside.formatted)"
         do {
             let outcome = try await fileTransport.replace(plan)
-            replacementsUnderWay[session.identifier] = nil
             switch outcome {
             case .replaced:
+                replacementsUnderWay[session.identifier] = nil
                 return .applied
             case .replacedLeavingOriginal(let path, let reason):
+                replacementsUnderWay[session.identifier] = nil
                 return .appliedLeavingOriginal(
                     notice: "Resolved \"\(conflict.root)\", but left the original it replaced at \(path): \(reason). Delete that path by hand."
                 )
+            case .replacedWithInterruptedRemoval(let path, let reason):
+                return holdAfterConflictInterruption(
+                    "The set-aside tree at \(path) may be partly deleted: \(reason)", session: session, root: conflict.root
+                )
             }
         } catch {
+            if error.wasInterrupted {
+                let message = "\(error.localizedDescription). Check \(plan.incoming.formatted) and \(plan.setAside.formatted)"
+                return holdAfterConflictInterruption(message, session: session, root: conflict.root)
+            }
             switch error.aftermath {
             case .destinationUnchanged:
                 replacementsUnderWay[session.identifier] = nil
@@ -1375,6 +1441,12 @@ public final class SessionStore {
                 return .leftUnverified(notice: notice)
             }
         }
+    }
+
+    private func holdAfterConflictInterruption(_ message: String, session: SyncSession, root: String) -> ConflictFileOutcome {
+        let notice = "\(message). The session \"\(session.name ?? session.identifier)\" was left paused. Put \"\(root)\" in order, then resume the session."
+        sessionHolds[session.identifier] = notice
+        return .leftUnverified(notice: notice)
     }
 
     /// Why a conflict at the sync root is left alone: its loser path is the endpoint itself.

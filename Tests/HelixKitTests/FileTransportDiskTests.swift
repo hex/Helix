@@ -332,6 +332,66 @@ struct FileTransportReplaceDiskTests {
     }
 }
 
+@Suite("Conflict interruptions on disk")
+struct ConflictInterruptionDiskTests {
+    @Test("An interrupted copy and cleanup leave both a journal and a hold")
+    @MainActor
+    func cancelledCopyKeepsRecoveryRecord() async throws {
+        try await withScratchDirectory { scratch in
+            let fixture = try LocalConflictFixture(in: scratch)
+            let suite = "InterruptedCopyTests.\(UUID().uuidString)"
+            let defaults = try #require(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let provider = RecordingProvider(syncSessions: [fixture.session])
+            let transport = FileTransport { executable, arguments in
+                if executable == "/bin/cp" {
+                    let incoming = try #require(arguments.last)
+                    try "partial".write(toFile: incoming, atomically: false, encoding: .utf8)
+                    throw CancellationError()
+                }
+                if executable == "/bin/rm" { throw CancellationError() }
+                return try await runProcess(executablePath: executable, arguments: arguments)
+            }
+            let store = SessionStore(provider: provider, fileTransport: transport, defaults: defaults)
+
+            let unresolved = await store.resolveConflict(session: fixture.session, conflict: fixture.conflict, winner: .alpha)
+
+            let sibling = try #require(try replaceSiblings(in: fixture.loser.deletingLastPathComponent()).first)
+            let incoming = fixture.loser.deletingLastPathComponent().appendingPathComponent(sibling)
+            #expect(try String(contentsOf: incoming, encoding: .utf8) == "partial")
+            #expect(try String(contentsOf: fixture.loser, encoding: .utf8) == "loser")
+            #expect(unresolved == ["file.txt"])
+            #expect(provider.calls == ["syncPause:sync_1"])
+            #expect(store.sessionHolds["sync_1"]?.contains(incoming.path) == true)
+            #expect(defaults.dictionary(forKey: "replacementsUnderWay")?["sync_1"] != nil)
+            #expect(SessionStore(provider: provider, defaults: defaults).sessionHolds == store.sessionHolds)
+        }
+    }
+}
+
+private struct LocalConflictFixture {
+    let session: SyncSession
+    let conflict: Conflict
+    let winner: URL
+    let loser: URL
+
+    init(in scratch: URL) throws {
+        let alpha = scratch.appendingPathComponent("alpha")
+        let beta = scratch.appendingPathComponent("beta")
+        try FileManager.default.createDirectory(at: alpha, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: beta, withIntermediateDirectories: false)
+        winner = alpha.appendingPathComponent("file.txt")
+        loser = beta.appendingPathComponent("file.txt")
+        try "winner".write(to: winner, atomically: false, encoding: .utf8)
+        try "loser".write(to: loser, atomically: false, encoding: .utf8)
+        conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
+        session = makeSyncSession(
+            id: "sync_1", name: "project", conflicts: [conflict],
+            alpha: makeEndpoint(path: alpha.path), beta: makeEndpoint(path: beta.path)
+        )
+    }
+}
+
 @Suite("FileTransport run on disk")
 struct FileTransportRunDiskTests {
 

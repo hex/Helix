@@ -21,6 +21,12 @@ public struct ProcessDeadlineError: LocalizedError, Sendable {
     }
 }
 
+extension Error {
+    var isCommandInterruption: Bool {
+        self is CancellationError || self is ProcessDeadlineError
+    }
+}
+
 /// Returns the child's stdout or throws its launch error, exit error, cancellation, or deadline error.
 public func runProcess(
     executablePath: String, arguments: [String], deadline: Duration = CommandDeadline.query

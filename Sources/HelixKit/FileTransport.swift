@@ -40,6 +40,10 @@ public struct ReplaceError: LocalizedError {
     public let failure: StepFailure
     public let recoveryFailures: [StepFailure]
 
+    var wasInterrupted: Bool {
+        failure.cause.isCommandInterruption || recoveryFailures.contains { $0.cause.isCommandInterruption }
+    }
+
     public var errorDescription: String? {
         let first = sentence(for: failure)
         let recoveries = recoveryFailures.map { recoveryFailure -> String in
@@ -108,6 +112,8 @@ public enum ReplaceOutcome: Sendable, Equatable {
     case replaced
     /// The destination holds the copy; the original it displaced is still beside it at `path`.
     case replacedLeavingOriginal(path: String, reason: String)
+    /// The replacement is in place, but removal of the set-aside tree had no confirmed result.
+    case replacedWithInterruptedRemoval(path: String, reason: String)
 }
 
 public struct FileInfo: Sendable {
@@ -232,6 +238,9 @@ public struct FileTransport: Sendable {
         }
         /// Ends a replacement whose move at `step` failed, by reading what the move left on disk.
         func settle(_ step: ReplaceError.Step, _ cause: any Error, swap: Swap) async throws(ReplaceError) -> ReplaceOutcome {
+            if cause.isCommandInterruption {
+                throw failure(step, cause, aftermath: .destinationUnverified)
+            }
             let onDisk: (destination: Bool, incoming: Bool, setAside: Bool)
             do {
                 onDisk = (try await holdsName(destination), try await holdsName(incoming), try await holdsName(setAside))
@@ -296,6 +305,9 @@ public struct FileTransport: Sendable {
         do {
             try await remove(endpoint: setAside)
         } catch {
+            if error.isCommandInterruption {
+                return .replacedWithInterruptedRemoval(path: setAside.formatted, reason: error.localizedDescription)
+            }
             return .replacedLeavingOriginal(path: setAside.formatted, reason: error.localizedDescription)
         }
         return .replaced
