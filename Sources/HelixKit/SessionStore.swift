@@ -200,7 +200,7 @@ public final class SessionStore {
         do {
             async let syncs = provider.syncList()
             async let forwards = provider.forwardList()
-            let newSyncs = preserveConflicts(old: syncSessions, new: try await syncs)
+            let newSyncs = try await syncs
             let newForwards = try await forwards
             if syncDigest(newSyncs) != syncDigest(syncSessions) { syncSessions = newSyncs }
             if forwardDigest(newForwards) != forwardDigest(forwardSessions) { forwardSessions = newForwards }
@@ -1065,22 +1065,6 @@ public final class SessionStore {
 
     // MARK: - Private
 
-    /// Carries forward known conflicts when new poll data has nil conflicts (mid-scan).
-    /// Go protobuf omits empty repeated fields, so mid-scan JSON has `conflicts: null`.
-    private func preserveConflicts(old: [SyncSession], new: [SyncSession]) -> [SyncSession] {
-        let oldByID = Dictionary(uniqueKeysWithValues: old.map { ($0.identifier, $0) })
-        return new.map { session in
-            guard session.conflicts == nil,
-                  let previous = oldByID[session.identifier],
-                  previous.conflicts != nil else {
-                return session
-            }
-            var patched = session
-            patched.conflicts = previous.conflicts
-            return patched
-        }
-    }
-
     /// Hashes fields that affect the UI (identity, status, conflicts, connectivity,
     /// staging progress, last error). Excludes volatile counters like successfulCycles and endpoint
     /// scan statistics that change every mutagen scan cycle.
@@ -1092,7 +1076,7 @@ public final class SessionStore {
             hasher.combine(s.status)
             hasher.combine(s.paused)
             hasher.combine(s.mode)
-            hasher.combine(s.conflicts?.count ?? 0)
+            hasher.combine(s.conflicts ?? [])
             hasher.combine(s.alpha.connected)
             hasher.combine(s.beta.connected)
             hasher.combine(s.alpha.stagingProgress)

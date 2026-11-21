@@ -74,8 +74,7 @@ struct SyncDetailView: View {
             }
         }
         .onChange(of: session.conflicts) {
-            // Clear roots that are no longer in the conflict list (confirmed resolved).
-            // Store-level preserveConflicts ensures mid-scan nil data doesn't reach here.
+            // Keep resolution markers only for conflicts Mutagen still reports.
             let currentRoots = Set((session.conflicts ?? []).map(\.root))
             resolvingRoots = resolvingRoots.intersection(currentRoots)
         }

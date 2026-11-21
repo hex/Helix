@@ -208,6 +208,36 @@ struct SessionStoreTests {
         #expect(store.overallHealth == .active)
     }
 
+    @Test("Refresh updates conflict details and clears the badge when conflicts disappear")
+    @MainActor
+    func refreshUpdatesConflicts() async {
+        let original = Conflict(
+            root: "report.txt",
+            alphaChanges: [Change(path: "report.txt", old: nil, new: Entry(kind: "file", digest: nil, executable: nil))],
+            betaChanges: []
+        )
+        let replacement = Conflict(
+            root: "report.txt",
+            alphaChanges: [Change(path: "report.txt", old: nil, new: Entry(kind: "symlink", digest: nil, executable: nil))],
+            betaChanges: []
+        )
+        let conflicted = makeSyncSession(id: "sync_1", name: "reports", conflicts: [original])
+        let store = SessionStore(provider: FakeProvider(syncSessions: [conflicted]))
+        await store.refresh()
+        #expect(store.totalConflictCount == 1)
+
+        let updated = makeSyncSession(id: "sync_1", name: "reports", conflicts: [replacement])
+        store.replaceProvider(FakeProvider(syncSessions: [updated]))
+        await store.refresh()
+        #expect(store.syncSessions.first?.conflicts?.first?.alphaChanges.first?.new?.kind == "symlink")
+
+        let resolved = makeSyncSession(id: "sync_1", name: "reports")
+        store.replaceProvider(FakeProvider(syncSessions: [resolved]))
+        await store.refresh()
+        #expect(store.totalConflictCount == 0)
+        #expect(store.overallHealth == .healthy)
+    }
+
     @Test("Total session count includes both sync and forward")
     @MainActor
     func totalCount() async {
