@@ -191,7 +191,8 @@ struct ProcessRegistryTests {
 
         let stopped = try await withTimeout(seconds: 2) { await registry.terminateAll() }
 
-        #expect(stopped == 1)
+        #expect(stopped.interrupted == 1)
+        #expect(stopped.unfinished == 0)
         #expect(fixtureIsGone(pid))
         await #expect(throws: CancellationError.self) {
             try await withTimeout(seconds: 2) { try await call.value }
@@ -199,6 +200,32 @@ struct ProcessRegistryTests {
         await #expect(throws: CancellationError.self) {
             try await registry.run(executablePath: "/usr/bin/printf", arguments: ["after quit"], deadline: .seconds(1))
         }
+    }
+
+    @Test("Quit returns when its drain budget is exhausted while escalation continues")
+    func registryReturnsWhenQuitBudgetExpires() async throws {
+        let registry = ProcessRunner()
+        let pidFile = fixturePIDFile()
+        defer { try? FileManager.default.removeItem(at: pidFile) }
+        let call = Task {
+            try await registry.run(
+                executablePath: "/bin/sh",
+                arguments: ["-c", "trap '' TERM; printf '%s\n' \"$$\" > \"$1\"; exec /bin/sleep 8", "helix-test", pidFile.path],
+                deadline: .seconds(6)
+            )
+        }
+        defer { call.cancel() }
+        let pid = try await processIdentifier(writtenTo: pidFile)
+        defer { endFixture(pid) }
+
+        let result = try await withTimeout(seconds: 2) { await registry.terminateAll(within: .zero) }
+
+        #expect(result.interrupted == 1)
+        #expect(result.unfinished == 1)
+        await #expect(throws: CancellationError.self) {
+            try await withTimeout(seconds: 2) { try await call.value }
+        }
+        #expect(fixtureIsGone(pid))
     }
 
     @Test("A completed command leaves no child in the registry")
@@ -210,7 +237,8 @@ struct ProcessRegistryTests {
         let stopped = try await withTimeout(seconds: 2) { await registry.terminateAll() }
 
         #expect(output == "finished")
-        #expect(stopped == 0)
+        #expect(stopped.interrupted == 0)
+        #expect(stopped.unfinished == 0)
     }
 }
 

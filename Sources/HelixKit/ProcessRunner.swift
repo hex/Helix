@@ -9,6 +9,7 @@ public enum CommandDeadline {
     public static let query: Duration = .seconds(15)
     public static let operation: Duration = .seconds(45)
     public static let transfer: Duration = .seconds(900)
+    public static let quitDrain: Duration = .seconds(3)
     static let terminationGrace: Duration = .milliseconds(250)
 }
 
@@ -35,8 +36,19 @@ public func runProcess(
 }
 
 public actor ProcessRunner {
+    public struct DrainReport: Sendable {
+        public let interrupted: Int
+        public let unfinished: Int
+    }
+
+    private struct DrainWaiter {
+        let continuation: CheckedContinuation<Void, Never>
+        let timer: Task<Void, Never>
+    }
+
     public static let shared = ProcessRunner()
 
+    private var drainWaiters: [UUID: DrainWaiter] = [:]
     private var children: [ObjectIdentifier: RunningChild] = [:]
     private var isShuttingDown = false
     private let waitForDeadline: @Sendable (ContinuousClock.Instant) async throws -> Void
@@ -57,7 +69,12 @@ public actor ProcessRunner {
         )
         let identifier = ObjectIdentifier(child)
         children[identifier] = child
-        defer { children.removeValue(forKey: identifier) }
+        defer {
+            children.removeValue(forKey: identifier)
+            if children.isEmpty {
+                for waiter in Array(drainWaiters.keys) { finishDrain(waiter) }
+            }
+        }
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 child.launch(continuation)
@@ -67,15 +84,31 @@ public actor ProcessRunner {
         }
     }
 
-    /// Closes command admission, ends every tracked command, and returns their count.
+    /// Closes command admission, interrupts tracked commands, and waits within the quit budget.
     @discardableResult
-    public func terminateAll() async -> Int {
+    public func terminateAll(within budget: Duration = CommandDeadline.quitDrain) async -> DrainReport {
+        precondition(budget >= .zero, "The quit budget must not be negative")
+        let deadline = ContinuousClock.now.advanced(by: budget)
         isShuttingDown = true
-        let running = Array(children.values)
-        for child in running { child.interrupt(throwing: CancellationError()) }
-        for child in running { await child.waitUntilFinished() }
-        children.removeAll()
-        return running.count
+        let count = children.count
+        for child in children.values { child.interrupt(throwing: CancellationError()) }
+        if count > 0, ContinuousClock.now < deadline {
+            let id = UUID()
+            await withCheckedContinuation { continuation in
+                let timer = Task { [weak self] in
+                    guard (try? await ContinuousClock().sleep(until: deadline)) != nil else { return }
+                    await self?.finishDrain(id)
+                }
+                drainWaiters[id] = DrainWaiter(continuation: continuation, timer: timer)
+            }
+        }
+        return DrainReport(interrupted: count, unfinished: children.count)
+    }
+
+    private func finishDrain(_ id: UUID) {
+        guard let waiter = drainWaiters.removeValue(forKey: id) else { return }
+        waiter.timer.cancel()
+        waiter.continuation.resume()
     }
 }
 
@@ -90,7 +123,6 @@ private final class RunningChild: @unchecked Sendable {
     private let stderrPipe = Pipe()
 
     private var continuation: CheckedContinuation<String, Error>?
-    private var completionWaiters: [CheckedContinuation<Void, Never>] = []
     private var channels: [DispatchIO] = []
     private var deadlineTimer: Task<Void, Never>?
     private var openPipes = 0
@@ -175,18 +207,6 @@ private final class RunningChild: @unchecked Sendable {
         queue.async { self.beginInterruption(error) }
     }
 
-    func waitUntilFinished() async {
-        await withCheckedContinuation { continuation in
-            queue.async {
-                if self.finished {
-                    continuation.resume()
-                } else {
-                    self.completionWaiters.append(continuation)
-                }
-            }
-        }
-    }
-
     private func beginInterruption(_ error: Error) {
         guard !finished, interruption == nil else { return }
         interruption = error
@@ -257,8 +277,6 @@ private final class RunningChild: @unchecked Sendable {
         let waiting = continuation
         continuation = nil
         waiting?.resume(with: result)
-        for waiter in completionWaiters { waiter.resume() }
-        completionWaiters.removeAll()
     }
 }
 
