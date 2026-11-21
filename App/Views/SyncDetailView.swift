@@ -202,7 +202,7 @@ struct SyncDetailView: View {
 
             if let replacement = store.leftoverSyncOriginals[session.identifier] {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("This original stays paused while the edited session \(replacement) is listed.")
+                    Text("Helix blocks Resume on this original while the edited session \(replacement) is listed.")
                         .foregroundStyle(.orange)
                         .textSelection(.enabled)
                     Button("Remove original") {

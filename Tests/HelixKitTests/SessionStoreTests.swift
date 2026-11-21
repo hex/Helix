@@ -916,6 +916,54 @@ struct LeftoverSyncOriginalTests {
         #expect(afterEdit.calls == [])
     }
 
+    @Test("Recovers the interrupted pair even if Helix relaunches again before listing sessions")
+    @MainActor
+    func interruptedEditProtectsOriginalAfterNoticeDismissal() async throws {
+        let suite = "InterruptedSyncEditTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(
+            ["original": original.identifier, "name": "project", "replacement": replacementID],
+            forKey: "syncEditInProgress"
+        )
+        let replacement = makeSyncSession(id: replacementID, name: "project")
+        let provider = RecordingProvider(syncSessions: [pausedOriginal, replacement])
+        let firstLaunch = SessionStore(provider: provider, defaults: defaults)
+        firstLaunch.dismissInterruptedEditNotice()
+        let relaunched = SessionStore(provider: provider, defaults: defaults)
+
+        await relaunched.resumeSync(original.identifier)
+
+        #expect(provider.calls == [])
+        #expect(relaunched.leftoverSyncOriginals == ["sync_original": replacementID])
+        #expect(relaunched.lastError == "Original session sync_original cannot resume while its edited replacement \(replacementID) is listed.")
+        await relaunched.removeLeftoverSyncOriginal(original.identifier)
+        #expect(provider.calls == ["syncTerminate:sync_original"])
+        #expect(relaunched.leftoverSyncOriginals == [:])
+    }
+
+    @Test("Relaunch protects both predecessors when an edit of a replacement was interrupted")
+    @MainActor
+    func interruptedReplacementEditPreservesPairChain() async throws {
+        let suite = "InterruptedSyncEditTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let previous = makeSyncSession(id: replacementID, name: "project", paused: true)
+        let edited = makeSyncSession(id: "sync_" + String(repeating: "N", count: 43), name: "project")
+        defaults.set(["sync_original": previous.identifier], forKey: "leftoverSyncOriginals")
+        defaults.set(
+            ["original": previous.identifier, "name": "project", "replacement": edited.identifier],
+            forKey: "syncEditInProgress"
+        )
+        let provider = RecordingProvider(syncSessions: [pausedOriginal, previous, edited])
+        let store = SessionStore(provider: provider, defaults: defaults)
+
+        await store.refresh()
+
+        #expect(store.leftoverSyncOriginals == ["sync_original": edited.identifier, previous.identifier: edited.identifier])
+        #expect(provider.calls == [])
+    }
+
     @Test("Keeps an original paused while its replacement is listed after relaunch")
     @MainActor
     func leftoverOriginalRefusesResumeAfterRelaunch() async throws {
