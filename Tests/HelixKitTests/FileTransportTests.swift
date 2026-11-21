@@ -41,7 +41,7 @@ struct FileTransportCopyTests {
         #expect(recorder.commands.count == 1)
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/scp")
-        #expect(cmd.arguments == ["-r", "/tmp/a/file.txt", "deploy@server.com:/opt/file.txt"])
+        #expect(cmd.arguments == connectionOptions + ["-r", "/tmp/a/file.txt", "deploy@server.com:/opt/file.txt"])
     }
 
     @Test("ssh to local uses scp")
@@ -57,7 +57,7 @@ struct FileTransportCopyTests {
         #expect(recorder.commands.count == 1)
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/scp")
-        #expect(cmd.arguments == ["-r", "server.com:/opt/file.txt", "/tmp/b/file.txt"])
+        #expect(cmd.arguments == connectionOptions + ["-r", "server.com:/opt/file.txt", "/tmp/b/file.txt"])
     }
 
     @Test("ssh with port uses scp -P flag")
@@ -73,7 +73,7 @@ struct FileTransportCopyTests {
         #expect(recorder.commands.count == 1)
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/scp")
-        #expect(cmd.arguments == ["-r", "-P", "2222", "/tmp/file.txt", "root@box:/data/file.txt"])
+        #expect(cmd.arguments == connectionOptions + ["-r", "-P", "2222", "/tmp/file.txt", "root@box:/data/file.txt"])
     }
 
     // MARK: - Local <-> Docker
@@ -125,7 +125,7 @@ struct FileTransportCopyTests {
         #expect(recorder.commands.count == 1)
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/scp")
-        #expect(cmd.arguments == ["-3", "-r", "a@host1:/file.txt", "b@host2:/file.txt"])
+        #expect(cmd.arguments == connectionOptions + ["-3", "-r", "a@host1:/file.txt", "b@host2:/file.txt"])
     }
 
     // MARK: - Cross-transport (via temp file)
@@ -218,7 +218,7 @@ struct FileTransportStatTests {
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/ssh")
         // Uses cross-platform stat: tries GNU stat first, falls back to macOS stat
-        #expect(cmd.arguments == ["deploy@server", "stat -c '%s %Y' '/opt/file.txt' 2>/dev/null || stat -f '%z %m' '/opt/file.txt'"])
+        #expect(cmd.arguments == connectionOptions + ["deploy@server", "stat -c '%s %Y' '/opt/file.txt' 2>/dev/null || stat -f '%z %m' '/opt/file.txt'"])
     }
 
     @Test("stat parses docker exec output")
@@ -247,7 +247,7 @@ struct FileTransportStatTests {
 
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/ssh")
-        #expect(cmd.arguments == ["-p", "2222", "box", "stat -c '%s %Y' '/file.txt' 2>/dev/null || stat -f '%z %m' '/file.txt'"])
+        #expect(cmd.arguments == connectionOptions + ["-p", "2222", "box", "stat -c '%s %Y' '/file.txt' 2>/dev/null || stat -f '%z %m' '/file.txt'"])
     }
 
     @Test("stat throws on malformed output")
@@ -289,7 +289,7 @@ struct FileTransportRemoveTests {
         #expect(recorder.commands.count == 1)
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/ssh")
-        #expect(cmd.arguments == ["deploy@server.com", "rm -rf '/opt/dir'"])
+        #expect(cmd.arguments == connectionOptions + ["deploy@server.com", "rm -rf '/opt/dir'"])
     }
 
     @Test("remove ssh with port passes -p flag")
@@ -304,7 +304,7 @@ struct FileTransportRemoveTests {
         #expect(recorder.commands.count == 1)
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/ssh")
-        #expect(cmd.arguments == ["-p", "2222", "box", "rm -rf '/data/dir'"])
+        #expect(cmd.arguments == connectionOptions + ["-p", "2222", "box", "rm -rf '/data/dir'"])
     }
 
     @Test("remove docker uses docker exec rm -rf")
@@ -336,7 +336,7 @@ struct FileTransportTildeTests {
         )
 
         let cmd = recorder.commands[0]
-        #expect(cmd.arguments == ["hex@server", "rm -rf \"$HOME\"/'.claude-sessions/teamcity/logs'"])
+        #expect(cmd.arguments == connectionOptions + ["hex@server", "rm -rf \"$HOME\"/'.claude-sessions/teamcity/logs'"])
     }
 
     @Test("directoryExists ssh with tilde uses $HOME")
@@ -349,7 +349,7 @@ struct FileTransportTildeTests {
         )
 
         let cmd = recorder.commands[0]
-        #expect(cmd.arguments == ["hex@server", "test -d \"$HOME\"/'.claude-sessions/.git'"])
+        #expect(cmd.arguments == connectionOptions + ["hex@server", "test -d \"$HOME\"/'.claude-sessions/.git'"])
     }
 
     @Test("run ssh with tilde uses $HOME in cd")
@@ -363,7 +363,7 @@ struct FileTransportTildeTests {
         )
 
         let cmd = recorder.commands[0]
-        #expect(cmd.arguments == ["hex@server", "cd \"$HOME\"/'.claude-sessions' && git init"])
+        #expect(cmd.arguments == connectionOptions + ["hex@server", "cd \"$HOME\"/'.claude-sessions' && git init"])
     }
 
     @Test("absolute paths still use single quotes")
@@ -376,7 +376,7 @@ struct FileTransportTildeTests {
         )
 
         let cmd = recorder.commands[0]
-        #expect(cmd.arguments == ["deploy@server", "rm -rf '/opt/dir'"])
+        #expect(cmd.arguments == connectionOptions + ["deploy@server", "rm -rf '/opt/dir'"])
     }
 }
 
@@ -421,12 +421,12 @@ struct FileTransportReplaceTests {
         let setAside = "/opt/app/file.txt.helix-replaced-\(token)"
         #expect(recorder.commands.map(\.executable) == ["/usr/bin/scp", "/usr/bin/ssh", "/usr/bin/ssh", "/usr/bin/ssh", "/usr/bin/ssh", "/usr/bin/ssh"])
         #expect(recorder.commands.map(\.arguments) == [
-            ["-r", "/tmp/a/file.txt", "deploy@server:\(incoming)"],
-            ["deploy@server", "test -e '/opt/app/file.txt'"],
-            ["deploy@server", "test -d '/opt/app/file.txt'"],
-            ["deploy@server", "mv '/opt/app/file.txt' '\(setAside)'"],
-            ["deploy@server", "mv '\(incoming)' '/opt/app/file.txt'"],
-            ["deploy@server", "rm -rf '\(setAside)'"],
+            connectionOptions + ["-r", "/tmp/a/file.txt", "deploy@server:\(incoming)"],
+            connectionOptions + ["deploy@server", "test -e '/opt/app/file.txt'"],
+            connectionOptions + ["deploy@server", "test -d '/opt/app/file.txt'"],
+            connectionOptions + ["deploy@server", "mv '/opt/app/file.txt' '\(setAside)'"],
+            connectionOptions + ["deploy@server", "mv '\(incoming)' '/opt/app/file.txt'"],
+            connectionOptions + ["deploy@server", "rm -rf '\(setAside)'"],
         ])
     }
 
@@ -448,11 +448,11 @@ struct FileTransportReplaceTests {
         let token = try token(in: recorder.commands)
         let incoming = "/opt/app/file.txt.helix-incoming-\(token)"
         #expect(recorder.commands.map(\.arguments) == [
-            ["-r", "/tmp/a/file.txt", "deploy@server:\(incoming)"],
-            ["deploy@server", "test -e '/opt/app/file.txt'"],
-            ["deploy@server", "test -d '/opt/app/file.txt'"],
-            ["deploy@server", "test -d '\(incoming)'"],
-            ["deploy@server", "mv '\(incoming)' '/opt/app/file.txt'"],
+            connectionOptions + ["-r", "/tmp/a/file.txt", "deploy@server:\(incoming)"],
+            connectionOptions + ["deploy@server", "test -e '/opt/app/file.txt'"],
+            connectionOptions + ["deploy@server", "test -d '/opt/app/file.txt'"],
+            connectionOptions + ["deploy@server", "test -d '\(incoming)'"],
+            connectionOptions + ["deploy@server", "mv '\(incoming)' '/opt/app/file.txt'"],
         ])
     }
 
@@ -475,8 +475,8 @@ struct FileTransportReplaceTests {
         let incoming = "/opt/app/file.txt.helix-incoming-\(token)"
         #expect(error.localizedDescription == "Could not copy /tmp/a/file.txt to deploy@server:\(incoming): lost connection")
         #expect(recorder.commands.map(\.arguments) == [
-            ["-r", "/tmp/a/file.txt", "deploy@server:\(incoming)"],
-            ["deploy@server", "rm -rf '\(incoming)'"],
+            connectionOptions + ["-r", "/tmp/a/file.txt", "deploy@server:\(incoming)"],
+            connectionOptions + ["deploy@server", "rm -rf '\(incoming)'"],
         ])
     }
 
@@ -505,17 +505,17 @@ struct FileTransportReplaceTests {
         let setAside = "/opt/app/file.txt.helix-replaced-\(token)"
         #expect(error.localizedDescription == "Could not move deploy@server:\(incoming) into place at deploy@server:/opt/app/file.txt: permission denied. deploy@server:/opt/app/file.txt is unchanged")
         #expect(recorder.commands.map(\.arguments) == [
-            ["-r", "/tmp/a/file.txt", "deploy@server:\(incoming)"],
-            ["deploy@server", "test -e '/opt/app/file.txt'"],
-            ["deploy@server", "test -d '/opt/app/file.txt'"],
-            ["deploy@server", "mv '/opt/app/file.txt' '\(setAside)'"],
-            ["deploy@server", "mv '\(incoming)' '/opt/app/file.txt'"],
-            ["deploy@server", "test -e '/opt/app/file.txt'"],
-            ["deploy@server", "test -L '/opt/app/file.txt'"],
-            ["deploy@server", "test -e '\(incoming)'"],
-            ["deploy@server", "test -e '\(setAside)'"],
-            ["deploy@server", "mv '\(setAside)' '/opt/app/file.txt'"],
-            ["deploy@server", "rm -rf '\(incoming)'"],
+            connectionOptions + ["-r", "/tmp/a/file.txt", "deploy@server:\(incoming)"],
+            connectionOptions + ["deploy@server", "test -e '/opt/app/file.txt'"],
+            connectionOptions + ["deploy@server", "test -d '/opt/app/file.txt'"],
+            connectionOptions + ["deploy@server", "mv '/opt/app/file.txt' '\(setAside)'"],
+            connectionOptions + ["deploy@server", "mv '\(incoming)' '/opt/app/file.txt'"],
+            connectionOptions + ["deploy@server", "test -e '/opt/app/file.txt'"],
+            connectionOptions + ["deploy@server", "test -L '/opt/app/file.txt'"],
+            connectionOptions + ["deploy@server", "test -e '\(incoming)'"],
+            connectionOptions + ["deploy@server", "test -e '\(setAside)'"],
+            connectionOptions + ["deploy@server", "mv '\(setAside)' '/opt/app/file.txt'"],
+            connectionOptions + ["deploy@server", "rm -rf '\(incoming)'"],
         ])
     }
 }
@@ -588,7 +588,7 @@ struct FileTransportDirectoryExistsTests {
         #expect(result == true)
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/ssh")
-        #expect(cmd.arguments == ["deploy@server.com", "test -d '/opt/project/.git'"])
+        #expect(cmd.arguments == connectionOptions + ["deploy@server.com", "test -d '/opt/project/.git'"])
     }
 
     @Test("ssh with port includes -p flag")
@@ -603,7 +603,7 @@ struct FileTransportDirectoryExistsTests {
         #expect(result == true)
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/ssh")
-        #expect(cmd.arguments == ["-p", "2222", "root@box", "test -d '/data/.git'"])
+        #expect(cmd.arguments == connectionOptions + ["-p", "2222", "root@box", "test -d '/data/.git'"])
     }
 
     @Test("docker directory exists runs docker exec test -d")
@@ -671,7 +671,7 @@ struct FileTransportIsSymlinkTests {
         #expect(result == true)
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/ssh")
-        #expect(cmd.arguments == ["deploy@server.com", "test -L '/opt/link'"])
+        #expect(cmd.arguments == connectionOptions + ["deploy@server.com", "test -L '/opt/link'"])
     }
 
     @Test("ssh with port includes -p flag")
@@ -686,7 +686,7 @@ struct FileTransportIsSymlinkTests {
         #expect(result == true)
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/ssh")
-        #expect(cmd.arguments == ["-p", "2222", "root@box", "test -L '/data/link'"])
+        #expect(cmd.arguments == connectionOptions + ["-p", "2222", "root@box", "test -L '/data/link'"])
     }
 
     @Test("docker symlink runs docker exec test -L")
@@ -743,7 +743,7 @@ struct FileTransportReadLinkTests {
         #expect(result == "/remote/target")
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/ssh")
-        #expect(cmd.arguments == ["deploy@server.com", "readlink '/opt/link'"])
+        #expect(cmd.arguments == connectionOptions + ["deploy@server.com", "readlink '/opt/link'"])
     }
 
     @Test("ssh readLink with port includes -p flag")
@@ -757,7 +757,7 @@ struct FileTransportReadLinkTests {
 
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/ssh")
-        #expect(cmd.arguments == ["-p", "2222", "box", "readlink '/data/link'"])
+        #expect(cmd.arguments == connectionOptions + ["-p", "2222", "box", "readlink '/data/link'"])
     }
 
     @Test("docker readLink uses docker exec readlink")
@@ -785,7 +785,7 @@ struct FileTransportReadLinkTests {
         )
 
         let cmd = recorder.commands[0]
-        #expect(cmd.arguments == ["hex@server", "readlink \"$HOME\"/'project/link'"])
+        #expect(cmd.arguments == connectionOptions + ["hex@server", "readlink \"$HOME\"/'project/link'"])
     }
 }
 
@@ -822,7 +822,7 @@ struct FileTransportRunTests {
         #expect(result == "main")
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/ssh")
-        #expect(cmd.arguments == ["deploy@server.com", "cd '/opt/project' && git rev-parse --abbrev-ref HEAD"])
+        #expect(cmd.arguments == connectionOptions + ["deploy@server.com", "cd '/opt/project' && git rev-parse --abbrev-ref HEAD"])
     }
 
     @Test("ssh run with port includes -p flag")
@@ -837,7 +837,7 @@ struct FileTransportRunTests {
 
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/ssh")
-        #expect(cmd.arguments == ["-p", "2222", "root@box", "cd '/data/project' && git config --get remote.origin.url"])
+        #expect(cmd.arguments == connectionOptions + ["-p", "2222", "root@box", "cd '/data/project' && git config --get remote.origin.url"])
     }
 
     @Test("docker run uses docker exec sh -c")
@@ -898,7 +898,7 @@ struct FileTransportReadFileTests {
         #expect(result == "remote content")
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/ssh")
-        #expect(cmd.arguments == ["deploy@server.com", "cat '/opt/file.txt'"])
+        #expect(cmd.arguments == connectionOptions + ["deploy@server.com", "cat '/opt/file.txt'"])
     }
 
     @Test("ssh readFile with port passes -p flag")
@@ -911,7 +911,7 @@ struct FileTransportReadFileTests {
         )
 
         let cmd = recorder.commands[0]
-        #expect(cmd.arguments == ["-p", "2222", "box", "cat '/file.txt'"])
+        #expect(cmd.arguments == connectionOptions + ["-p", "2222", "box", "cat '/file.txt'"])
     }
 
     @Test("docker readFile uses docker exec cat")
@@ -939,11 +939,82 @@ struct FileTransportReadFileTests {
         )
 
         let cmd = recorder.commands[0]
-        #expect(cmd.arguments == ["hex@server", "cat \"$HOME\"/'project/file.txt'"])
+        #expect(cmd.arguments == connectionOptions + ["hex@server", "cat \"$HOME\"/'project/file.txt'"])
+    }
+}
+
+@Suite("FileTransport ssh connection options")
+struct FileTransportConnectionOptionsTests {
+
+    private static let ssh = "/usr/bin/ssh"
+    private static let scp = "/usr/bin/scp"
+    private static let docker = "/usr/bin/docker"
+
+    private struct Operation: Sendable {
+        let name: String
+        let executables: [String]
+        let run: @Sendable (FileTransport) async throws -> Void
+    }
+
+    private static func operations(remote: EndpointURL, otherRemote: EndpointURL) -> [Operation] {
+        let local = EndpointURL.local(path: "/tmp/file.txt")
+        let container = EndpointURL.docker(container: "myapp", path: "/app/file.txt")
+        return [
+            Operation(name: "directoryExists", executables: [ssh]) { _ = try await $0.directoryExists(endpoint: remote) },
+            Operation(name: "pathExists", executables: [ssh]) { _ = try await $0.pathExists(endpoint: remote) },
+            Operation(name: "isSymlink", executables: [ssh]) { _ = try await $0.isSymlink(endpoint: remote) },
+            Operation(name: "readLink", executables: [ssh]) { _ = try await $0.readLink(endpoint: remote) },
+            Operation(name: "readFile", executables: [ssh]) { _ = try await $0.readFile(endpoint: remote) },
+            Operation(name: "stat", executables: [ssh]) { _ = try await $0.stat(endpoint: remote) },
+            Operation(name: "remove", executables: [ssh]) { try await $0.remove(endpoint: remote) },
+            Operation(name: "run", executables: [ssh]) { _ = try await $0.run(on: remote, command: "git init") },
+            Operation(name: "copy local to ssh", executables: [scp]) { try await $0.copy(from: local, to: remote) },
+            Operation(name: "copy ssh to local", executables: [scp]) { try await $0.copy(from: remote, to: local) },
+            Operation(name: "copy ssh to ssh", executables: [scp]) { try await $0.copy(from: remote, to: otherRemote) },
+            Operation(name: "copy ssh to docker", executables: [scp, docker]) { try await $0.copy(from: remote, to: container) },
+            Operation(name: "copy docker to ssh", executables: [docker, scp]) { try await $0.copy(from: container, to: remote) },
+            // Copies beside the destination, checks it, moves it aside, moves the copy in, removes the original.
+            Operation(name: "replace", executables: [scp, ssh, ssh, ssh, ssh, ssh]) {
+                _ = try await $0.replace(ReplacePlan(replacing: remote, withCopyOf: local))
+            },
+        ]
+    }
+
+    @Test("every ssh and scp command starts with the options that end it when the host does not answer", arguments: [
+        EndpointURL.ssh(user: "deploy", host: "server", port: nil, path: "/opt/app/file.txt"),
+        EndpointURL.ssh(user: nil, host: "box", port: 2222, path: "/data/file.txt"),
+    ])
+    func everyRemoteCommandStartsWithConnectionOptions(remote: EndpointURL) async throws {
+        let otherRemote = EndpointURL.ssh(user: "backup", host: "mirror", port: nil, path: "/srv/file.txt")
+        for operation in Self.operations(remote: remote, otherRemote: otherRemote) {
+            // Every operation here parses at most the stat output.
+            let recorder = CommandRecorder(output: "1024 1700000000")
+            let transport = FileTransport(execute: recorder.execute)
+
+            try await operation.run(transport)
+
+            #expect(recorder.commands.map(\.executable) == operation.executables, "\(operation.name)")
+            for command in recorder.commands where command.executable != Self.docker {
+                #expect(Array(command.arguments.prefix(8)) == [
+                    "-o", "BatchMode=yes",
+                    "-o", "ConnectTimeout=5",
+                    "-o", "ServerAliveInterval=5",
+                    "-o", "ServerAliveCountMax=3",
+                ], "\(operation.name): \(command.executable) \(command.arguments)")
+            }
+        }
     }
 }
 
 // MARK: - Test Helpers
+
+/// What every ssh and scp command line starts with.
+private let connectionOptions = [
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=5",
+    "-o", "ServerAliveInterval=5",
+    "-o", "ServerAliveCountMax=3",
+]
 
 struct RecordedCommand: Sendable {
     let executable: String

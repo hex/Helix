@@ -154,6 +154,10 @@ public struct FileTransport: Sendable {
         }
     }
 
+    private func execute(_ command: SSHCommand, exitOneAnswer: String? = nil) async throws -> String {
+        try await execute(command.executablePath, command.arguments, exitOneAnswer: exitOneAnswer)
+    }
+
     // MARK: - Copy
 
     public func copy(from source: EndpointURL, to destination: EndpointURL) async throws {
@@ -162,10 +166,10 @@ public struct FileTransport: Sendable {
             _ = try await execute("/bin/cp", ["-Rp", src, dst])
 
         case (.local(let src), .ssh(let user, let host, let port, let path)):
-            _ = try await execute("/usr/bin/scp", scpArgs(port: port, recursive: true, from: src, to: scpRemote(user: user, host: host, path: path)))
+            _ = try await execute(.recursiveCopy(from: src, to: scpRemote(user: user, host: host, path: path), port: port))
 
         case (.ssh(let user, let host, let port, let path), .local(let dst)):
-            _ = try await execute("/usr/bin/scp", scpArgs(port: port, recursive: true, from: scpRemote(user: user, host: host, path: path), to: dst))
+            _ = try await execute(.recursiveCopy(from: scpRemote(user: user, host: host, path: path), to: dst, port: port))
 
         case (.local(let src), .docker(let container, let path)):
             _ = try await execute("/usr/bin/docker", ["cp", src, "\(container):\(path)"])
@@ -174,12 +178,10 @@ public struct FileTransport: Sendable {
             _ = try await execute("/usr/bin/docker", ["cp", "\(container):\(path)", dst])
 
         case (.ssh(let u1, let h1, let p1, let path1), .ssh(let u2, let h2, let p2, let path2)):
-            var args = ["-3", "-r"]
-            if let port = p1 ?? p2 {
-                args += ["-P", "\(port)"]
-            }
-            args += [scpRemote(user: u1, host: h1, path: path1), scpRemote(user: u2, host: h2, path: path2)]
-            _ = try await execute("/usr/bin/scp", args)
+            _ = try await execute(.recursiveCopy(
+                from: scpRemote(user: u1, host: h1, path: path1), to: scpRemote(user: u2, host: h2, path: path2),
+                port: p1 ?? p2, betweenRemoteHosts: true
+            ))
 
         default:
             // Cross-transport (ssh<->docker, docker<->docker): relay via temp file
@@ -313,10 +315,7 @@ public struct FileTransport: Sendable {
         case .local(let path):
             _ = try await execute("/bin/mv", [path, newPath])
         case .ssh(let user, let host, let port, let path):
-            var args: [String] = []
-            if let port { args += ["-p", "\(port)"] }
-            args += [sshTarget(user: user, host: host), "mv \(Self.shellWord(path)) \(Self.shellWord(newPath))"]
-            _ = try await execute("/usr/bin/ssh", args)
+            _ = try await execute(.remoteShell(user: user, host: host, port: port, command: "mv \(Self.shellWord(path)) \(Self.shellWord(newPath))"))
         case .docker(let container, let path):
             _ = try await execute("/usr/bin/docker", ["exec", container, "mv", path, newPath])
         }
@@ -330,13 +329,11 @@ public struct FileTransport: Sendable {
         case .local(let path):
             output = try await execute("/usr/bin/stat", ["-f", "%z %m", path])
         case .ssh(let user, let host, let port, let path):
-            var args: [String] = []
-            if let port {
-                args += ["-p", "\(port)"]
-            }
             // GNU stat uses -c, macOS stat uses -f with different format specifiers
-            args += [sshTarget(user: user, host: host), "stat -c '%s %Y' \(Self.shellWord(path)) 2>/dev/null || stat -f '%z %m' \(Self.shellWord(path))"]
-            output = try await execute("/usr/bin/ssh", args)
+            output = try await execute(.remoteShell(
+                user: user, host: host, port: port,
+                command: "stat -c '%s %Y' \(Self.shellWord(path)) 2>/dev/null || stat -f '%z %m' \(Self.shellWord(path))"
+            ))
         case .docker(let container, let path):
             output = try await execute("/usr/bin/docker", ["exec", container, "stat", "-c", "%s %Y", path])
         }
@@ -350,12 +347,7 @@ public struct FileTransport: Sendable {
         case .local(let path):
             return try await execute("/bin/cat", [path])
         case .ssh(let user, let host, let port, let path):
-            var args: [String] = []
-            if let port {
-                args += ["-p", "\(port)"]
-            }
-            args += [sshTarget(user: user, host: host), "cat \(Self.shellWord(path))"]
-            return try await execute("/usr/bin/ssh", args)
+            return try await execute(.remoteShell(user: user, host: host, port: port, command: "cat \(Self.shellWord(path))"))
         case .docker(let container, let path):
             return try await execute("/usr/bin/docker", ["exec", container, "cat", path])
         }
@@ -368,12 +360,7 @@ public struct FileTransport: Sendable {
         case .local(let path):
             _ = try await execute("/bin/rm", ["-rf", path])
         case .ssh(let user, let host, let port, let path):
-            var args: [String] = []
-            if let port {
-                args += ["-p", "\(port)"]
-            }
-            args += [sshTarget(user: user, host: host), "rm -rf \(Self.shellWord(path))"]
-            _ = try await execute("/usr/bin/ssh", args)
+            _ = try await execute(.remoteShell(user: user, host: host, port: port, command: "rm -rf \(Self.shellWord(path))"))
         case .docker(let container, let path):
             _ = try await execute("/usr/bin/docker", ["exec", container, "rm", "-rf", path])
         }
@@ -389,10 +376,10 @@ public struct FileTransport: Sendable {
             case .local(let path):
                 _ = try await execute("/bin/test", ["-d", path], exitOneAnswer: Self.noSuchDirectory)
             case .ssh(let user, let host, let port, let path):
-                var args: [String] = []
-                if let port { args += ["-p", "\(port)"] }
-                args += [sshTarget(user: user, host: host), "test -d \(Self.shellWord(path))"]
-                _ = try await execute("/usr/bin/ssh", args, exitOneAnswer: Self.noSuchDirectory)
+                _ = try await execute(
+                    .remoteShell(user: user, host: host, port: port, command: "test -d \(Self.shellWord(path))"),
+                    exitOneAnswer: Self.noSuchDirectory
+                )
             case .docker(let container, let path):
                 _ = try await execute("/usr/bin/docker", ["exec", container, "test", "-d", path], exitOneAnswer: Self.noSuchDirectory)
             }
@@ -410,10 +397,7 @@ public struct FileTransport: Sendable {
             case .local(let path):
                 _ = try await execute("/bin/test", ["-L", path])
             case .ssh(let user, let host, let port, let path):
-                var args: [String] = []
-                if let port { args += ["-p", "\(port)"] }
-                args += [sshTarget(user: user, host: host), "test -L \(Self.shellWord(path))"]
-                _ = try await execute("/usr/bin/ssh", args)
+                _ = try await execute(.remoteShell(user: user, host: host, port: port, command: "test -L \(Self.shellWord(path))"))
             case .docker(let container, let path):
                 _ = try await execute("/usr/bin/docker", ["exec", container, "test", "-L", path])
             }
@@ -429,10 +413,7 @@ public struct FileTransport: Sendable {
         case .local(let path):
             output = try await execute("/usr/bin/readlink", [path])
         case .ssh(let user, let host, let port, let path):
-            var args: [String] = []
-            if let port { args += ["-p", "\(port)"] }
-            args += [sshTarget(user: user, host: host), "readlink \(Self.shellWord(path))"]
-            output = try await execute("/usr/bin/ssh", args)
+            output = try await execute(.remoteShell(user: user, host: host, port: port, command: "readlink \(Self.shellWord(path))"))
         case .docker(let container, let path):
             output = try await execute("/usr/bin/docker", ["exec", container, "readlink", path])
         }
@@ -447,10 +428,7 @@ public struct FileTransport: Sendable {
             case .local(let path):
                 _ = try await execute("/bin/test", ["-e", path])
             case .ssh(let user, let host, let port, let path):
-                var args: [String] = []
-                if let port { args += ["-p", "\(port)"] }
-                args += [sshTarget(user: user, host: host), "test -e \(Self.shellWord(path))"]
-                _ = try await execute("/usr/bin/ssh", args)
+                _ = try await execute(.remoteShell(user: user, host: host, port: port, command: "test -e \(Self.shellWord(path))"))
             case .docker(let container, let path):
                 _ = try await execute("/usr/bin/docker", ["exec", container, "test", "-e", path])
             }
@@ -467,10 +445,7 @@ public struct FileTransport: Sendable {
         case .local(let path):
             return try await execute("/bin/sh", ["-c", "cd \(Self.shellWord(path)) && \(command)"])
         case .ssh(let user, let host, let port, let path):
-            var args: [String] = []
-            if let port { args += ["-p", "\(port)"] }
-            args += [sshTarget(user: user, host: host), "cd \(Self.shellWord(path)) && \(command)"]
-            return try await execute("/usr/bin/ssh", args)
+            return try await execute(.remoteShell(user: user, host: host, port: port, command: "cd \(Self.shellWord(path)) && \(command)"))
         case .docker(let container, let path):
             return try await execute("/usr/bin/docker", ["exec", container, "sh", "-c", "cd \(Self.shellWord(path)) && \(command)"])
         }
@@ -487,22 +462,7 @@ public struct FileTransport: Sendable {
     }
 
     private func scpRemote(user: String?, host: String, path: String) -> String {
-        if let user {
-            return "\(user)@\(host):\(path)"
-        }
-        return "\(host):\(path)"
-    }
-
-    private func scpArgs(port: Int?, recursive: Bool = false, from: String, to: String) -> [String] {
-        var args: [String] = []
-        if recursive {
-            args.append("-r")
-        }
-        if let port {
-            args += ["-P", "\(port)"]
-        }
-        args += [from, to]
-        return args
+        "\(SSHCommand.login(user: user, host: host)):\(path)"
     }
 
     /// Makes a path exactly one inert word for a POSIX shell.
@@ -520,13 +480,6 @@ public struct FileTransport: Sendable {
 
     private static func singleQuoted(_ text: String) -> String {
         "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
-
-    private func sshTarget(user: String?, host: String) -> String {
-        if let user {
-            return "\(user)@\(host)"
-        }
-        return host
     }
 
     private func parseStatOutput(_ raw: String) throws -> FileInfo {
