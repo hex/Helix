@@ -133,6 +133,27 @@ struct SessionStoreTests {
         #expect(store.overallHealth == .error)
     }
 
+    @Test("Refresh publishes a session whose only change is staging progress")
+    @MainActor
+    func refreshPublishesStagingProgress() async {
+        func staging(receivedFiles: Int) -> SyncSession {
+            makeSyncSession(
+                id: "sync_1", name: "busy", status: "staging-beta",
+                beta: makeEndpoint(path: "/tmp/b", stagingProgress: StagingProgress(
+                    path: "project/data.bin", receivedSize: 64, expectedSize: 256,
+                    receivedFiles: receivedFiles, expectedFiles: 40, totalReceivedSize: 4096
+                ))
+            )
+        }
+        let store = SessionStore(provider: FakeProvider(syncSessions: [staging(receivedFiles: 10)]))
+        await store.refresh()
+
+        store.replaceProvider(FakeProvider(syncSessions: [staging(receivedFiles: 25)]))
+        await store.refresh()
+
+        #expect(store.syncSessions[0].beta.stagingProgress?.receivedFiles == 25)
+    }
+
     @Test("Health status is active while a session stages files")
     @MainActor
     func healthStaging() async {
