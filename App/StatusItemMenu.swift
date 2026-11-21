@@ -68,8 +68,12 @@ final class StatusItemMenuController: NSObject {
         menu.addItem(.separator())
         menu.addItem(item("Quit Helix", action: #selector(quit)))
 
-        let belowButton = NSPoint(x: 0, y: button.isFlipped ? button.bounds.maxY + 6 : -6)
-        menu.popUp(positioning: nil, at: belowButton, in: button)
+        guard let window = button.window else { return }
+        // The status bar window can be shorter than the menu bar (a notched display), and a menu
+        // whose top overlaps the menu bar scrolls its first item out of view.
+        let menuBarBottom = window.screen?.visibleFrame.maxY ?? window.frame.minY
+        let belowMenuBar = NSPoint(x: window.frame.minX, y: min(window.frame.minY, menuBarBottom) - 4)
+        menu.popUp(positioning: nil, at: belowMenuBar, in: nil)
     }
 
     private func item(_ title: String, action: Selector) -> NSMenuItem {
