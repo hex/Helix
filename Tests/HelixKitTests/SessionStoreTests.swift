@@ -805,6 +805,86 @@ struct RecreateSessionTests {
     }
 }
 
+@Suite("Original sessions left behind by edits")
+struct LeftoverSyncOriginalTests {
+    private let original = makeSyncSession(id: "sync_original", name: "project")
+    private let pausedOriginal = makeSyncSession(id: "sync_original", name: "project", paused: true)
+    private let replacementID = "sync_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG"
+
+    @MainActor
+    private func editLeavingOriginal(defaults: UserDefaults) async -> SessionStore {
+        let runningReplacement = makeSyncSession(id: replacementID, name: "project")
+        let provider = RecordingProvider(
+            syncSessions: [original], sessionsAfterCreate: [pausedOriginal, runningReplacement],
+            failOn: "syncTerminate:sync_original"
+        )
+        let store = SessionStore(provider: provider, defaults: defaults)
+        await store.recreateSync(
+            original, options: SyncCreateOptions(from: original), alpha: "/srv/project", beta: "/srv/mirror"
+        )
+        return store
+    }
+
+    @Test("Keeps an original paused while its replacement is listed after relaunch")
+    @MainActor
+    func leftoverOriginalRefusesResumeAfterRelaunch() async throws {
+        let suite = "LeftoverEditTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        _ = await editLeavingOriginal(defaults: defaults)
+        let replacement = makeSyncSession(id: replacementID, name: "project")
+        let provider = RecordingProvider(syncSessions: [pausedOriginal, replacement])
+        let relaunched = SessionStore(provider: provider, defaults: defaults)
+        await relaunched.refresh()
+
+        await relaunched.resumeSync(original.identifier)
+
+        #expect(provider.calls == [])
+        #expect(relaunched.lastError == "Original session sync_original cannot resume while its edited replacement \(replacementID) is listed.")
+    }
+
+    @Test("Removes only the original and only with a listed, unpaused replacement",
+          arguments: ["running", "paused", "missing", "original missing"])
+    @MainActor
+    func removalChecksThatTheReplacementIsRunning(_ status: String) async throws {
+        let suite = "LeftoverEditTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = await editLeavingOriginal(defaults: defaults)
+        let replacement = makeSyncSession(id: replacementID, name: "project", paused: status == "paused")
+        let listed = switch status {
+        case "missing": [pausedOriginal]
+        case "original missing": [replacement]
+        default: [pausedOriginal, replacement]
+        }
+        let provider = RecordingProvider(syncSessions: listed)
+        store.replaceProvider(provider)
+
+        await store.removeLeftoverSyncOriginal(original.identifier)
+
+        let relaunched = SessionStore(provider: provider, defaults: defaults)
+        switch status {
+        case "running":
+            #expect(provider.calls == ["syncTerminate:sync_original"])
+            #expect(store.lastError == nil)
+        case "paused":
+            #expect(provider.calls == [])
+            #expect(store.lastError == "Original session sync_original was kept because its edited replacement \(replacementID) is paused.")
+        case "missing":
+            #expect(provider.calls == [])
+            #expect(store.lastError == "Original session sync_original was kept because its edited replacement \(replacementID) is no longer listed.")
+        default:
+            #expect(provider.calls == [])
+            #expect(store.lastError == "Original session sync_original is no longer tracked as a leftover original.")
+        }
+        if status == "paused" {
+            #expect(relaunched.leftoverSyncOriginals == ["sync_original": replacementID])
+        } else {
+            #expect(relaunched.leftoverSyncOriginals == [:])
+        }
+    }
+}
+
 @Suite("SessionStore bulk pause")
 struct BulkPauseTests {
     private let defaults: UserDefaults

@@ -77,6 +77,10 @@ public final class SessionStore {
     public private(set) var leftoverNotices: [String: String] = [:] {
         didSet { persist(leftoverNotices, forKey: Self.leftoverNoticesKey) }
     }
+    /// Original sync sessions that survived an edit, mapped to their replacement identifiers.
+    public private(set) var leftoverSyncOriginals: [String: String] = [:] {
+        didSet { persist(leftoverSyncOriginals, forKey: Self.leftoverSyncOriginalsKey) }
+    }
     /// Whether background priority is confirmed for the running daemon.
     public var daemonBackgroundPriority: Bool {
         backgroundPriorityPID != nil && daemonPriorityError == nil
@@ -113,6 +117,7 @@ public final class SessionStore {
     private static let sessionHoldsKey = "sessionHolds"
     private static let replacementsUnderWayKey = "replacementsUnderWay"
     private static let leftoverNoticesKey = "leftoverNotices"
+    private static let leftoverSyncOriginalsKey = "leftoverSyncOriginals"
     private static let daemonBackgroundPriorityKey = "daemonBackgroundPriority"
     private static let daemonStoppedKey = "daemonStoppedByHelix"
 
@@ -143,6 +148,7 @@ public final class SessionStore {
         }
         sessionHolds = savedMessages(forKey: Self.sessionHoldsKey, called: "sessions kept paused after a conflict")
         leftoverNotices = savedMessages(forKey: Self.leftoverNoticesKey, called: "originals left on disk after a conflict")
+        leftoverSyncOriginals = savedMessages(forKey: Self.leftoverSyncOriginalsKey, called: "original sessions left after an edit")
         holdSessionsWhoseReplacementWasCutShort()
         restoreInterruptedEditNotice()
     }
@@ -273,6 +279,7 @@ public final class SessionStore {
     private func reloadSessions(force: Bool = false) async -> Bool {
         guard daemonControl == .managed else { return false }
 
+        let existingEditPairs = leftoverSyncOriginals
         let id = UUID()
         let request = Task<SessionLists, Error> { [provider] in
             async let syncs = provider.syncList()
@@ -288,6 +295,7 @@ public final class SessionStore {
             if force || syncDigest(lists.sync) != syncDigest(syncSessions) { syncSessions = lists.sync }
             if force || forwardDigest(lists.forward) != forwardDigest(forwardSessions) { forwardSessions = lists.forward }
             forgetSessions(notListedIn: lists.sync)
+            forgetMissingEditPairs(existingEditPairs, listed: lists.sync)
             if !daemonRunning { daemonRunning = true }
             if lastError != nil { lastError = nil }
             return true
@@ -311,6 +319,16 @@ public final class SessionStore {
         if holds != sessionHolds { sessionHolds = holds }
         let notices = leftoverNotices.filter { identifiers.contains($0.key) }
         if notices != leftoverNotices { leftoverNotices = notices }
+    }
+
+    private func forgetMissingEditPairs(_ existingPairs: [String: String], listed: [SyncSession]) {
+        guard !existingPairs.isEmpty else { return }
+        let identifiers = Set(listed.map(\.identifier))
+        for (original, replacement) in existingPairs where leftoverSyncOriginals[original] == replacement {
+            if !identifiers.contains(original) || !identifiers.contains(replacement) {
+                leftoverSyncOriginals[original] = nil
+            }
+        }
     }
 
     public func manualRefresh() async {
@@ -449,6 +467,7 @@ public final class SessionStore {
         do {
             try await provider.syncTerminate(original)
         } catch {
+            leftoverSyncOriginals[original] = replacement
             return await finishSyncEdit(
                 "The edited session \(replacement) is ready. Could not remove original session \(original): \(error.localizedDescription).",
                 replacement: replacement
@@ -576,6 +595,7 @@ public final class SessionStore {
             }
             // The resume takes a turn, so a resolve requested while it is in flight pauses after it.
             let failure: String? = await inTurn(on: identifier) {
+                if self.leftoverSyncOriginals[identifier] != nil { return nil }
                 do {
                     // A held session leaves the record without being resumed: its hold keeps it paused from here on.
                     switch try await self.resumeUnlessHeld(identifier) {
@@ -670,6 +690,12 @@ public final class SessionStore {
         // The resume takes a turn, so a resolve requested while it is in flight pauses after it.
         let failure: String? = await inTurn(on: identifier) {
             do {
+                if let replacement = self.leftoverSyncOriginals[identifier] {
+                    let pair = try await self.checkEditPair(original: identifier, replacement: replacement)
+                    if pair.replacement != nil {
+                        return self.leftoverResumeRefusal(original: identifier, replacement: replacement)
+                    }
+                }
                 try await self.provider.syncResume(identifier)
                 // The hold ends inside the turn, before a resolve waiting behind this resume can set another.
                 self.sessionHolds[identifier] = nil
@@ -684,6 +710,53 @@ public final class SessionStore {
         }
         lastError = nil
         await refresh()
+    }
+
+    private func leftoverResumeRefusal(original: String, replacement: String) -> String {
+        "Original session \(original) cannot resume while its edited replacement \(replacement) is listed."
+    }
+
+    private func checkEditPair(
+        original: String,
+        replacement: String
+    ) async throws -> (originalExists: Bool, replacement: SyncSession?) {
+        let listed = try await provider.syncList()
+        let originalExists = listed.contains { $0.identifier == original }
+        let replacementSession = listed.first { $0.identifier == replacement }
+        forgetMissingEditPairs([original: replacement], listed: listed)
+        return (originalExists, replacementSession)
+    }
+
+    public func removeLeftoverSyncOriginal(_ identifier: String) async {
+        let failure: String? = await inTurn(on: identifier) {
+            guard let replacement = self.leftoverSyncOriginals[identifier] else {
+                return "Session \(identifier) is no longer tracked as a leftover original."
+            }
+            do {
+                let pair = try await self.checkEditPair(original: identifier, replacement: replacement)
+                guard let replacementSession = pair.replacement else {
+                    return "Original session \(identifier) was kept because its edited replacement \(replacement) is no longer listed."
+                }
+                guard pair.originalExists, self.leftoverSyncOriginals[identifier] == replacement else {
+                    return "Original session \(identifier) is no longer tracked as a leftover original."
+                }
+                guard !replacementSession.paused else {
+                    return "Original session \(identifier) was kept because its edited replacement \(replacement) is paused."
+                }
+                try await self.provider.syncTerminate(identifier)
+                self.leftoverSyncOriginals[identifier] = nil
+                return nil
+            } catch {
+                return error.localizedDescription
+            }
+        }
+
+        if let failure {
+            lastError = failure
+        } else {
+            lastError = nil
+            await reloadSessions(force: true)
+        }
     }
 
     public func flushSync(_ identifier: String) async {
@@ -975,6 +1048,10 @@ public final class SessionStore {
             if let hold = self.sessionHolds[identifier] {
                 ConsoleLog.shared.log("resolve refused: \"\(session.name ?? identifier)\" is held paused", level: .error)
                 self.lastError = hold
+                return roots
+            }
+            if let replacement = self.leftoverSyncOriginals[identifier] {
+                self.lastError = self.leftoverResumeRefusal(original: identifier, replacement: replacement)
                 return roots
             }
             return await resolve()
