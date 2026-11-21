@@ -768,6 +768,16 @@ func makeEndpoint(
 
 @Suite("SessionStore conflict resolution")
 struct ConflictResolutionTests {
+    private let defaults: UserDefaults
+    private let suiteName = "ConflictResolutionTests.\(UUID().uuidString)"
+
+    init() {
+        defaults = UserDefaults(suiteName: suiteName)!
+    }
+
+    private func removeDefaults() {
+        defaults.removePersistentDomain(forName: suiteName)
+    }
 
     /// The per-call token in replace's sibling names, read from the copy that lands beside `destination`.
     private func replaceToken(copiedBeside destination: String, in commands: [RecordedCommand]) throws -> String {
@@ -1017,6 +1027,7 @@ struct ConflictResolutionTests {
     @Test("A replacement that only fails to remove the set-aside original resumes, flushes and names the leftover")
     @MainActor
     func cleanupFailureStillResolves() async throws {
+        defer { removeDefaults() }
         let conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
         let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [conflict])
         let recorder = RecordingProvider(syncSessions: [session])
@@ -1026,7 +1037,7 @@ struct ConflictResolutionTests {
             if executable == "/bin/rm" { throw CLIError(exitCode: 1, stderr: "permission denied") }
             return output
         }
-        let store = SessionStore(provider: recorder, fileTransport: transport)
+        let store = SessionStore(provider: recorder, fileTransport: transport, defaults: defaults)
 
         await store.resolveConflict(session: session, conflict: conflict, winner: .alpha)
 
@@ -1038,6 +1049,7 @@ struct ConflictResolutionTests {
     @Test("Bulk resolve counts a leftover set-aside original as resolved and names it")
     @MainActor
     func bulkCleanupFailureStillResolves() async throws {
+        defer { removeDefaults() }
         let c1 = Conflict(root: "a.txt", alphaChanges: [], betaChanges: [])
         let c2 = Conflict(root: "b.txt", alphaChanges: [], betaChanges: [])
         let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [c1, c2])
@@ -1050,7 +1062,7 @@ struct ConflictResolutionTests {
             }
             return output
         }
-        let store = SessionStore(provider: recorder, fileTransport: transport)
+        let store = SessionStore(provider: recorder, fileTransport: transport, defaults: defaults)
 
         await store.resolveConflicts(session: session, conflicts: [c1, c2], winner: .alpha)
 
@@ -1075,11 +1087,12 @@ struct ConflictResolutionTests {
     @Test("A replacement that leaves the destination unverified keeps the session paused and names the paths holding the data")
     @MainActor
     func unverifiedReplacementStaysPaused() async throws {
+        defer { removeDefaults() }
         let conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
         let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [conflict])
         let recorder = RecordingProvider(syncSessions: [session])
         let cmdRecorder = CommandRecorder()
-        let store = SessionStore(provider: recorder, fileTransport: transportLeavingDestinationUnverified(recordingTo: cmdRecorder))
+        let store = SessionStore(provider: recorder, fileTransport: transportLeavingDestinationUnverified(recordingTo: cmdRecorder), defaults: defaults)
 
         await store.resolveConflict(session: session, conflict: conflict, winner: .alpha)
 
@@ -1091,12 +1104,13 @@ struct ConflictResolutionTests {
     @Test("Bulk resolve stops at a replacement that leaves the destination unverified and keeps the session paused")
     @MainActor
     func bulkUnverifiedReplacementStaysPaused() async throws {
+        defer { removeDefaults() }
         let c1 = Conflict(root: "a.txt", alphaChanges: [], betaChanges: [])
         let c2 = Conflict(root: "b.txt", alphaChanges: [], betaChanges: [])
         let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [c1, c2])
         let recorder = RecordingProvider(syncSessions: [session])
         let cmdRecorder = CommandRecorder()
-        let store = SessionStore(provider: recorder, fileTransport: transportLeavingDestinationUnverified(recordingTo: cmdRecorder))
+        let store = SessionStore(provider: recorder, fileTransport: transportLeavingDestinationUnverified(recordingTo: cmdRecorder), defaults: defaults)
 
         await store.resolveConflicts(session: session, conflicts: [c1, c2], winner: .alpha)
 
@@ -1104,6 +1118,139 @@ struct ConflictResolutionTests {
         #expect(recorder.calls == ["syncPause:sync_1"])
         #expect(cmdRecorder.commands.filter { $0.arguments.contains { $0.contains("b.txt") } }.isEmpty)
         #expect(store.lastError == "Could not move /tmp/b/a.txt.helix-incoming-\(token) into place at /tmp/b/a.txt: permission denied. Nothing was deleted: look for the original at /tmp/b/a.txt.helix-replaced-\(token) and for the replacement at /tmp/b/a.txt.helix-incoming-\(token). The session \"s1\" was left paused so that sync cannot overwrite or delete those paths. Put \"a.txt\" in order, then resume the session. 1 of 2 conflicts was not attempted.")
+    }
+
+    /// The hold message for a file conflict in session "s1" whose move into place at `destination` failed.
+    private func holdMessage(root: String, destination: String, token: String) -> String {
+        "Could not move \(destination).helix-incoming-\(token) into place at \(destination): permission denied. Nothing was deleted: look for the original at \(destination).helix-replaced-\(token) and for the replacement at \(destination).helix-incoming-\(token). The session \"s1\" was left paused so that sync cannot overwrite or delete those paths. Put \"\(root)\" in order, then resume the session."
+    }
+
+    @Test("A poll after an unverified replacement clears the passing error and keeps the hold with its message")
+    @MainActor
+    func holdOutlivesPolling() async throws {
+        defer { removeDefaults() }
+        let conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
+        let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [conflict])
+        let recorder = RecordingProvider(syncSessions: [session])
+        let cmdRecorder = CommandRecorder()
+        let store = SessionStore(provider: recorder, fileTransport: transportLeavingDestinationUnverified(recordingTo: cmdRecorder), defaults: defaults)
+        await store.resolveConflict(session: session, conflict: conflict, winner: .alpha)
+        let token = try replaceToken(copiedBeside: "/tmp/b/file.txt", in: cmdRecorder.commands)
+
+        await store.refresh()
+
+        #expect(store.lastError == nil)
+        #expect(store.sessionHolds == ["sync_1": holdMessage(root: "file.txt", destination: "/tmp/b/file.txt", token: token)])
+        #expect(recorder.calls == ["syncPause:sync_1"])
+    }
+
+    @Test("A hold is read back by a second store on the same defaults")
+    @MainActor
+    func holdSurvivesRelaunch() async throws {
+        defer { removeDefaults() }
+        let c1 = Conflict(root: "a.txt", alphaChanges: [], betaChanges: [])
+        let c2 = Conflict(root: "b.txt", alphaChanges: [], betaChanges: [])
+        let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [c1, c2])
+        let cmdRecorder = CommandRecorder()
+        let firstLaunch = SessionStore(provider: RecordingProvider(syncSessions: [session]), fileTransport: transportLeavingDestinationUnverified(recordingTo: cmdRecorder), defaults: defaults)
+        await firstLaunch.resolveConflicts(session: session, conflicts: [c1, c2], winner: .alpha)
+        let token = try replaceToken(copiedBeside: "/tmp/b/a.txt", in: cmdRecorder.commands)
+
+        let nextLaunch = SessionStore(provider: RecordingProvider(syncSessions: [session]), defaults: defaults)
+
+        #expect(nextLaunch.sessionHolds == ["sync_1": holdMessage(root: "a.txt", destination: "/tmp/b/a.txt", token: token) + " 1 of 2 conflicts was not attempted."])
+    }
+
+    @Test("Resuming a held session by hand sends the resume and ends the hold, for this launch and the next")
+    @MainActor
+    func explicitResumeEndsHold() async throws {
+        defer { removeDefaults() }
+        let conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
+        let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [conflict])
+        let recorder = RecordingProvider(syncSessions: [session])
+        let store = SessionStore(provider: recorder, fileTransport: transportLeavingDestinationUnverified(recordingTo: CommandRecorder()), defaults: defaults)
+        await store.resolveConflict(session: session, conflict: conflict, winner: .alpha)
+
+        await store.resumeSync("sync_1")
+
+        #expect(recorder.calls == ["syncPause:sync_1", "syncResume:sync_1"])
+        #expect(store.sessionHolds == [:])
+        #expect(store.lastError == nil)
+        #expect(SessionStore(provider: recorder, defaults: defaults).sessionHolds == [:])
+    }
+
+    @Test("A resume by hand that fails leaves the hold in place")
+    @MainActor
+    func failedExplicitResumeKeepsHold() async throws {
+        defer { removeDefaults() }
+        let conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
+        let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [conflict])
+        let cmdRecorder = CommandRecorder()
+        let store = SessionStore(provider: RecordingProvider(syncSessions: [session]), fileTransport: transportLeavingDestinationUnverified(recordingTo: cmdRecorder), defaults: defaults)
+        await store.resolveConflict(session: session, conflict: conflict, winner: .alpha)
+        let token = try replaceToken(copiedBeside: "/tmp/b/file.txt", in: cmdRecorder.commands)
+        store.replaceProvider(RecordingProvider(syncSessions: [session], failOn: "syncResume"))
+
+        await store.resumeSync("sync_1")
+
+        #expect(store.sessionHolds == ["sync_1": holdMessage(root: "file.txt", destination: "/tmp/b/file.txt", token: token)])
+        #expect(store.lastError == "simulated failure")
+    }
+
+    @Test("A hold ends when its session is gone from the daemon's list, and not while the list cannot be read")
+    @MainActor
+    func holdEndsWithItsSession() async throws {
+        defer { removeDefaults() }
+        let conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
+        let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [conflict])
+        let cmdRecorder = CommandRecorder()
+        let store = SessionStore(provider: RecordingProvider(syncSessions: [session]), fileTransport: transportLeavingDestinationUnverified(recordingTo: cmdRecorder), defaults: defaults)
+        await store.resolveConflict(session: session, conflict: conflict, winner: .alpha)
+        let token = try replaceToken(copiedBeside: "/tmp/b/file.txt", in: cmdRecorder.commands)
+
+        store.replaceProvider(FailingProvider())
+        await store.refresh()
+        #expect(store.sessionHolds == ["sync_1": holdMessage(root: "file.txt", destination: "/tmp/b/file.txt", token: token)])
+
+        store.replaceProvider(RecordingProvider(syncSessions: [makeSyncSession(id: "sync_2", name: "s2")]))
+        await store.refresh()
+        #expect(store.sessionHolds == [:])
+    }
+
+    @Test("Leftover notices of one session add up, outlive polling and relaunch, do not stop syncing, and go when dismissed")
+    @MainActor
+    func leftoverNoticesStayUntilDismissed() async throws {
+        defer { removeDefaults() }
+        let c1 = Conflict(root: "a.txt", alphaChanges: [], betaChanges: [])
+        let c2 = Conflict(root: "b.txt", alphaChanges: [], betaChanges: [])
+        let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [c1, c2])
+        let recorder = RecordingProvider(syncSessions: [session])
+        let cmdRecorder = CommandRecorder()
+        let transport = FileTransport { executable, arguments in
+            let output = try await cmdRecorder.execute(executable, arguments)
+            if executable == "/bin/rm" { throw CLIError(exitCode: 1, stderr: "permission denied") }
+            return output
+        }
+        let store = SessionStore(provider: recorder, fileTransport: transport, defaults: defaults)
+
+        await store.resolveConflict(session: session, conflict: c1, winner: .alpha)
+        await store.resolveConflict(session: session, conflict: c2, winner: .alpha)
+        await store.refresh()
+
+        let copies = cmdRecorder.commands.filter { $0.executable == "/bin/cp" }
+        let tokenA = try replaceToken(copiedBeside: "/tmp/b/a.txt", in: [copies[0]])
+        let tokenB = try replaceToken(copiedBeside: "/tmp/b/b.txt", in: [copies[1]])
+        let notices = ["sync_1": "Resolved \"a.txt\", but left the original it replaced at /tmp/b/a.txt.helix-replaced-\(tokenA): permission denied. Delete that path by hand. Resolved \"b.txt\", but left the original it replaced at /tmp/b/b.txt.helix-replaced-\(tokenB): permission denied. Delete that path by hand."]
+        #expect(store.lastError == nil)
+        #expect(store.leftoverNotices == notices)
+        #expect(store.sessionHolds == [:])
+        #expect(recorder.calls == ["syncPause:sync_1", "syncResume:sync_1", "syncFlush:sync_1", "syncPause:sync_1", "syncResume:sync_1", "syncFlush:sync_1"])
+        #expect(SessionStore(provider: recorder, defaults: defaults).leftoverNotices == notices)
+
+        store.dismissLeftoverNotice(for: "sync_1")
+
+        #expect(store.leftoverNotices == [:])
+        #expect(SessionStore(provider: recorder, defaults: defaults).leftoverNotices == [:])
     }
 
     @Test("conflictFileInfo returns file metadata from both endpoints")

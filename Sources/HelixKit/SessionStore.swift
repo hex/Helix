@@ -56,6 +56,17 @@ public final class SessionStore {
     public private(set) var bulkPause: BulkPause? {
         didSet { persistBulkPause() }
     }
+    /// Why a sync session is kept paused, by session identifier: a conflict replacement left a path that
+    /// could not be shown to hold either version, and the message names where the data is. While a session
+    /// has an entry the store never resumes it on its own; only `resumeSync` on that session does.
+    public private(set) var sessionHolds: [String: String] = [:] {
+        didSet { persist(sessionHolds, forKey: Self.sessionHoldsKey) }
+    }
+    /// Set-aside originals that resolved conflicts left on disk for the user to delete, by session identifier.
+    /// A notice does not stop its session from syncing; it stays until dismissed or until the session is gone.
+    public private(set) var leftoverNotices: [String: String] = [:] {
+        didSet { persist(leftoverNotices, forKey: Self.leftoverNoticesKey) }
+    }
     /// Whether the mutagen daemon runs at background priority, yielding CPU and disk to other work.
     public private(set) var daemonBackgroundPriority: Bool
 
@@ -69,6 +80,8 @@ public final class SessionStore {
     /// The daemon process background priority was last applied to; nil while it is not applied.
     @ObservationIgnored private var backgroundPriorityPID: ProcessID?
     private static let bulkPauseKey = "bulkPause"
+    private static let sessionHoldsKey = "sessionHolds"
+    private static let leftoverNoticesKey = "leftoverNotices"
     private static let daemonBackgroundPriorityKey = "daemonBackgroundPriority"
 
     public init(
@@ -93,6 +106,20 @@ public final class SessionStore {
                 lastError = message
             }
         }
+        sessionHolds = savedMessages(forKey: Self.sessionHoldsKey, called: "sessions kept paused after a conflict")
+        leftoverNotices = savedMessages(forKey: Self.leftoverNoticesKey, called: "originals left on disk after a conflict")
+    }
+
+    /// Reads messages by session identifier saved under `key`. A value of another shape is reported and read as none.
+    private func savedMessages(forKey key: String, called description: String) -> [String: String] {
+        guard let saved = defaults.object(forKey: key) else { return [:] }
+        guard let messages = saved as? [String: String] else {
+            let message = "Ignoring the saved record of \(description): it is not a list of messages by session."
+            ConsoleLog.shared.log(message, level: .error)
+            lastError = message
+            return [:]
+        }
+        return messages
     }
 
     public func replaceProvider(_ provider: any SessionProvider) {
@@ -171,6 +198,7 @@ public final class SessionStore {
             let newForwards = try await forwards
             if syncDigest(newSyncs) != syncDigest(syncSessions) { syncSessions = newSyncs }
             if forwardDigest(newForwards) != forwardDigest(forwardSessions) { forwardSessions = newForwards }
+            forgetSessions(notListedIn: newSyncs)
             if !daemonRunning { daemonRunning = true }
             if lastError != nil { lastError = nil }
             return true
@@ -183,12 +211,22 @@ public final class SessionStore {
         }
     }
 
+    /// Ends the holds and drops the leftover notices of sessions the daemon no longer lists.
+    private func forgetSessions(notListedIn listed: [SyncSession]) {
+        let identifiers = Set(listed.map(\.identifier))
+        let holds = sessionHolds.filter { identifiers.contains($0.key) }
+        if holds != sessionHolds { sessionHolds = holds }
+        let notices = leftoverNotices.filter { identifiers.contains($0.key) }
+        if notices != leftoverNotices { leftoverNotices = notices }
+    }
+
     public func manualRefresh() async {
         do {
             async let syncs = provider.syncList()
             async let forwards = provider.forwardList()
             syncSessions = try await syncs
             forwardSessions = try await forwards
+            forgetSessions(notListedIn: syncSessions)
             if !daemonRunning { daemonRunning = true }
             if lastError != nil { lastError = nil }
         } catch {
@@ -313,6 +351,14 @@ public final class SessionStore {
         defaults.set(try! JSONEncoder().encode(bulkPause), forKey: Self.bulkPauseKey)
     }
 
+    private func persist(_ messagesBySession: [String: String], forKey key: String) {
+        if messagesBySession.isEmpty {
+            defaults.removeObject(forKey: key)
+        } else {
+            defaults.set(messagesBySession, forKey: key)
+        }
+    }
+
     private func finishBulkAction(failures: [String]) async {
         await reloadSessions()
         if !failures.isEmpty {
@@ -326,8 +372,17 @@ public final class SessionStore {
         await performAction { try await provider.syncPause(identifier) }
     }
 
+    /// Resumes a session because the user asked for that session; this is what ends its hold.
     public func resumeSync(_ identifier: String) async {
-        await performAction { try await provider.syncResume(identifier) }
+        do {
+            try await provider.syncResume(identifier)
+        } catch {
+            lastError = error.localizedDescription
+            return
+        }
+        sessionHolds[identifier] = nil
+        lastError = nil
+        await refresh()
     }
 
     public func flushSync(_ identifier: String) async {
@@ -533,9 +588,11 @@ public final class SessionStore {
                 leftoverNotice = nil
             case .appliedLeavingOriginal(let notice):
                 ConsoleLog.shared.log("  \(notice)", level: .error)
+                addLeftoverNotice(notice, for: session.identifier)
                 leftoverNotice = notice
             case .leftUnverified(let notice):
                 ConsoleLog.shared.log("  \(notice)", level: .error)
+                sessionHolds[session.identifier] = notice
                 lastError = notice
                 return
             case .winnerMissing(let winnerURL):
@@ -564,6 +621,14 @@ public final class SessionStore {
             ConsoleLog.shared.log("  flush FAILED: \(error.localizedDescription)", level: .error)
             lastError = ([error.localizedDescription] + [leftoverNotice].compactMap { $0 }).joined(separator: " ")
         }
+    }
+
+    public func dismissLeftoverNotice(for identifier: String) {
+        leftoverNotices[identifier] = nil
+    }
+
+    private func addLeftoverNotice(_ notice: String, for identifier: String) {
+        leftoverNotices[identifier] = ([leftoverNotices[identifier], notice].compactMap { $0 }).joined(separator: " ")
     }
 
     public func resolveConflicts(
@@ -605,6 +670,7 @@ public final class SessionStore {
                 case .appliedLeavingOriginal(let notice):
                     ConsoleLog.shared.log("  \(notice)", level: .error)
                     resolved += 1
+                    addLeftoverNotice(notice, for: session.identifier)
                     notices.append(notice)
                 case .leftUnverified(let notice):
                     ConsoleLog.shared.log("  \(notice)", level: .error)
@@ -613,7 +679,9 @@ public final class SessionStore {
                         notices.append("\(notAttempted) of \(conflicts.count) conflicts \(notAttempted == 1 ? "was" : "were") not attempted.")
                     }
                     if let refusal { notices.append(refusal) }
-                    lastError = ([notice] + notices).joined(separator: " ")
+                    let message = ([notice] + notices).joined(separator: " ")
+                    sessionHolds[session.identifier] = message
+                    lastError = message
                     return
                 case .winnerMissing:
                     ConsoleLog.shared.log("  skipped '\(conflict.root)': winner file no longer exists", level: .error)
