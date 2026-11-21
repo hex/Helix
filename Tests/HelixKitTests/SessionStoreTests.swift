@@ -412,6 +412,117 @@ struct RecreateSessionTests {
     }
 }
 
+@Suite("SessionStore bulk pause")
+struct BulkPauseTests {
+    private let defaults: UserDefaults
+    private let suiteName = "BulkPauseTests.\(UUID().uuidString)"
+
+    init() {
+        defaults = UserDefaults(suiteName: suiteName)!
+    }
+
+    private func removeDefaults() {
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    @Test("Pause All pauses only running sessions and Resume restores exactly those")
+    @MainActor
+    func pauseAllThenResume() async {
+        defer { removeDefaults() }
+        let running1 = makeSyncSession(id: "sync_1", name: "one")
+        let alreadyPaused = makeSyncSession(id: "sync_2", name: "two", paused: true)
+        let running2 = makeSyncSession(id: "sync_3", name: "three")
+        let recorder = RecordingProvider(syncSessions: [running1, alreadyPaused, running2])
+        let store = SessionStore(provider: recorder, defaults: defaults)
+        await store.refresh()
+
+        await store.pauseAllSync()
+
+        #expect(recorder.calls == ["syncPause:sync_1", "syncPause:sync_3"])
+        #expect(store.bulkPause == BulkPause(sessionIdentifiers: ["sync_1", "sync_3"], resumeAt: nil))
+
+        let afterPause = RecordingProvider(syncSessions: [
+            makeSyncSession(id: "sync_1", name: "one", paused: true),
+            alreadyPaused,
+            makeSyncSession(id: "sync_3", name: "three", paused: true),
+        ])
+        store.replaceProvider(afterPause)
+
+        await store.resumeBulkPause()
+
+        #expect(afterPause.calls == ["syncResume:sync_1", "syncResume:sync_3"])
+        #expect(store.bulkPause == nil)
+        #expect(store.lastError == nil)
+    }
+
+    @Test("A timed pause read back by a fresh store resumes on the first refresh after its deadline")
+    @MainActor
+    func timedPauseSurvivesRelaunch() async {
+        defer { removeDefaults() }
+        let pausedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let deadline = Date(timeIntervalSince1970: 1_800_001_800)
+        let beforePause = RecordingProvider(syncSessions: [
+            makeSyncSession(id: "sync_1", name: "one"),
+            makeSyncSession(id: "sync_2", name: "two", paused: true),
+        ])
+        let firstLaunch = SessionStore(provider: beforePause, defaults: defaults, now: { pausedAt })
+        await firstLaunch.pauseAllSync(until: deadline)
+
+        let whilePaused = [
+            makeSyncSession(id: "sync_1", name: "one", paused: true),
+            makeSyncSession(id: "sync_2", name: "two", paused: true),
+        ]
+
+        let beforeDeadline = RecordingProvider(syncSessions: whilePaused)
+        let earlyLaunch = SessionStore(
+            provider: beforeDeadline,
+            defaults: defaults,
+            now: { Date(timeIntervalSince1970: 1_800_001_799) }
+        )
+        await earlyLaunch.refresh()
+
+        #expect(beforeDeadline.calls == [])
+        #expect(earlyLaunch.bulkPause == BulkPause(sessionIdentifiers: ["sync_1"], resumeAt: deadline))
+
+        let afterDeadline = RecordingProvider(syncSessions: whilePaused)
+        let lateLaunch = SessionStore(
+            provider: afterDeadline,
+            defaults: defaults,
+            now: { Date(timeIntervalSince1970: 1_800_001_800) }
+        )
+        await lateLaunch.refresh()
+
+        #expect(afterDeadline.calls == ["syncResume:sync_1"])
+        #expect(lateLaunch.bulkPause == nil)
+        let nextLaunch = SessionStore(provider: afterDeadline, defaults: defaults)
+        #expect(nextLaunch.bulkPause == nil)
+    }
+
+    @Test("Pause All during an active bulk pause keeps the first sessions and takes the newer deadline")
+    @MainActor
+    func secondPauseAllKeepsFirstSessions() async {
+        defer { removeDefaults() }
+        let firstPause = RecordingProvider(syncSessions: [makeSyncSession(id: "sync_1", name: "one")])
+        let store = SessionStore(
+            provider: firstPause,
+            defaults: defaults,
+            now: { Date(timeIntervalSince1970: 1_800_000_000) }
+        )
+        await store.pauseAllSync(until: Date(timeIntervalSince1970: 1_800_000_600))
+
+        let secondPause = RecordingProvider(syncSessions: [
+            makeSyncSession(id: "sync_1", name: "one", paused: true),
+            makeSyncSession(id: "sync_2", name: "two"),
+        ])
+        store.replaceProvider(secondPause)
+        let laterDeadline = Date(timeIntervalSince1970: 1_800_003_600)
+        await store.pauseAllSync(until: laterDeadline)
+
+        #expect(secondPause.calls == ["syncPause:sync_2"])
+        #expect(store.bulkPause == BulkPause(sessionIdentifiers: ["sync_1", "sync_2"], resumeAt: laterDeadline))
+    }
+}
+
 // MARK: - Helpers
 
 final class RecordingProvider: SessionProvider, @unchecked Sendable {
@@ -475,8 +586,8 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
         lock.unlock()
     }
     func forwardCreate(arguments: [String]) async throws {}
-    func syncPause(_ identifier: String) async throws {}
-    func syncResume(_ identifier: String) async throws {}
+    func syncPause(_ identifier: String) async throws { try record("syncPause:\(identifier)") }
+    func syncResume(_ identifier: String) async throws { try record("syncResume:\(identifier)") }
     func syncFlush(_ identifier: String) async throws {
         try record("syncFlush:\(identifier)")
         lock.lock()

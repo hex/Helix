@@ -22,6 +22,18 @@ public struct GitRepoCheck: Sendable, Equatable {
     }
 }
 
+/// Sync sessions paused together by Pause All, resumed together later.
+public struct BulkPause: Codable, Equatable, Sendable {
+    public let sessionIdentifiers: [String]
+    /// When the sessions resume on their own; nil keeps them paused until resumed by hand.
+    public let resumeAt: Date?
+
+    public init(sessionIdentifiers: [String], resumeAt: Date?) {
+        self.sessionIdentifiers = sessionIdentifiers
+        self.resumeAt = resumeAt
+    }
+}
+
 public enum HealthStatus: Sendable {
     case healthy
     case active
@@ -41,14 +53,37 @@ public final class SessionStore {
     public private(set) var lastError: String?
     public private(set) var refreshCount = 0
     public var pendingSessionSelection: String?
+    public private(set) var bulkPause: BulkPause? {
+        didSet { persistBulkPause() }
+    }
 
     private var provider: any SessionProvider
     private var pollingTask: Task<Void, Never>?
     private let fileTransport: FileTransport
+    private let defaults: UserDefaults
+    private let now: () -> Date
+    @ObservationIgnored private var bulkPauseInFlight = false
+    private static let bulkPauseKey = "bulkPause"
 
-    public init(provider: any SessionProvider, fileTransport: FileTransport = FileTransport()) {
+    public init(
+        provider: any SessionProvider,
+        fileTransport: FileTransport = FileTransport(),
+        defaults: UserDefaults = .standard,
+        now: @escaping () -> Date = Date.init
+    ) {
         self.provider = provider
         self.fileTransport = fileTransport
+        self.defaults = defaults
+        self.now = now
+        if let data = defaults.data(forKey: Self.bulkPauseKey) {
+            do {
+                bulkPause = try JSONDecoder().decode(BulkPause.self, from: data)
+            } catch {
+                let message = "Ignoring the saved Pause All record: \(error.localizedDescription)"
+                ConsoleLog.shared.log(message, level: .error)
+                lastError = message
+            }
+        }
     }
 
     public func replaceProvider(_ provider: any SessionProvider) {
@@ -105,6 +140,15 @@ public final class SessionStore {
     }
 
     public func refresh() async {
+        guard await reloadSessions() else { return }
+        if let resumeAt = bulkPause?.resumeAt, now() >= resumeAt {
+            await resumeBulkPause()
+        }
+    }
+
+    /// Fetches the session lists. Returns false when the daemon could not be reached.
+    @discardableResult
+    private func reloadSessions() async -> Bool {
         do {
             async let syncs = provider.syncList()
             async let forwards = provider.forwardList()
@@ -114,11 +158,13 @@ public final class SessionStore {
             if forwardDigest(newForwards) != forwardDigest(forwardSessions) { forwardSessions = newForwards }
             if !daemonRunning { daemonRunning = true }
             if lastError != nil { lastError = nil }
+            return true
         } catch {
             if !daemonRunning || lastError != error.localizedDescription {
                 daemonRunning = false
                 lastError = error.localizedDescription
             }
+            return false
         }
     }
 
@@ -193,6 +239,70 @@ public final class SessionStore {
             alpha: session.alpha.endpointURL.formatted,
             beta: session.beta.endpointURL.formatted
         )
+    }
+
+    // MARK: - Bulk Pause
+
+    /// Pauses every running sync session and records which ones it paused.
+    /// - Parameter resumeAt: when `refresh()` resumes them on its own; nil waits for `resumeBulkPause()`.
+    public func pauseAllSync(until resumeAt: Date? = nil) async {
+        guard !bulkPauseInFlight else { return }
+        bulkPauseInFlight = true
+        defer { bulkPauseInFlight = false }
+        guard await reloadSessions() else { return }
+
+        var paused: [String] = []
+        var failures: [String] = []
+        for session in syncSessions where !session.paused {
+            do {
+                try await provider.syncPause(session.identifier)
+                paused.append(session.identifier)
+            } catch {
+                failures.append("Could not pause \(session.name ?? session.identifier): \(error.localizedDescription)")
+            }
+        }
+        let pausedEarlier = bulkPause?.sessionIdentifiers ?? []
+        let allPaused = pausedEarlier + paused.filter { !pausedEarlier.contains($0) }
+        bulkPause = allPaused.isEmpty ? nil : BulkPause(sessionIdentifiers: allPaused, resumeAt: resumeAt)
+        await finishBulkAction(failures: failures)
+    }
+
+    /// Resumes the sessions Pause All paused that are still paused. A session that
+    /// fails to resume stays in the record so the next attempt retries it.
+    public func resumeBulkPause() async {
+        guard let record = bulkPause, !bulkPauseInFlight else { return }
+        bulkPauseInFlight = true
+        defer { bulkPauseInFlight = false }
+        guard await reloadSessions() else { return }
+
+        var unresumed: [String] = []
+        var failures: [String] = []
+        for session in syncSessions where session.paused && record.sessionIdentifiers.contains(session.identifier) {
+            do {
+                try await provider.syncResume(session.identifier)
+            } catch {
+                unresumed.append(session.identifier)
+                failures.append("Could not resume \(session.name ?? session.identifier): \(error.localizedDescription)")
+            }
+        }
+        bulkPause = unresumed.isEmpty ? nil : BulkPause(sessionIdentifiers: unresumed, resumeAt: record.resumeAt)
+        await finishBulkAction(failures: failures)
+    }
+
+    private func persistBulkPause() {
+        guard let bulkPause else {
+            defaults.removeObject(forKey: Self.bulkPauseKey)
+            return
+        }
+        // Encoding an array of strings and an optional date cannot fail.
+        defaults.set(try! JSONEncoder().encode(bulkPause), forKey: Self.bulkPauseKey)
+    }
+
+    private func finishBulkAction(failures: [String]) async {
+        await reloadSessions()
+        if !failures.isEmpty {
+            lastError = failures.joined(separator: "; ")
+        }
     }
 
     // MARK: - Sync Actions
