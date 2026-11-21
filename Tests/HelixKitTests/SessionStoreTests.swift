@@ -769,9 +769,17 @@ func makeEndpoint(
 @Suite("SessionStore conflict resolution")
 struct ConflictResolutionTests {
 
-    @Test("Resolves conflict by removing loser then copying winner then flushing")
+    /// The per-call token in replace's sibling names, read from the copy that lands beside `destination`.
+    private func replaceToken(copiedBeside destination: String, in commands: [RecordedCommand]) throws -> String {
+        let marker = destination + ".helix-incoming-"
+        let copyTarget = try #require(commands.first { $0.executable == "/bin/cp" }?.arguments.last)
+        try #require(copyTarget.hasPrefix(marker))
+        return String(copyTarget.dropFirst(marker.count))
+    }
+
+    @Test("Resolves conflict by replacing loser with a copy of winner then flushing")
     @MainActor
-    func happyPath() async {
+    func happyPath() async throws {
         let conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
         let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [conflict])
         let resolvedSession = makeSyncSession(id: "sync_1", name: "s1")
@@ -784,26 +792,27 @@ struct ConflictResolutionTests {
         await store.resolveConflict(session: session, conflict: conflict, winner: .alpha)
 
         #expect(store.lastError == nil)
-        // Should check winner exists, remove loser, then copy winner
-        #expect(copyRecorder.commands.count == 3)
-        let check = copyRecorder.commands[0]
-        #expect(check.executable == "/bin/test")
-        #expect(check.arguments == ["-e", "/tmp/a/file.txt"])
-        let rm = copyRecorder.commands[1]
-        #expect(rm.executable == "/bin/rm")
-        #expect(rm.arguments == ["-rf", "/tmp/b/file.txt"])
-        let cp = copyRecorder.commands[2]
-        #expect(cp.executable == "/bin/cp")
-        #expect(cp.arguments == ["-Rp", "/tmp/a/file.txt", "/tmp/b/file.txt"])
+        // Should check winner exists, then replace loser with a copy of winner
+        #expect(copyRecorder.commands.count == 6)
+        let token = try replaceToken(copiedBeside: "/tmp/b/file.txt", in: copyRecorder.commands)
+        #expect(copyRecorder.commands.map(\.executable) == ["/bin/test", "/bin/cp", "/bin/test", "/bin/mv", "/bin/mv", "/bin/rm"])
+        #expect(copyRecorder.commands.map(\.arguments) == [
+            ["-e", "/tmp/a/file.txt"],
+            ["-Rp", "/tmp/a/file.txt", "/tmp/b/file.txt.helix-incoming-\(token)"],
+            ["-e", "/tmp/b/file.txt"],
+            ["/tmp/b/file.txt", "/tmp/b/file.txt.helix-replaced-\(token)"],
+            ["/tmp/b/file.txt.helix-incoming-\(token)", "/tmp/b/file.txt"],
+            ["-rf", "/tmp/b/file.txt.helix-replaced-\(token)"],
+        ])
         // Should have flushed
         let flushCalls = recorder.calls.filter { $0.hasPrefix("syncFlush") }
         #expect(flushCalls.count == 1)
         #expect(flushCalls[0] == "syncFlush:sync_1")
     }
 
-    @Test("Beta wins removes alpha then copies from beta to alpha")
+    @Test("Beta wins replaces alpha with a copy of beta")
     @MainActor
-    func betaWins() async {
+    func betaWins() async throws {
         let conflict = Conflict(root: "data.json", alphaChanges: [], betaChanges: [])
         let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [conflict])
         let resolvedSession = makeSyncSession(id: "sync_1", name: "s1")
@@ -815,14 +824,17 @@ struct ConflictResolutionTests {
         await store.resolveConflict(session: session, conflict: conflict, winner: .beta)
 
         #expect(store.lastError == nil)
-        #expect(copyRecorder.commands.count == 3)
-        let check = copyRecorder.commands[0]
-        #expect(check.arguments == ["-e", "/tmp/b/data.json"])
-        let rm = copyRecorder.commands[1]
-        #expect(rm.arguments == ["-rf", "/tmp/a/data.json"])
-        let cp = copyRecorder.commands[2]
+        #expect(copyRecorder.commands.count == 6)
+        let token = try replaceToken(copiedBeside: "/tmp/a/data.json", in: copyRecorder.commands)
         // Beta (/tmp/b) -> Alpha (/tmp/a)
-        #expect(cp.arguments == ["-Rp", "/tmp/b/data.json", "/tmp/a/data.json"])
+        #expect(copyRecorder.commands.map(\.arguments) == [
+            ["-e", "/tmp/b/data.json"],
+            ["-Rp", "/tmp/b/data.json", "/tmp/a/data.json.helix-incoming-\(token)"],
+            ["-e", "/tmp/a/data.json"],
+            ["/tmp/a/data.json", "/tmp/a/data.json.helix-replaced-\(token)"],
+            ["/tmp/a/data.json.helix-incoming-\(token)", "/tmp/a/data.json"],
+            ["-rf", "/tmp/a/data.json.helix-replaced-\(token)"],
+        ])
     }
 
     @Test("Resolve does not call refresh after flush to avoid mid-scan flicker")
@@ -842,8 +854,8 @@ struct ConflictResolutionTests {
 
         // No additional syncList call — polling handles the refresh
         #expect(refreshCountAfter == refreshCountBefore)
-        // Transport operations still attempted (check + rm + cp)
-        #expect(copyRecorder.commands.count == 3)
+        // Transport operations still attempted (check + the five commands of a replace)
+        #expect(copyRecorder.commands.count == 6)
         // Flush still called
         let flushCalls = recorder.calls.filter { $0.hasPrefix("syncFlush") }
         #expect(flushCalls.count == 1)
@@ -988,8 +1000,8 @@ struct ConflictResolutionTests {
         await store.resolveConflicts(session: session, conflicts: [c1, c2], winner: .alpha)
 
         #expect(store.lastError == nil)
-        // Should have: test -e a, rm b/a, cp a/a→b/a, test -e b, rm b/b, cp a/b→b/b (6 commands)
-        #expect(cmdRecorder.commands.count == 6)
+        // Per conflict: test -e winner, then cp to incoming, test -e loser, mv aside, mv into place, rm set-aside (12 commands)
+        #expect(cmdRecorder.commands.count == 12)
         // Verify both files were resolved
         let rmCommands = cmdRecorder.commands.filter { $0.executable == "/bin/rm" }
         #expect(rmCommands.count == 2)

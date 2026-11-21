@@ -513,22 +513,7 @@ public final class SessionStore {
             return
         }
 
-        let alphaURL = appendingSubpath(to: session.alpha.endpointURL, subpath: conflict.root)
-        let betaURL = appendingSubpath(to: session.beta.endpointURL, subpath: conflict.root)
-
-        let (winnerURL, loserURL) = switch winner {
-        case .alpha: (alphaURL, betaURL)
-        case .beta: (betaURL, alphaURL)
-        }
-
-        let winnerChanges = winner == .alpha ? conflict.alphaChanges : conflict.betaChanges
         ConsoleLog.shared.log("resolveConflict: \(winner) wins for root '\(conflict.root)'")
-        ConsoleLog.shared.log("  winnerURL: \(winnerURL.formatted)")
-        ConsoleLog.shared.log("  loserURL: \(loserURL.formatted)")
-        ConsoleLog.shared.log("  winnerChanges: \(winnerChanges.map { "path='\($0.path)' old=\($0.old?.kind ?? "nil") new=\($0.new?.kind ?? "nil")" }.joined(separator: ", "))")
-
-        let winnerDeletedRoot = winnerChanges.contains { $0.path == conflict.root && $0.new == nil }
-        ConsoleLog.shared.log("  winnerDeletedRoot: \(winnerDeletedRoot)")
 
         // Pause the session to prevent mutagen from syncing while we modify files
         do {
@@ -541,22 +526,15 @@ public final class SessionStore {
         }
 
         do {
-            if winnerDeletedRoot {
-                ConsoleLog.shared.log("  action: REMOVE \(loserURL.formatted)")
-                try await fileTransport.remove(endpoint: loserURL)
-            } else {
-                let exists = try await fileTransport.pathExists(endpoint: winnerURL)
-                guard exists else {
-                    ConsoleLog.shared.log("  winner file no longer exists at \(winnerURL.formatted)", level: .error)
-                    lastError = "The file \"\(conflict.root)\" no longer exists at the source. It may have been renamed or deleted. Try refreshing sessions."
-                    try? await provider.syncResume(session.identifier)
-                    return
-                }
-                ConsoleLog.shared.log("  action: REMOVE \(loserURL.formatted) then COPY \(winnerURL.formatted)")
-                try await fileTransport.remove(endpoint: loserURL)
-                try await fileTransport.copy(from: winnerURL, to: loserURL)
+            switch try await applyWinner(winner, to: conflict, in: session) {
+            case .applied:
+                ConsoleLog.shared.log("  transport succeeded")
+            case .winnerMissing(let winnerURL):
+                ConsoleLog.shared.log("  winner file no longer exists at \(winnerURL.formatted)", level: .error)
+                lastError = "The file \"\(conflict.root)\" no longer exists at the source. It may have been renamed or deleted. Try refreshing sessions."
+                try? await provider.syncResume(session.identifier)
+                return
             }
-            ConsoleLog.shared.log("  transport succeeded")
         } catch {
             ConsoleLog.shared.log("  transport FAILED: \(error.localizedDescription)", level: .error)
             lastError = error.localizedDescription
@@ -610,29 +588,14 @@ public final class SessionStore {
 
         var resolved = 0
         for conflict in fileConflicts {
-            let alphaURL = appendingSubpath(to: session.alpha.endpointURL, subpath: conflict.root)
-            let betaURL = appendingSubpath(to: session.beta.endpointURL, subpath: conflict.root)
-            let (winnerURL, loserURL) = switch winner {
-            case .alpha: (alphaURL, betaURL)
-            case .beta: (betaURL, alphaURL)
-            }
-            let winnerChanges = winner == .alpha ? conflict.alphaChanges : conflict.betaChanges
-            let winnerDeletedRoot = winnerChanges.contains { $0.path == conflict.root && $0.new == nil }
-
             do {
-                if winnerDeletedRoot {
-                    try await fileTransport.remove(endpoint: loserURL)
-                } else {
-                    let exists = try await fileTransport.pathExists(endpoint: winnerURL)
-                    guard exists else {
-                        ConsoleLog.shared.log("  skipped '\(conflict.root)': winner file no longer exists", level: .error)
-                        failed += 1
-                        continue
-                    }
-                    try await fileTransport.remove(endpoint: loserURL)
-                    try await fileTransport.copy(from: winnerURL, to: loserURL)
+                switch try await applyWinner(winner, to: conflict, in: session) {
+                case .applied:
+                    resolved += 1
+                case .winnerMissing:
+                    ConsoleLog.shared.log("  skipped '\(conflict.root)': winner file no longer exists", level: .error)
+                    failed += 1
                 }
-                resolved += 1
             } catch {
                 ConsoleLog.shared.log("  failed '\(conflict.root)': \(error.localizedDescription)", level: .error)
                 failed += 1
@@ -654,6 +617,45 @@ public final class SessionStore {
             ConsoleLog.shared.log("  flush FAILED: \(error.localizedDescription)", level: .error)
             lastError = error.localizedDescription
         }
+    }
+
+    /// What applying a winner did to the files of one conflict.
+    private enum ConflictFileOutcome {
+        case applied
+        /// The winner's file is gone, so neither side was touched.
+        case winnerMissing(EndpointURL)
+    }
+
+    /// Makes the loser's side of one conflict match the winner's: removes it when the winner deleted the
+    /// conflict root, and otherwise replaces it with a copy of the winner. Throws the transport's error.
+    private func applyWinner(_ winner: ConflictWinner, to conflict: Conflict, in session: SyncSession) async throws -> ConflictFileOutcome {
+        let alphaURL = appendingSubpath(to: session.alpha.endpointURL, subpath: conflict.root)
+        let betaURL = appendingSubpath(to: session.beta.endpointURL, subpath: conflict.root)
+
+        let (winnerURL, loserURL) = switch winner {
+        case .alpha: (alphaURL, betaURL)
+        case .beta: (betaURL, alphaURL)
+        }
+
+        let winnerChanges = winner == .alpha ? conflict.alphaChanges : conflict.betaChanges
+        ConsoleLog.shared.log("  winnerURL: \(winnerURL.formatted)")
+        ConsoleLog.shared.log("  loserURL: \(loserURL.formatted)")
+        ConsoleLog.shared.log("  winnerChanges: \(winnerChanges.map { "path='\($0.path)' old=\($0.old?.kind ?? "nil") new=\($0.new?.kind ?? "nil")" }.joined(separator: ", "))")
+
+        let winnerDeletedRoot = winnerChanges.contains { $0.path == conflict.root && $0.new == nil }
+        ConsoleLog.shared.log("  winnerDeletedRoot: \(winnerDeletedRoot)")
+
+        if winnerDeletedRoot {
+            ConsoleLog.shared.log("  action: REMOVE \(loserURL.formatted)")
+            try await fileTransport.remove(endpoint: loserURL)
+            return .applied
+        }
+        guard try await fileTransport.pathExists(endpoint: winnerURL) else {
+            return .winnerMissing(winnerURL)
+        }
+        ConsoleLog.shared.log("  action: REPLACE \(loserURL.formatted) with a copy of \(winnerURL.formatted)")
+        try await fileTransport.replace(loserURL, withCopyOf: winnerURL)
+        return .applied
     }
 
     /// Why a conflict at the sync root is left alone: its loser path is the endpoint itself.
