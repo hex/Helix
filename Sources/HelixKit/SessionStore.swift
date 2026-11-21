@@ -56,25 +56,34 @@ public final class SessionStore {
     public private(set) var bulkPause: BulkPause? {
         didSet { persistBulkPause() }
     }
+    /// Whether the mutagen daemon runs at background priority, yielding CPU and disk to other work.
+    public private(set) var daemonBackgroundPriority: Bool
 
     private var provider: any SessionProvider
     private var pollingTask: Task<Void, Never>?
     private let fileTransport: FileTransport
     private let defaults: UserDefaults
     private let now: () -> Date
+    private var daemonProcess: any DaemonProcess
     @ObservationIgnored private var bulkPauseInFlight = false
+    /// The daemon process background priority was last applied to; nil while it is not applied.
+    @ObservationIgnored private var backgroundPriorityPID: ProcessID?
     private static let bulkPauseKey = "bulkPause"
+    private static let daemonBackgroundPriorityKey = "daemonBackgroundPriority"
 
     public init(
         provider: any SessionProvider,
         fileTransport: FileTransport = FileTransport(),
         defaults: UserDefaults = .standard,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        daemonProcess: any DaemonProcess = MutagenDaemon(cliPath: CLI.defaultExecutablePath)
     ) {
         self.provider = provider
         self.fileTransport = fileTransport
         self.defaults = defaults
         self.now = now
+        self.daemonProcess = daemonProcess
+        daemonBackgroundPriority = defaults.bool(forKey: Self.daemonBackgroundPriorityKey)
         if let data = defaults.data(forKey: Self.bulkPauseKey) {
             do {
                 bulkPause = try JSONDecoder().decode(BulkPause.self, from: data)
@@ -144,6 +153,7 @@ public final class SessionStore {
         if let resumeAt = bulkPause?.resumeAt, now() >= resumeAt {
             await resumeBulkPause()
         }
+        await reapplyDaemonBackgroundPriority()
     }
 
     /// Fetches the session lists. Returns false when the daemon could not be reached.
@@ -383,6 +393,51 @@ public final class SessionStore {
             lastError = nil
         } catch {
             lastError = error.localizedDescription
+        }
+    }
+
+    // MARK: - Daemon Priority
+
+    /// Saves the setting and applies it to the running daemon now.
+    public func setDaemonBackgroundPriority(_ enabled: Bool) async {
+        daemonBackgroundPriority = enabled
+        defaults.set(enabled, forKey: Self.daemonBackgroundPriorityKey)
+        guard let pid = await runningDaemonPID() else { return }
+        // Two quick flips overlap across the pid lookup; apply the setting as it stands now.
+        await applyDaemonPriority(background: daemonBackgroundPriority, to: pid)
+    }
+
+    /// The priority belongs to the process, so a restarted daemon starts at normal priority
+    /// under a new pid; this applies background priority to it again.
+    private func reapplyDaemonBackgroundPriority() async {
+        guard daemonBackgroundPriority else { return }
+        guard let pid = await runningDaemonPID(),
+              daemonBackgroundPriority,
+              pid != backgroundPriorityPID else { return }
+        await applyDaemonPriority(background: true, to: pid)
+    }
+
+    private func applyDaemonPriority(background: Bool, to pid: ProcessID) async {
+        do {
+            try await daemonProcess.setBackgroundPriority(background, pid: pid)
+            backgroundPriorityPID = background ? pid : nil
+        } catch {
+            let action = background ? "lower" : "restore"
+            lastError = "Could not \(action) the priority of the mutagen daemon (pid \(pid)): \(error.localizedDescription)"
+        }
+    }
+
+    /// The running daemon's pid; nil when no daemon runs or the lookup failed, which lastError reports.
+    private func runningDaemonPID() async -> ProcessID? {
+        do {
+            guard let pid = try await daemonProcess.pid() else {
+                backgroundPriorityPID = nil
+                return nil
+            }
+            return pid
+        } catch {
+            lastError = "Could not find the mutagen daemon: \(error.localizedDescription)"
+            return nil
         }
     }
 

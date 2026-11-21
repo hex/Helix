@@ -523,6 +523,71 @@ struct BulkPauseTests {
     }
 }
 
+@Suite("SessionStore daemon priority")
+struct DaemonPriorityTests {
+    private let defaults: UserDefaults
+    private let suiteName = "DaemonPriorityTests.\(UUID().uuidString)"
+
+    init() {
+        defaults = UserDefaults(suiteName: suiteName)!
+    }
+
+    private func removeDefaults() {
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    @Test("With no daemon running, turning background priority on applies nothing and reports no error")
+    @MainActor
+    func noDaemonRunning() async {
+        defer { removeDefaults() }
+        let daemon = RecordingDaemonProcess(pid: nil)
+        let store = SessionStore(provider: FakeProvider(), defaults: defaults, daemonProcess: daemon)
+
+        await store.setDaemonBackgroundPriority(true)
+
+        #expect(daemon.calls == [])
+        #expect(store.lastError == nil)
+        #expect(store.daemonBackgroundPriority == true)
+    }
+
+    @Test("Turning background priority on lowers the daemon's priority and turning it off restores it")
+    @MainActor
+    func switchOnThenOff() async {
+        defer { removeDefaults() }
+        let daemon = RecordingDaemonProcess(pid: 3114)
+        let store = SessionStore(provider: FakeProvider(), defaults: defaults, daemonProcess: daemon)
+
+        await store.setDaemonBackgroundPriority(true)
+
+        #expect(daemon.calls == ["background:3114"])
+
+        await store.setDaemonBackgroundPriority(false)
+
+        #expect(daemon.calls == ["background:3114", "restore:3114"])
+        #expect(store.lastError == nil)
+    }
+
+    @Test("With background priority on, a refresh applies it to a restarted daemon once")
+    @MainActor
+    func reappliesAfterDaemonRestart() async {
+        defer { removeDefaults() }
+        let daemon = RecordingDaemonProcess(pid: 3114)
+        let store = SessionStore(provider: FakeProvider(), defaults: defaults, daemonProcess: daemon)
+        await store.setDaemonBackgroundPriority(true)
+
+        await store.refresh()
+
+        #expect(daemon.calls == ["background:3114"])
+
+        daemon.restart(as: 4200)
+        await store.refresh()
+        await store.refresh()
+
+        #expect(daemon.calls == ["background:3114", "background:4200"])
+        #expect(store.lastError == nil)
+    }
+}
+
 // MARK: - Helpers
 
 final class RecordingProvider: SessionProvider, @unchecked Sendable {
@@ -1458,6 +1523,40 @@ struct FixGitMismatchTests {
         #expect(success == false)
         #expect(store.lastError != nil)
         #expect(store.lastError!.contains("Git init failed"))
+    }
+}
+
+final class RecordingDaemonProcess: DaemonProcess, @unchecked Sendable {
+    private var _pid: ProcessID?
+    private var _calls: [String] = []
+    private let lock = NSLock()
+
+    init(pid: Int32?) {
+        _pid = pid.map { ProcessID($0)! }
+    }
+
+    var calls: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return _calls
+    }
+
+    func restart(as pid: Int32) {
+        lock.lock()
+        _pid = ProcessID(pid)!
+        lock.unlock()
+    }
+
+    func pid() async throws -> ProcessID? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _pid
+    }
+
+    func setBackgroundPriority(_ enabled: Bool, pid: ProcessID) async throws {
+        lock.lock()
+        _calls.append("\(enabled ? "background" : "restore"):\(pid.rawValue)")
+        lock.unlock()
     }
 }
 

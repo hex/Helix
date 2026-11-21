@@ -11,10 +11,12 @@ public struct CLIError: LocalizedError, Sendable {
 }
 
 public struct CLI: Sendable {
+    public static let defaultExecutablePath = "/opt/homebrew/bin/mutagen"
+
     let executablePath: String
     let baseArguments: [String]
 
-    public init(executablePath: String = "/opt/homebrew/bin/mutagen", baseArguments: [String] = []) {
+    public init(executablePath: String = CLI.defaultExecutablePath, baseArguments: [String] = []) {
         self.executablePath = executablePath
         self.baseArguments = baseArguments
     }
