@@ -24,10 +24,12 @@ struct FakeProvider: SessionProvider {
     }
 
     func syncList() async throws -> [SyncSession] {
+        try Task.checkCancellation()
         guard isDaemonRunning else { throw CLIError(exitCode: 1, stderr: "Daemon not running") }
         return syncSessions
     }
     func forwardList() async throws -> [ForwardSession] {
+        try Task.checkCancellation()
         guard isDaemonRunning else { throw CLIError(exitCode: 1, stderr: "Daemon not running") }
         return forwardSessions
     }
@@ -87,6 +89,24 @@ struct SessionStoreTests {
 
         #expect(store.lastError != nil)
         #expect(store.syncSessions.isEmpty)
+    }
+
+    @Test("A refresh whose task is cancelled leaves the sessions, the daemon state and the error as they were")
+    @MainActor
+    func cancelledRefresh() async {
+        let store = SessionStore(provider: FakeProvider(syncSessions: [makeSyncSession(id: "sync_1", name: "test")]))
+        await store.refresh()
+
+        let polled = Task { await store.refresh() }
+        polled.cancel()
+        await polled.value
+        let byHand = Task { await store.manualRefresh() }
+        byHand.cancel()
+        await byHand.value
+
+        #expect(store.syncSessions.map(\.identifier) == ["sync_1"])
+        #expect(store.daemonRunning == true)
+        #expect(store.lastError == nil)
     }
 
     @Test("Health status reflects session states")

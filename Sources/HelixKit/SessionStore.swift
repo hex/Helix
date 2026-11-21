@@ -216,7 +216,8 @@ public final class SessionStore {
         await reapplyDaemonBackgroundPriority()
     }
 
-    /// Fetches the session lists. Returns false when the daemon could not be reached.
+    /// Fetches the session lists. Returns false when they were not fetched: the daemon could not be reached,
+    /// or the task was cancelled.
     @discardableResult
     private func reloadSessions() async -> Bool {
         do {
@@ -230,6 +231,9 @@ public final class SessionStore {
             if !daemonRunning { daemonRunning = true }
             if lastError != nil { lastError = nil }
             return true
+        } catch is CancellationError {
+            // A cancelled fetch says nothing about the daemon.
+            return false
         } catch {
             if !daemonRunning || lastError != error.localizedDescription {
                 daemonRunning = false
@@ -257,6 +261,8 @@ public final class SessionStore {
             forgetSessions(notListedIn: syncSessions)
             if !daemonRunning { daemonRunning = true }
             if lastError != nil { lastError = nil }
+        } catch is CancellationError {
+            // A cancelled fetch says nothing about the daemon.
         } catch {
             if !daemonRunning || lastError != error.localizedDescription {
                 daemonRunning = false
