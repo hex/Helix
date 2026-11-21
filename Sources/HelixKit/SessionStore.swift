@@ -534,6 +534,10 @@ public final class SessionStore {
             case .appliedLeavingOriginal(let notice):
                 ConsoleLog.shared.log("  \(notice)", level: .error)
                 leftoverNotice = notice
+            case .leftUnverified(let notice):
+                ConsoleLog.shared.log("  \(notice)", level: .error)
+                lastError = notice
+                return
             case .winnerMissing(let winnerURL):
                 ConsoleLog.shared.log("  winner file no longer exists at \(winnerURL.formatted)", level: .error)
                 lastError = "The file \"\(conflict.root)\" no longer exists at the source. It may have been renamed or deleted. Try refreshing sessions."
@@ -593,7 +597,7 @@ public final class SessionStore {
 
         var resolved = 0
         var notices: [String] = []
-        for conflict in fileConflicts {
+        for (position, conflict) in fileConflicts.enumerated() {
             do {
                 switch try await applyWinner(winner, to: conflict, in: session) {
                 case .applied:
@@ -602,6 +606,15 @@ public final class SessionStore {
                     ConsoleLog.shared.log("  \(notice)", level: .error)
                     resolved += 1
                     notices.append(notice)
+                case .leftUnverified(let notice):
+                    ConsoleLog.shared.log("  \(notice)", level: .error)
+                    let notAttempted = fileConflicts.count - position - 1
+                    if notAttempted > 0 {
+                        notices.append("\(notAttempted) of \(conflicts.count) conflicts \(notAttempted == 1 ? "was" : "were") not attempted.")
+                    }
+                    if let refusal { notices.append(refusal) }
+                    lastError = ([notice] + notices).joined(separator: " ")
+                    return
                 case .winnerMissing:
                     ConsoleLog.shared.log("  skipped '\(conflict.root)': winner file no longer exists", level: .error)
                     failed += 1
@@ -633,12 +646,16 @@ public final class SessionStore {
         case applied
         /// The loser's side matches the winner's; `notice` names the displaced original still on disk for the user to delete.
         case appliedLeavingOriginal(notice: String)
+        /// The loser's side could not be shown to hold either its original or the winner's copy, so the session
+        /// must stay paused; `notice` names the paths that hold the data.
+        case leftUnverified(notice: String)
         /// The winner's file is gone, so neither side was touched.
         case winnerMissing(EndpointURL)
     }
 
     /// Makes the loser's side of one conflict match the winner's: removes it when the winner deleted the
-    /// conflict root, and otherwise replaces it with a copy of the winner. Throws the transport's error.
+    /// conflict root, and otherwise replaces it with a copy of the winner. Throws the transport's error
+    /// when the session is safe to resume; a replacement that is not comes back as `leftUnverified`.
     private func applyWinner(_ winner: ConflictWinner, to conflict: Conflict, in session: SyncSession) async throws -> ConflictFileOutcome {
         let alphaURL = appendingSubpath(to: session.alpha.endpointURL, subpath: conflict.root)
         let betaURL = appendingSubpath(to: session.beta.endpointURL, subpath: conflict.root)
@@ -665,13 +682,24 @@ public final class SessionStore {
             return .winnerMissing(winnerURL)
         }
         ConsoleLog.shared.log("  action: REPLACE \(loserURL.formatted) with a copy of \(winnerURL.formatted)")
-        switch try await fileTransport.replace(loserURL, withCopyOf: winnerURL) {
-        case .replaced:
-            return .applied
-        case .replacedLeavingOriginal(let path, let reason):
-            return .appliedLeavingOriginal(
-                notice: "Resolved \"\(conflict.root)\", but left the original it replaced at \(path): \(reason). Delete that path by hand."
-            )
+        do {
+            switch try await fileTransport.replace(loserURL, withCopyOf: winnerURL) {
+            case .replaced:
+                return .applied
+            case .replacedLeavingOriginal(let path, let reason):
+                return .appliedLeavingOriginal(
+                    notice: "Resolved \"\(conflict.root)\", but left the original it replaced at \(path): \(reason). Delete that path by hand."
+                )
+            }
+        } catch let error as ReplaceError {
+            switch error.aftermath {
+            case .destinationUnchanged:
+                throw error
+            case .destinationUnverified:
+                return .leftUnverified(
+                    notice: "\(error.localizedDescription). The session \"\(session.name ?? session.identifier)\" was left paused so that sync cannot overwrite or delete those paths. Put \"\(conflict.root)\" in order, then resume the session."
+                )
+            }
         }
     }
 

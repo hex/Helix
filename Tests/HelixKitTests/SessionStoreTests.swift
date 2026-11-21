@@ -1060,6 +1060,52 @@ struct ConflictResolutionTests {
         #expect(store.lastError == "Resolved \"a.txt\", but left the original it replaced at /tmp/b/a.txt.helix-replaced-\(token): permission denied. Delete that path by hand.")
     }
 
+    /// A transport whose move into place fails while every check afterwards finds something at every path,
+    /// so the replacement cannot be shown to have happened or to have been undone.
+    private func transportLeavingDestinationUnverified(recordingTo cmdRecorder: CommandRecorder) -> FileTransport {
+        FileTransport { executable, arguments in
+            let output = try await cmdRecorder.execute(executable, arguments)
+            if executable == "/bin/mv", arguments.first?.contains(".helix-incoming-") == true {
+                throw CLIError(exitCode: 1, stderr: "permission denied")
+            }
+            return output
+        }
+    }
+
+    @Test("A replacement that leaves the destination unverified keeps the session paused and names the paths holding the data")
+    @MainActor
+    func unverifiedReplacementStaysPaused() async throws {
+        let conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
+        let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [conflict])
+        let recorder = RecordingProvider(syncSessions: [session])
+        let cmdRecorder = CommandRecorder()
+        let store = SessionStore(provider: recorder, fileTransport: transportLeavingDestinationUnverified(recordingTo: cmdRecorder))
+
+        await store.resolveConflict(session: session, conflict: conflict, winner: .alpha)
+
+        let token = try replaceToken(copiedBeside: "/tmp/b/file.txt", in: cmdRecorder.commands)
+        #expect(recorder.calls == ["syncPause:sync_1"])
+        #expect(store.lastError == "Could not move /tmp/b/file.txt.helix-incoming-\(token) into place at /tmp/b/file.txt: permission denied. Nothing was deleted: look for the original at /tmp/b/file.txt.helix-replaced-\(token) and for the replacement at /tmp/b/file.txt.helix-incoming-\(token). The session \"s1\" was left paused so that sync cannot overwrite or delete those paths. Put \"file.txt\" in order, then resume the session.")
+    }
+
+    @Test("Bulk resolve stops at a replacement that leaves the destination unverified and keeps the session paused")
+    @MainActor
+    func bulkUnverifiedReplacementStaysPaused() async throws {
+        let c1 = Conflict(root: "a.txt", alphaChanges: [], betaChanges: [])
+        let c2 = Conflict(root: "b.txt", alphaChanges: [], betaChanges: [])
+        let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [c1, c2])
+        let recorder = RecordingProvider(syncSessions: [session])
+        let cmdRecorder = CommandRecorder()
+        let store = SessionStore(provider: recorder, fileTransport: transportLeavingDestinationUnverified(recordingTo: cmdRecorder))
+
+        await store.resolveConflicts(session: session, conflicts: [c1, c2], winner: .alpha)
+
+        let token = try replaceToken(copiedBeside: "/tmp/b/a.txt", in: cmdRecorder.commands)
+        #expect(recorder.calls == ["syncPause:sync_1"])
+        #expect(cmdRecorder.commands.filter { $0.arguments.contains { $0.contains("b.txt") } }.isEmpty)
+        #expect(store.lastError == "Could not move /tmp/b/a.txt.helix-incoming-\(token) into place at /tmp/b/a.txt: permission denied. Nothing was deleted: look for the original at /tmp/b/a.txt.helix-replaced-\(token) and for the replacement at /tmp/b/a.txt.helix-incoming-\(token). The session \"s1\" was left paused so that sync cannot overwrite or delete those paths. Put \"a.txt\" in order, then resume the session. 1 of 2 conflicts was not attempted.")
+    }
+
     @Test("conflictFileInfo returns file metadata from both endpoints")
     @MainActor
     func fileInfo() async {
