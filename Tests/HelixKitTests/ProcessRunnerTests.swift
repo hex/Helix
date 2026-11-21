@@ -82,12 +82,19 @@ struct ProcessDeadlineTests {
         let pidFile = fixturePIDFile()
         defer { try? FileManager.default.removeItem(at: pidFile) }
         let clock = Gate()
-        let runner = ProcessRunner { _ in await clock.pass() }
+        let limit: Duration = .milliseconds(250)
+        let started = SuspendingClock.now
+        let wait: @Sendable (SuspendingClock.Instant) async throws -> Void = { expiry in
+            #expect(expiry >= started.advanced(by: limit))
+            #expect(expiry <= SuspendingClock.now.advanced(by: limit))
+            await clock.pass()
+        }
+        let runner = ProcessRunner(waitForDeadline: wait)
         let call = Task {
             try await runner.run(
                 executablePath: "/bin/sh",
                 arguments: ["-c", "printf '%s\n' \"$$\" > \"$1\"; exec /bin/sleep 8", "helix-test", pidFile.path],
-                deadline: .milliseconds(250)
+                deadline: limit
             )
         }
         defer {

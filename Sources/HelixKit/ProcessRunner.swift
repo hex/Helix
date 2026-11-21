@@ -52,10 +52,10 @@ public actor ProcessRunner {
     private var drainWaiters: [UUID: DrainWaiter] = [:]
     private var children: [ObjectIdentifier: RunningChild] = [:]
     private var isShuttingDown = false
-    private let waitForDeadline: @Sendable (ContinuousClock.Instant) async throws -> Void
+    private let waitForDeadline: @Sendable (SuspendingClock.Instant) async throws -> Void
 
-    init(waitForDeadline: @escaping @Sendable (ContinuousClock.Instant) async throws -> Void = {
-        try await ContinuousClock().sleep(until: $0)
+    init(waitForDeadline: @escaping @Sendable (SuspendingClock.Instant) async throws -> Void = {
+        try await SuspendingClock().sleep(until: $0)
     }) {
         self.waitForDeadline = waitForDeadline
     }
@@ -119,7 +119,7 @@ private final class RunningChild: @unchecked Sendable {
     private let process = Process()
     private let executablePath: String
     private let deadline: Duration
-    private let waitForDeadline: @Sendable (ContinuousClock.Instant) async throws -> Void
+    private let waitForDeadline: @Sendable (SuspendingClock.Instant) async throws -> Void
     private let stdoutPipe = Pipe()
     private let stderrPipe = Pipe()
 
@@ -137,7 +137,7 @@ private final class RunningChild: @unchecked Sendable {
 
     init(
         executablePath: String, arguments: [String], deadline: Duration,
-        waitForDeadline: @escaping @Sendable (ContinuousClock.Instant) async throws -> Void
+        waitForDeadline: @escaping @Sendable (SuspendingClock.Instant) async throws -> Void
     ) {
         self.executablePath = executablePath
         self.deadline = deadline
@@ -190,7 +190,7 @@ private final class RunningChild: @unchecked Sendable {
     }
 
     private func startDeadline() {
-        let expiry = ContinuousClock.now.advanced(by: deadline)
+        let expiry = SuspendingClock.now.advanced(by: deadline)
         let error = ProcessDeadlineError(executablePath: executablePath, deadline: deadline)
         deadlineTimer = Task { [weak self, waitForDeadline] in
             do {
