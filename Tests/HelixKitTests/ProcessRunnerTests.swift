@@ -171,10 +171,35 @@ struct ProcessDeadlineTests {
 
     @Test("A fast command returns its full output")
     func fastCommandSucceeds() async throws {
-        let output = try await withTimeout(seconds: 2) {
-            try await runProcess(executablePath: "/usr/bin/printf", arguments: ["hello"], deadline: .seconds(1))
+        let clock = Gate()
+        defer { Task { await clock.open() } }
+        let runner = ProcessRunner { _ in await clock.pass() }
+        let output = try await withTimeout(seconds: 5) {
+            try await runner.run(executablePath: "/usr/bin/printf", arguments: ["hello"], deadline: .seconds(1))
         }
         #expect(output == "hello")
+    }
+
+    @Test("An exited child can finish draining buffered output after the deadline")
+    func deadlinePreservesBufferedOutputAfterExit() async throws {
+        try await withTimeout(seconds: 5) {
+            let child = Process()
+            let stdout = Pipe()
+            let openPipe = Pipe()
+            child.executableURL = URL(fileURLWithPath: "/usr/bin/printf")
+            child.arguments = ["hello"]
+            child.standardOutput = stdout
+            try child.run()
+            child.waitUntilExit()
+
+            let pendingOutput = stdout.fileHandleForReading.fileDescriptor
+            let stillOpen = openPipe.fileHandleForReading.fileDescriptor
+            #expect(!ProcessRunner.canDrainAfterExit(child, openPipes: [pendingOutput, stillOpen]))
+
+            try openPipe.fileHandleForWriting.close()
+            #expect(ProcessRunner.canDrainAfterExit(child, openPipes: [pendingOutput, stillOpen]))
+            #expect(String(decoding: stdout.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self) == "hello")
+        }
     }
 }
 
