@@ -163,7 +163,7 @@ struct RemoteDirectoryBrowser: View {
 
     private func sshCommand(_ command: String) async throws -> String {
         let ssh = SSHCommand.remoteShell(user: user, host: host, port: port, command: command)
-        return try await runProcess(executablePath: ssh.executablePath, arguments: ssh.arguments)
+        return try await runProcess(executablePath: ssh.executablePath, arguments: ssh.arguments, deadline: CommandDeadline.query)
     }
 
     private func shellEscape(_ path: String) -> String {

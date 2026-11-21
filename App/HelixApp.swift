@@ -117,6 +117,19 @@ extension FocusedValues {
 // MARK: - Dynamic Dock Icon
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var isDrainingCommands = false
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if !isDrainingCommands {
+            isDrainingCommands = true
+            Task {
+                await ProcessRunner.shared.terminateAll()
+                sender.reply(toApplicationShouldTerminate: true)
+            }
+        }
+        return .terminateLater
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         let nc = NotificationCenter.default
         nc.addObserver(forName: NSWindow.didBecomeMainNotification, object: nil, queue: .main) { [weak self] _ in

@@ -3,8 +3,7 @@
 
 import Foundation
 
-/// An ssh or scp command line that cannot wait on a host for long: it never prompts, gives up connecting
-/// after 5 seconds, and drops a connection that has been silent for 15.
+/// An ssh or scp command line with prompts disabled and limits on connection setup and idle connections.
 public struct SSHCommand: Sendable, Equatable {
     public let executablePath: String
     public let arguments: [String]

@@ -162,7 +162,7 @@ struct EndpointPicker: View {
         let ssh = SSHCommand.remoteShell(user: user.isEmpty ? nil : user, host: host, port: Int(port), command: "echo ok")
 
         do {
-            _ = try await runProcess(executablePath: ssh.executablePath, arguments: ssh.arguments)
+            _ = try await runProcess(executablePath: ssh.executablePath, arguments: ssh.arguments, deadline: CommandDeadline.query)
             connectionStatus = .connected
         } catch {
             connectionStatus = .failed(error.localizedDescription)

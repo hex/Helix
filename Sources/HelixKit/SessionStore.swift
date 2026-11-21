@@ -1332,11 +1332,11 @@ public final class SessionStore {
     private func scanSubdirectoriesForGit(session: SyncSession) async -> GitRepoCheck {
         async let alphaOutput = try? fileTransport.run(
             on: session.alpha.endpointURL,
-            command: "find . -maxdepth 2 -name .git -type d 2>/dev/null"
+            command: "find . -maxdepth 2 -name .git -type d 2>/dev/null", deadline: CommandDeadline.query
         )
         async let betaOutput = try? fileTransport.run(
             on: session.beta.endpointURL,
-            command: "find . -maxdepth 2 -name .git -type d 2>/dev/null"
+            command: "find . -maxdepth 2 -name .git -type d 2>/dev/null", deadline: CommandDeadline.query
         )
 
         let alphaPaths = parseGitDirs(await alphaOutput ?? "")
@@ -1377,7 +1377,7 @@ public final class SessionStore {
         let target = subpath.isEmpty ? endpoint : appendingSubpath(to: endpoint, subpath: subpath)
         let url = try? await fileTransport.run(
             on: target,
-            command: "git config --get remote.origin.url"
+            command: "git config --get remote.origin.url", deadline: CommandDeadline.query
         )
         let trimmed = url?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return !trimmed.isEmpty
@@ -1399,10 +1399,10 @@ public final class SessionStore {
             : appendingSubpath(to: sourceBase, subpath: gitCheck.subpath)
 
         let remoteURL = (try? await fileTransport.run(
-            on: sourceEndpoint, command: "git config --get remote.origin.url"
+            on: sourceEndpoint, command: "git config --get remote.origin.url", deadline: CommandDeadline.query
         ))?.trimmingCharacters(in: .whitespacesAndNewlines)
         let branch = (try? await fileTransport.run(
-            on: sourceEndpoint, command: "git branch --show-current"
+            on: sourceEndpoint, command: "git branch --show-current", deadline: CommandDeadline.query
         ))?.trimmingCharacters(in: .whitespacesAndNewlines)
 
         return (
@@ -1426,8 +1426,8 @@ public final class SessionStore {
         let remoteURL: String
         let branch: String
         do {
-            remoteURL = try await fileTransport.run(on: sourceEndpoint, command: "git config --get remote.origin.url").trimmingCharacters(in: .whitespacesAndNewlines)
-            branch = try await fileTransport.run(on: sourceEndpoint, command: "git branch --show-current").trimmingCharacters(in: .whitespacesAndNewlines)
+            remoteURL = try await fileTransport.run(on: sourceEndpoint, command: "git config --get remote.origin.url", deadline: CommandDeadline.query).trimmingCharacters(in: .whitespacesAndNewlines)
+            branch = try await fileTransport.run(on: sourceEndpoint, command: "git branch --show-current", deadline: CommandDeadline.query).trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
             lastError = "Could not read git info: \(error.localizedDescription)"
             return false
@@ -1439,10 +1439,10 @@ public final class SessionStore {
         }
 
         do {
-            _ = try await fileTransport.run(on: targetEndpoint, command: "git init")
-            _ = try await fileTransport.run(on: targetEndpoint, command: "git remote add origin '\(remoteURL)'")
-            _ = try await fileTransport.run(on: targetEndpoint, command: "git fetch origin")
-            _ = try await fileTransport.run(on: targetEndpoint, command: "git reset --mixed 'origin/\(branch)'")
+            _ = try await fileTransport.run(on: targetEndpoint, command: "git init", deadline: CommandDeadline.operation)
+            _ = try await fileTransport.run(on: targetEndpoint, command: "git remote add origin '\(remoteURL)'", deadline: CommandDeadline.operation)
+            _ = try await fileTransport.run(on: targetEndpoint, command: "git fetch origin", deadline: CommandDeadline.transfer)
+            _ = try await fileTransport.run(on: targetEndpoint, command: "git reset --mixed 'origin/\(branch)'", deadline: CommandDeadline.operation)
             lastError = nil
             return true
         } catch {
