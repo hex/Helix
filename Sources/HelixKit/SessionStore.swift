@@ -89,6 +89,7 @@ public final class SessionStore {
     private let now: () -> Date
     private var daemonProcess: any DaemonProcess
     @ObservationIgnored private var bulkPauseInFlight = false
+    @ObservationIgnored private var syncEditInFlight = false
     /// The resolve requested last on each session; the next one on that session waits for it to end.
     @ObservationIgnored private var lastResolve: [String: Task<Set<String>, Never>] = [:]
     /// The daemon process whose background priority Helix last set successfully.
@@ -254,7 +255,7 @@ public final class SessionStore {
 
     public func createSync(options: SyncCreateOptions, alpha: String, beta: String) async {
         let args = options.arguments(alpha: alpha, beta: beta)
-        await performAction { try await provider.syncCreate(arguments: args) }
+        await performAction { _ = try await provider.syncCreate(arguments: args) }
     }
 
     public func createForward(options: ForwardCreateOptions, source: String, destination: String) async {
@@ -262,35 +263,115 @@ public final class SessionStore {
         await performAction { try await provider.forwardCreate(arguments: args) }
     }
 
-    // MARK: - Sync Edit (Terminate + Recreate)
+    // MARK: - Sync Edit
 
+    @discardableResult
     public func recreateSync(
         _ session: SyncSession,
         options: SyncCreateOptions,
         alpha: String,
         beta: String
-    ) async {
+    ) async -> String? {
+        guard daemonControl == .managed else {
+            let message = "Start the Mutagen daemon before editing a session."
+            lastError = message
+            return message
+        }
+        guard !syncEditInFlight else { return "Another sync edit is already in progress." }
+        syncEditInFlight = true
+        defer { syncEditInFlight = false }
+
+        let provider = self.provider
+        let listed: [SyncSession]
         do {
-            try await provider.syncTerminate(session.identifier)
+            listed = try await provider.syncList()
         } catch {
-            lastError = "Terminate failed: \(error.localizedDescription). No changes were made."
-            return
+            return await finishSyncEdit("Could not check the original session: \(error.localizedDescription).")
         }
 
-        let args = options.arguments(alpha: alpha, beta: beta)
-        let identifiersBefore = Set(syncSessions.map(\.identifier))
-        do {
-            try await provider.syncCreate(arguments: args)
-            lastError = nil
-            await refresh()
-            // Recreation mints a new identifier, so whatever the caller had selected
-            // no longer resolves. Hand the replacement back to the list.
-            if let recreated = syncSessions.first(where: { !identifiersBefore.contains($0.identifier) }) {
-                pendingSessionSelection = recreated.identifier
-            }
-        } catch {
-            lastError = "Session terminated but recreation failed: \(error.localizedDescription). Use Create Session to recreate manually."
+        let original = session.identifier
+        guard let current = listed.first(where: { $0.identifier == original }) else {
+            return await finishSyncEdit("The original session \(original) is no longer listed by Mutagen.")
         }
+        if let name = options.name, listed.contains(where: { $0.identifier != original && $0.name == name }) {
+            return await finishSyncEdit("Another sync session already uses the name \"\(name)\". The original session was kept.")
+        }
+
+        var staged = options
+        staged.paused = true
+        let replacement: String
+        do {
+            replacement = try await provider.syncCreate(arguments: staged.arguments(alpha: alpha, beta: beta))
+        } catch {
+            return await finishSyncEdit("Could not prepare the edited session: \(error.localizedDescription). The original session was kept.")
+        }
+        guard !listed.contains(where: { $0.identifier == replacement }) else {
+            return await finishSyncEdit("Mutagen returned existing session identifier \(replacement). The original session was kept.")
+        }
+
+        if !current.paused {
+            do {
+                try await provider.syncPause(original)
+            } catch {
+                let recovery = await recoverSyncEdit(original: original, replacement: replacement, activationAttempted: false, provider: provider)
+                return await finishSyncEdit("Could not pause the original session: \(error.localizedDescription). \(recovery)")
+            }
+            do {
+                try await provider.syncResume(replacement)
+            } catch {
+                let recovery = await recoverSyncEdit(original: original, replacement: replacement, activationAttempted: true, provider: provider)
+                return await finishSyncEdit("Could not start the edited session: \(error.localizedDescription). \(recovery)")
+            }
+        }
+
+        do {
+            try await provider.syncTerminate(original)
+        } catch {
+            return await finishSyncEdit(
+                "The edited session \(replacement) is ready. Could not remove original session \(original): \(error.localizedDescription).",
+                replacement: replacement
+            )
+        }
+        return await finishSyncEdit(nil, replacement: replacement)
+    }
+
+    private func recoverSyncEdit(
+        original: String,
+        replacement: String,
+        activationAttempted: Bool,
+        provider: any SessionProvider
+    ) async -> String {
+        var messages: [String] = []
+        do {
+            try await provider.syncTerminate(replacement)
+        } catch {
+            messages.append("Could not remove edited session \(replacement): \(error.localizedDescription).")
+            if activationAttempted {
+                // Mutagen may start reconnecting even when Resume returns an error.
+                do {
+                    try await provider.syncPause(replacement)
+                } catch {
+                    messages.append("Could not confirm that \(replacement) stopped: \(error.localizedDescription). Check both sessions before resuming original session \(original).")
+                    return messages.joined(separator: " ")
+                }
+            }
+        }
+
+        do {
+            try await provider.syncResume(original)
+            messages.append("The original session was restored.")
+        } catch {
+            messages.append("Original session \(original) was kept. Could not resume it: \(error.localizedDescription).")
+        }
+        return messages.joined(separator: " ")
+    }
+
+    private func finishSyncEdit(_ message: String?, replacement: String? = nil) async -> String? {
+        if await reloadSessions(), let replacement, syncSessions.contains(where: { $0.identifier == replacement }) {
+            pendingSessionSelection = replacement
+        }
+        if let message { lastError = message }
+        return lastError
     }
 
     // MARK: - Ignore List

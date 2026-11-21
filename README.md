@@ -22,7 +22,7 @@
 - **Connection errors** -- When a session cannot connect, the detail view shows mutagen's own reason under the status line
 - **Transfer progress** -- While a session stages files, the detail view shows a progress bar, files and bytes received, and the file mutagen is sending; the session list and menu bar show the same percentage as `mutagen sync list -l`
 - **Create sessions** -- Step-by-step wizard for sync sessions; streamlined form for port forwarding
-- **Edit sessions** -- Rename a session, or change its sync mode, ignore rules, symlinks, compression, and watch settings
+- **Edit sessions** -- Rename a session or change its sync mode, ignore rules, symlinks, compression, and watch settings. Helix prepares a paused replacement before removing the original. The replacement starts with fresh sync history.
 - **Unique names** -- Rejects a name another session already holds, so `mutagen sync pause <name>` always resolves to one session
 - **Labels** -- Tag sessions with key=value pairs and filter the dashboard by them
 - **Connection testing** -- Check an SSH endpoint before creating a session, then browse the remote filesystem to pick a path

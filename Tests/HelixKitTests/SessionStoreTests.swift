@@ -33,7 +33,7 @@ struct FakeProvider: SessionProvider {
     }
     func daemonRunning() async throws -> Bool { isDaemonRunning }
     func version() async throws -> String { mutagenVersion }
-    func syncCreate(arguments: [String]) async throws {}
+    func syncCreate(arguments: [String]) async throws -> String { "sync_replacement" }
     func forwardCreate(arguments: [String]) async throws {}
     func syncPause(_ identifier: String) async throws {}
     func syncResume(_ identifier: String) async throws {}
@@ -392,100 +392,85 @@ struct SessionStoreTests {
 
 @Suite("SessionStore recreateSync")
 struct RecreateSessionTests {
+    private let createEdited = "syncCreate:sync create /tmp/a /tmp/b --name test --paused --mode one-way-safe"
 
-    @Test("Terminates then creates with updated options")
+    @Test("Starts the paused replacement before removing the original")
     @MainActor
     func happyPath() async {
         let session = makeSyncSession(id: "sync_1", name: "test")
         let recorder = RecordingProvider(syncSessions: [session])
         let store = SessionStore(provider: recorder)
-        await store.refresh()
+        var options = SyncCreateOptions(from: session)
+        options.mode = "one-way-safe"
 
-        var newOptions = SyncCreateOptions()
-        newOptions.name = "test"
-        newOptions.mode = "one-way-safe"
-        await store.recreateSync(
-            session,
-            options: newOptions,
-            alpha: "/tmp/a",
-            beta: "/tmp/b"
-        )
+        await store.recreateSync(session, options: options, alpha: "/tmp/a", beta: "/tmp/b")
 
         #expect(store.lastError == nil)
-        let calls = recorder.calls
-        #expect(calls.count >= 2)
-        #expect(calls[0] == "syncTerminate:sync_1")
-        #expect(calls[1].hasPrefix("syncCreate:"))
+        #expect(recorder.calls == [createEdited, "syncPause:sync_1", "syncResume:sync_replacement", "syncTerminate:sync_1"])
     }
 
-    @Test("Terminate failure sets error and does not create")
+    @Test("Failure to remove the original leaves the edited session running")
     @MainActor
     func terminateFails() async {
         let session = makeSyncSession(id: "sync_1", name: "test")
-        let recorder = RecordingProvider(syncSessions: [session], failOn: "syncTerminate")
+        let recorder = RecordingProvider(syncSessions: [session], failOn: "syncTerminate:sync_1")
         let store = SessionStore(provider: recorder)
-        await store.refresh()
+        var options = SyncCreateOptions(from: session)
+        options.mode = "one-way-safe"
 
-        var newOptions = SyncCreateOptions()
-        newOptions.mode = "one-way-safe"
-        await store.recreateSync(
-            session,
-            options: newOptions,
-            alpha: "/tmp/a",
-            beta: "/tmp/b"
-        )
+        await store.recreateSync(session, options: options, alpha: "/tmp/a", beta: "/tmp/b")
 
-        #expect(store.lastError != nil)
-        #expect(store.lastError!.contains("No changes were made"))
-        let calls = recorder.calls
-        let createCalls = calls.filter { $0.hasPrefix("syncCreate") }
-        #expect(createCalls.isEmpty)
+        #expect(store.lastError == "The edited session sync_replacement is ready. Could not remove original session sync_1: simulated failure.")
+        #expect(recorder.calls == [createEdited, "syncPause:sync_1", "syncResume:sync_replacement", "syncTerminate:sync_1"])
     }
 
-    @Test("addToIgnoreList terminates then creates with path appended to ignores")
+    @Test("Adding an ignore rule prepares a paused replacement with both ignore paths")
     @MainActor
     func addToIgnoreList() async {
-        let session = makeSyncSession(
-            id: "sync_1",
-            name: "test",
-            ignorePaths: ["*.log"]
-        )
+        let session = makeSyncSession(id: "sync_1", name: "test", ignorePaths: ["*.log"])
         let recorder = RecordingProvider(syncSessions: [session])
         let store = SessionStore(provider: recorder)
-        await store.refresh()
 
         await store.addToIgnoreList(session: session, path: "node_modules/symlink")
 
         #expect(store.lastError == nil)
-        let calls = recorder.calls
-        #expect(calls.count >= 2)
-        #expect(calls[0] == "syncTerminate:sync_1")
-        #expect(calls[1].hasPrefix("syncCreate:"))
-        // Verify the new ignore path is present alongside the existing one
-        #expect(calls[1].contains("--ignore"))
-        #expect(calls[1].contains("*.log"))
-        #expect(calls[1].contains("node_modules/symlink"))
+        #expect(recorder.calls == [
+            "syncCreate:sync create /tmp/a /tmp/b --name test --paused --mode two-way-safe --ignore *.log --ignore node_modules/symlink",
+            "syncPause:sync_1", "syncResume:sync_replacement", "syncTerminate:sync_1",
+        ])
     }
 
-    @Test("Create failure after terminate sets descriptive error")
+    @Test("Failure to create the replacement leaves the original running")
     @MainActor
-    func createFailsAfterTerminate() async {
+    func createFailureKeepsOriginal() async {
         let session = makeSyncSession(id: "sync_1", name: "test")
         let recorder = RecordingProvider(syncSessions: [session], failOn: "syncCreate")
         let store = SessionStore(provider: recorder)
-        await store.refresh()
+        var options = SyncCreateOptions(from: session)
+        options.mode = "one-way-safe"
 
-        var newOptions = SyncCreateOptions()
-        newOptions.mode = "one-way-safe"
-        await store.recreateSync(
-            session,
-            options: newOptions,
-            alpha: "/tmp/a",
-            beta: "/tmp/b"
-        )
+        await store.recreateSync(session, options: options, alpha: "/tmp/a", beta: "/tmp/b")
 
-        #expect(store.lastError != nil)
-        #expect(store.lastError!.contains("terminated but recreation failed"))
+        #expect(store.lastError == "Could not prepare the edited session: simulated failure. The original session was kept.")
+        #expect(recorder.calls == [createEdited])
+    }
+
+    @Test("A failed replacement start removes it before resuming the original")
+    @MainActor
+    func startFailureRestoresOriginal() async {
+        let session = makeSyncSession(id: "sync_1", name: "test")
+        let recorder = RecordingProvider(syncSessions: [session], failOn: "syncResume:sync_replacement")
+        let store = SessionStore(provider: recorder)
+        var options = SyncCreateOptions(from: session)
+        options.mode = "one-way-safe"
+
+        await store.recreateSync(session, options: options, alpha: "/tmp/a", beta: "/tmp/b")
+
+        #expect(store.lastError == "Could not start the edited session: simulated failure. The original session was restored.")
+        #expect(recorder.calls == [
+            createEdited, "syncPause:sync_1", "syncResume:sync_replacement",
+            "syncTerminate:sync_replacement", "syncResume:sync_1",
+        ])
     }
 }
 
@@ -841,7 +826,7 @@ final class MainActorRecordingProvider: SessionProvider {
     func forwardList() async throws -> [ForwardSession] { [] }
     func daemonRunning() async throws -> Bool { true }
     func version() async throws -> String { "0.18.1" }
-    func syncCreate(arguments: [String]) async throws {}
+    func syncCreate(arguments: [String]) async throws -> String { "sync_replacement" }
     func forwardCreate(arguments: [String]) async throws {}
     func syncPause(_ identifier: String) async throws { calls.append("syncPause:\(identifier)") }
     func syncResume(_ identifier: String) async throws { calls.append("syncResume:\(identifier)") }
@@ -941,11 +926,12 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
     func forwardList() async throws -> [ForwardSession] { [] }
     func daemonRunning() async throws -> Bool { true }
     func version() async throws -> String { "0.18.1" }
-    func syncCreate(arguments: [String]) async throws {
+    func syncCreate(arguments: [String]) async throws -> String {
         try record("syncCreate:\(arguments.joined(separator: " "))")
-        lock.lock()
-        _created = true
-        lock.unlock()
+        lock.withLock { _created = true }
+        return sessionsAfterCreate?.first(where: { candidate in
+            !syncSessions.contains(where: { $0.identifier == candidate.identifier })
+        })?.identifier ?? "sync_replacement"
     }
     func forwardCreate(arguments: [String]) async throws {}
     func syncPause(_ identifier: String) async throws {
@@ -979,7 +965,7 @@ struct FailingProvider: SessionProvider {
     }
     func daemonRunning() async throws -> Bool { false }
     func version() async throws -> String { throw CLIError(exitCode: 1, stderr: "not found") }
-    func syncCreate(arguments: [String]) async throws { throw CLIError(exitCode: 1, stderr: "failed") }
+    func syncCreate(arguments: [String]) async throws -> String { throw CLIError(exitCode: 1, stderr: "failed") }
     func forwardCreate(arguments: [String]) async throws { throw CLIError(exitCode: 1, stderr: "failed") }
     func syncPause(_ identifier: String) async throws { throw CLIError(exitCode: 1, stderr: "failed") }
     func syncResume(_ identifier: String) async throws { throw CLIError(exitCode: 1, stderr: "failed") }

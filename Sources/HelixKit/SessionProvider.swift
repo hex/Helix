@@ -11,7 +11,7 @@ public protocol SessionProvider: Sendable {
     func version() async throws -> String
 
     // Session creation
-    func syncCreate(arguments: [String]) async throws
+    func syncCreate(arguments: [String]) async throws -> String
     func forwardCreate(arguments: [String]) async throws
 
     // Sync actions

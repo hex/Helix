@@ -1,5 +1,5 @@
-// ABOUTME: Sheet for editing a sync session's configuration via terminate + recreate.
-// ABOUTME: Pre-fills from the current session, shows warning about the destructive operation.
+// ABOUTME: Sheet for editing a sync session's configuration through a replacement session.
+// ABOUTME: Pre-fills from the current session and shows the result of applying an edit.
 
 import SwiftUI
 import HelixKit
@@ -19,6 +19,7 @@ struct EditSyncConfigView: View {
     @State private var watchMode: String
     @State private var stageMode: String
     @State private var isApplying = false
+    @State private var editError: String?
     @State private var labelsExpanded = true
 
     init(session: SyncSession, store: SessionStore) {
@@ -90,6 +91,15 @@ struct EditSyncConfigView: View {
             }
 
             Divider()
+            if let editError {
+                Text(editError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+            }
             actionButtons
         }
         .frame(width: 560, height: 560)
@@ -181,7 +191,7 @@ struct EditSyncConfigView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Session will be recreated")
                     .fontWeight(.medium)
-                Text("Mutagen does not support editing sessions in place. Applying changes will terminate the current session and create a new one. Sync history and cycle count will be reset.")
+                Text("Helix prepares a replacement before removing the original. The replacement starts with fresh sync history and cycle counts.")
                     .foregroundStyle(.secondary)
             }
         }
@@ -199,16 +209,9 @@ struct EditSyncConfigView: View {
                 dismiss()
             }
             .keyboardShortcut(.cancelAction)
+            .disabled(isApplying)
 
             Spacer()
-
-            if let error = store.lastError {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .lineLimit(2)
-                    .frame(maxWidth: 300, alignment: .trailing)
-            }
 
             Button("Apply Changes") {
                 Task { await applyChanges() }
@@ -265,14 +268,15 @@ struct EditSyncConfigView: View {
 
     private func applyChanges() async {
         isApplying = true
-        await store.recreateSync(
+        editError = nil
+        editError = await store.recreateSync(
             session,
             options: options,
             alpha: session.alpha.endpointURL.formatted,
             beta: session.beta.endpointURL.formatted
         )
         isApplying = false
-        if store.lastError == nil {
+        if editError == nil {
             dismiss()
         }
     }
