@@ -1,5 +1,5 @@
-// ABOUTME: Color-coded status indicator dot for session health display.
-// ABOUTME: Maps mutagen status strings to semantic colors through SyncPhase.
+// ABOUTME: Status indicator for session health display: one symbol and color per sync phase.
+// ABOUTME: Maps mutagen status strings to symbols and semantic colors through SyncPhase.
 
 import SwiftUI
 import HelixKit
@@ -14,10 +14,29 @@ struct StatusBadge: View {
     }
 
     var body: some View {
-        Image(systemName: paused ? "pause.fill" : "circle.fill")
-            .font(.system(size: 8))
+        Image(systemName: symbol)
+            .font(.system(size: 11))
             .foregroundStyle(color)
             .accessibilityLabel(label)
+    }
+
+    var symbol: String {
+        if paused { return "pause.circle.fill" }
+
+        switch SyncPhase(mutagenStatus: status) {
+        case .watching:
+            return "checkmark.circle.fill"
+        case .working:
+            return "arrow.triangle.2.circlepath"
+        case .halted:
+            return "exclamationmark.octagon.fill"
+        case .connecting:
+            return "ellipsis.circle.fill"
+        case .disconnected:
+            return "xmark.circle.fill"
+        case .unrecognized:
+            return "questionmark.circle.fill"
+        }
     }
 
     var color: Color {
