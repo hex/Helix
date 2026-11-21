@@ -239,7 +239,7 @@ public struct FileTransport: Sendable {
                 args += ["-p", "\(port)"]
             }
             // GNU stat uses -c, macOS stat uses -f with different format specifiers
-            args += [sshTarget(user: user, host: host), "stat -c '%s %Y' \(path) 2>/dev/null || stat -f '%z %m' \(path)"]
+            args += [sshTarget(user: user, host: host), "stat -c '%s %Y' \(Self.shellWord(path)) 2>/dev/null || stat -f '%z %m' \(Self.shellWord(path))"]
             output = try await execute("/usr/bin/ssh", args)
         case .docker(let container, let path):
             output = try await execute("/usr/bin/docker", ["exec", container, "stat", "-c", "%s %Y", path])
@@ -258,7 +258,7 @@ public struct FileTransport: Sendable {
             if let port {
                 args += ["-p", "\(port)"]
             }
-            args += [sshTarget(user: user, host: host), "cat \(shellQuoted(path))"]
+            args += [sshTarget(user: user, host: host), "cat \(Self.shellWord(path))"]
             return try await execute("/usr/bin/ssh", args)
         case .docker(let container, let path):
             return try await execute("/usr/bin/docker", ["exec", container, "cat", path])
@@ -276,7 +276,7 @@ public struct FileTransport: Sendable {
             if let port {
                 args += ["-p", "\(port)"]
             }
-            args += [sshTarget(user: user, host: host), "rm -rf \(shellQuoted(path))"]
+            args += [sshTarget(user: user, host: host), "rm -rf \(Self.shellWord(path))"]
             _ = try await execute("/usr/bin/ssh", args)
         case .docker(let container, let path):
             _ = try await execute("/usr/bin/docker", ["exec", container, "rm", "-rf", path])
@@ -295,7 +295,7 @@ public struct FileTransport: Sendable {
             case .ssh(let user, let host, let port, let path):
                 var args: [String] = []
                 if let port { args += ["-p", "\(port)"] }
-                args += [sshTarget(user: user, host: host), "test -d \(shellQuoted(path))"]
+                args += [sshTarget(user: user, host: host), "test -d \(Self.shellWord(path))"]
                 _ = try await execute("/usr/bin/ssh", args, exitOneAnswer: Self.noSuchDirectory)
             case .docker(let container, let path):
                 _ = try await execute("/usr/bin/docker", ["exec", container, "test", "-d", path], exitOneAnswer: Self.noSuchDirectory)
@@ -316,7 +316,7 @@ public struct FileTransport: Sendable {
             case .ssh(let user, let host, let port, let path):
                 var args: [String] = []
                 if let port { args += ["-p", "\(port)"] }
-                args += [sshTarget(user: user, host: host), "test -L \(shellQuoted(path))"]
+                args += [sshTarget(user: user, host: host), "test -L \(Self.shellWord(path))"]
                 _ = try await execute("/usr/bin/ssh", args)
             case .docker(let container, let path):
                 _ = try await execute("/usr/bin/docker", ["exec", container, "test", "-L", path])
@@ -335,7 +335,7 @@ public struct FileTransport: Sendable {
         case .ssh(let user, let host, let port, let path):
             var args: [String] = []
             if let port { args += ["-p", "\(port)"] }
-            args += [sshTarget(user: user, host: host), "readlink \(shellQuoted(path))"]
+            args += [sshTarget(user: user, host: host), "readlink \(Self.shellWord(path))"]
             output = try await execute("/usr/bin/ssh", args)
         case .docker(let container, let path):
             output = try await execute("/usr/bin/docker", ["exec", container, "readlink", path])
@@ -353,7 +353,7 @@ public struct FileTransport: Sendable {
             case .ssh(let user, let host, let port, let path):
                 var args: [String] = []
                 if let port { args += ["-p", "\(port)"] }
-                args += [sshTarget(user: user, host: host), "test -e \(shellQuoted(path))"]
+                args += [sshTarget(user: user, host: host), "test -e \(Self.shellWord(path))"]
                 _ = try await execute("/usr/bin/ssh", args)
             case .docker(let container, let path):
                 _ = try await execute("/usr/bin/docker", ["exec", container, "test", "-e", path])
@@ -373,7 +373,7 @@ public struct FileTransport: Sendable {
         case .ssh(let user, let host, let port, let path):
             var args: [String] = []
             if let port { args += ["-p", "\(port)"] }
-            args += [sshTarget(user: user, host: host), "cd \(shellQuoted(path)) && \(command)"]
+            args += [sshTarget(user: user, host: host), "cd \(Self.shellWord(path)) && \(command)"]
             return try await execute("/usr/bin/ssh", args)
         case .docker(let container, let path):
             return try await execute("/usr/bin/docker", ["exec", container, "sh", "-c", "cd '\(path)' && \(command)"])
@@ -407,19 +407,6 @@ public struct FileTransport: Sendable {
         }
         args += [from, to]
         return args
-    }
-
-    /// Quotes a path for remote shell execution, handling tilde expansion.
-    /// `~/foo` becomes `"$HOME/foo"` (double quotes allow $HOME expansion).
-    /// Other paths use single quotes to protect special characters.
-    private func shellQuoted(_ path: String) -> String {
-        if path.hasPrefix("~/") {
-            return "\"$HOME/\(path.dropFirst(2))\""
-        }
-        if path == "~" {
-            return "\"$HOME\""
-        }
-        return "'\(path)'"
     }
 
     /// Makes a path exactly one inert word for a POSIX shell on a remote host.

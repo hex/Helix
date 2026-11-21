@@ -218,7 +218,7 @@ struct FileTransportStatTests {
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/ssh")
         // Uses cross-platform stat: tries GNU stat first, falls back to macOS stat
-        #expect(cmd.arguments == ["deploy@server", "stat -c '%s %Y' /opt/file.txt 2>/dev/null || stat -f '%z %m' /opt/file.txt"])
+        #expect(cmd.arguments == ["deploy@server", "stat -c '%s %Y' '/opt/file.txt' 2>/dev/null || stat -f '%z %m' '/opt/file.txt'"])
     }
 
     @Test("stat parses docker exec output")
@@ -247,7 +247,7 @@ struct FileTransportStatTests {
 
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/ssh")
-        #expect(cmd.arguments == ["-p", "2222", "box", "stat -c '%s %Y' /file.txt 2>/dev/null || stat -f '%z %m' /file.txt"])
+        #expect(cmd.arguments == ["-p", "2222", "box", "stat -c '%s %Y' '/file.txt' 2>/dev/null || stat -f '%z %m' '/file.txt'"])
     }
 
     @Test("stat throws on malformed output")
@@ -336,7 +336,7 @@ struct FileTransportTildeTests {
         )
 
         let cmd = recorder.commands[0]
-        #expect(cmd.arguments == ["hex@server", "rm -rf \"$HOME/.claude-sessions/teamcity/logs\""])
+        #expect(cmd.arguments == ["hex@server", "rm -rf \"$HOME\"/'.claude-sessions/teamcity/logs'"])
     }
 
     @Test("directoryExists ssh with tilde uses $HOME")
@@ -349,7 +349,7 @@ struct FileTransportTildeTests {
         )
 
         let cmd = recorder.commands[0]
-        #expect(cmd.arguments == ["hex@server", "test -d \"$HOME/.claude-sessions/.git\""])
+        #expect(cmd.arguments == ["hex@server", "test -d \"$HOME\"/'.claude-sessions/.git'"])
     }
 
     @Test("run ssh with tilde uses $HOME in cd")
@@ -363,7 +363,7 @@ struct FileTransportTildeTests {
         )
 
         let cmd = recorder.commands[0]
-        #expect(cmd.arguments == ["hex@server", "cd \"$HOME/.claude-sessions\" && git init"])
+        #expect(cmd.arguments == ["hex@server", "cd \"$HOME\"/'.claude-sessions' && git init"])
     }
 
     @Test("absolute paths still use single quotes")
@@ -747,7 +747,7 @@ struct FileTransportReadLinkTests {
         )
 
         let cmd = recorder.commands[0]
-        #expect(cmd.arguments == ["hex@server", "readlink \"$HOME/project/link\""])
+        #expect(cmd.arguments == ["hex@server", "readlink \"$HOME\"/'project/link'"])
     }
 }
 
@@ -901,7 +901,7 @@ struct FileTransportReadFileTests {
         )
 
         let cmd = recorder.commands[0]
-        #expect(cmd.arguments == ["hex@server", "cat \"$HOME/project/file.txt\""])
+        #expect(cmd.arguments == ["hex@server", "cat \"$HOME\"/'project/file.txt'"])
     }
 }
 
