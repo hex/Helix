@@ -14,7 +14,7 @@ struct StatusBadge: View {
     }
 
     var body: some View {
-        Image(systemName: "circle.fill")
+        Image(systemName: paused ? "pause.fill" : "circle.fill")
             .font(.system(size: 8))
             .foregroundStyle(color)
             .accessibilityLabel(label)
