@@ -83,6 +83,17 @@ struct SettingsView: View {
                     set: { enabled in Task { await store.setDaemonBackgroundPriority(enabled) } }
                 ))
 
+                if let error = store.daemonPriorityError {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                    if store.daemonBackgroundPriorityRequested {
+                        Button("Cancel Background Priority Request") {
+                            Task { await store.setDaemonBackgroundPriority(false) }
+                        }
+                    }
+                }
+
                 Text("Mutagen yields CPU and disk to whatever you are doing. Transfers slow down while the Mac is busy.")
                     .font(.caption)
                     .foregroundStyle(.secondary)

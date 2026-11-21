@@ -663,7 +663,7 @@ struct DaemonPriorityTests {
         defaults.removePersistentDomain(forName: suiteName)
     }
 
-    @Test("With no daemon running, turning background priority on applies nothing and reports no error")
+    @Test("Background priority stays off when the daemon is missing")
     @MainActor
     func noDaemonRunning() async {
         defer { removeDefaults() }
@@ -674,7 +674,28 @@ struct DaemonPriorityTests {
 
         #expect(daemon.calls == [])
         #expect(store.lastError == nil)
-        #expect(store.daemonBackgroundPriority == true)
+        #expect(store.daemonBackgroundPriority == false)
+        #expect(store.daemonPriorityError == "Mutagen daemon not found.")
+    }
+
+    @Test("Background priority stays off when changing priority fails")
+    @MainActor
+    func priorityChangeFails() async {
+        defer { removeDefaults() }
+        let daemon = RecordingDaemonProcess(
+            pid: 3114, priorityError: CLIError(exitCode: 1, stderr: "Operation not permitted")
+        )
+        let store = SessionStore(provider: FakeProvider(), defaults: defaults, daemonProcess: daemon)
+
+        let message = "Could not lower the priority of the Mutagen daemon (PID 3114): Operation not permitted"
+        await store.setDaemonBackgroundPriority(true)
+
+        #expect(store.daemonBackgroundPriority == false)
+        #expect(store.daemonPriorityError == message)
+        await store.refresh()
+        #expect(store.daemonBackgroundPriority == false)
+        #expect(store.daemonPriorityError == message)
+        #expect(store.lastError == nil)
     }
 
     @Test("Turning background priority on lowers the daemon's priority and turning it off restores it")
@@ -2133,9 +2154,11 @@ final class RecordingDaemonProcess: DaemonProcess, @unchecked Sendable {
     private var _pid: ProcessID?
     private var _calls: [String] = []
     private let lock = NSLock()
+    private let priorityError: CLIError?
 
-    init(pid: Int32?) {
+    init(pid: Int32?, priorityError: CLIError? = nil) {
         _pid = pid.map { ProcessID($0)! }
+        self.priorityError = priorityError
     }
 
     var calls: [String] {
@@ -2157,9 +2180,10 @@ final class RecordingDaemonProcess: DaemonProcess, @unchecked Sendable {
     }
 
     func setBackgroundPriority(_ enabled: Bool, pid: ProcessID) async throws {
-        lock.lock()
-        _calls.append("\(enabled ? "background" : "restore"):\(pid.rawValue)")
-        lock.unlock()
+        if let priorityError { throw priorityError }
+        lock.withLock {
+            _calls.append("\(enabled ? "background" : "restore"):\(pid.rawValue)")
+        }
     }
 }
 

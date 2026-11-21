@@ -67,8 +67,12 @@ public final class SessionStore {
     public private(set) var leftoverNotices: [String: String] = [:] {
         didSet { persist(leftoverNotices, forKey: Self.leftoverNoticesKey) }
     }
-    /// Whether the mutagen daemon runs at background priority, yielding CPU and disk to other work.
-    public private(set) var daemonBackgroundPriority: Bool
+    /// Whether background priority is confirmed for the running daemon.
+    public var daemonBackgroundPriority: Bool {
+        backgroundPriorityPID != nil && daemonPriorityError == nil
+    }
+    public private(set) var daemonBackgroundPriorityRequested: Bool
+    public private(set) var daemonPriorityError: String?
 
     private var provider: any SessionProvider
     private var pollingTask: Task<Void, Never>?
@@ -79,8 +83,9 @@ public final class SessionStore {
     @ObservationIgnored private var bulkPauseInFlight = false
     /// The resolve requested last on each session; the next one on that session waits for it to end.
     @ObservationIgnored private var lastResolve: [String: Task<Set<String>, Never>] = [:]
-    /// The daemon process background priority was last applied to; nil while it is not applied.
-    @ObservationIgnored private var backgroundPriorityPID: ProcessID?
+    /// The daemon process whose background priority Helix last set successfully.
+    private var backgroundPriorityPID: ProcessID?
+    @ObservationIgnored private var daemonPriorityInFlight = false
     private static let bulkPauseKey = "bulkPause"
     private static let sessionHoldsKey = "sessionHolds"
     private static let leftoverNoticesKey = "leftoverNotices"
@@ -98,7 +103,7 @@ public final class SessionStore {
         self.defaults = defaults
         self.now = now
         self.daemonProcess = daemonProcess
-        daemonBackgroundPriority = defaults.bool(forKey: Self.daemonBackgroundPriorityKey)
+        daemonBackgroundPriorityRequested = defaults.bool(forKey: Self.daemonBackgroundPriorityKey)
         if let data = defaults.data(forKey: Self.bulkPauseKey) {
             do {
                 bulkPause = try JSONDecoder().decode(BulkPause.self, from: data)
@@ -183,8 +188,7 @@ public final class SessionStore {
     }
 
     public func refresh() async {
-        guard await reloadSessions() else { return }
-        if let resumeAt = bulkPause?.resumeAt, now() >= resumeAt {
+        if await reloadSessions(), let resumeAt = bulkPause?.resumeAt, now() >= resumeAt {
             await resumeBulkPause()
         }
         await reapplyDaemonBackgroundPriority()
@@ -458,6 +462,8 @@ public final class SessionStore {
             daemonRunning = false
             syncSessions = []
             forwardSessions = []
+            backgroundPriorityPID = nil
+            setDaemonPriorityError(daemonBackgroundPriorityRequested ? "Mutagen daemon not found." : nil)
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -486,47 +492,56 @@ public final class SessionStore {
 
     // MARK: - Daemon Priority
 
-    /// Saves the setting and applies it to the running daemon now.
+    /// Saves the setting and applies it to the running daemon when possible.
     public func setDaemonBackgroundPriority(_ enabled: Bool) async {
-        daemonBackgroundPriority = enabled
+        daemonBackgroundPriorityRequested = enabled
         defaults.set(enabled, forKey: Self.daemonBackgroundPriorityKey)
-        guard let pid = await runningDaemonPID() else { return }
-        // Two quick flips overlap across the pid lookup; apply the setting as it stands now.
-        await applyDaemonPriority(background: daemonBackgroundPriority, to: pid)
+        await reapplyDaemonBackgroundPriority()
     }
 
-    /// The priority belongs to the process, so a restarted daemon starts at normal priority
-    /// under a new pid; this applies background priority to it again.
+    /// Applies the requested priority to the current daemon and retries after a restart or failure.
     private func reapplyDaemonBackgroundPriority() async {
-        guard daemonBackgroundPriority else { return }
-        guard let pid = await runningDaemonPID(),
-              daemonBackgroundPriority,
-              pid != backgroundPriorityPID else { return }
-        await applyDaemonPriority(background: true, to: pid)
-    }
+        guard !daemonPriorityInFlight else { return }
+        guard daemonBackgroundPriorityRequested || backgroundPriorityPID != nil else {
+            setDaemonPriorityError(nil)
+            return
+        }
+        daemonPriorityInFlight = true
+        defer { daemonPriorityInFlight = false }
 
-    private func applyDaemonPriority(background: Bool, to pid: ProcessID) async {
+        let process = daemonProcess
+        let pid: ProcessID?
         do {
-            try await daemonProcess.setBackgroundPriority(background, pid: pid)
-            backgroundPriorityPID = background ? pid : nil
+            pid = try await process.pid()
         } catch {
-            let action = background ? "lower" : "restore"
-            lastError = "Could not \(action) the priority of the mutagen daemon (pid \(pid)): \(error.localizedDescription)"
+            setDaemonPriorityError("Could not find the Mutagen daemon: \(error.localizedDescription)")
+            return
+        }
+
+        let requested = daemonBackgroundPriorityRequested
+        if backgroundPriorityPID != pid { backgroundPriorityPID = nil }
+        guard let pid else {
+            setDaemonPriorityError(requested ? "Mutagen daemon not found." : nil)
+            return
+        }
+        if requested {
+            if backgroundPriorityPID == pid, daemonPriorityError == nil { return }
+        } else if backgroundPriorityPID == nil {
+            setDaemonPriorityError(nil)
+            return
+        }
+        do {
+            try await process.setBackgroundPriority(requested, pid: pid)
+            backgroundPriorityPID = requested ? pid : nil
+            setDaemonPriorityError(nil)
+        } catch {
+            let action = requested ? "lower" : "restore"
+            setDaemonPriorityError("Could not \(action) the priority of the Mutagen daemon (PID \(pid)): \(error.localizedDescription)")
         }
     }
 
-    /// The running daemon's pid; nil when no daemon runs or the lookup failed, which lastError reports.
-    private func runningDaemonPID() async -> ProcessID? {
-        do {
-            guard let pid = try await daemonProcess.pid() else {
-                backgroundPriorityPID = nil
-                return nil
-            }
-            return pid
-        } catch {
-            lastError = "Could not find the mutagen daemon: \(error.localizedDescription)"
-            return nil
-        }
+    private func setDaemonPriorityError(_ message: String?) {
+        if daemonPriorityError != message { daemonPriorityError = message }
     }
 
     public func fetchVersion() async {

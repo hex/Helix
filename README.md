@@ -37,7 +37,7 @@
 - **Auto-update** -- Built-in Sparkle integration checks for updates from the menu bar
 - **Launch at login** -- Optional login item via SMAppService
 - **Configurable polling** -- Adjust refresh interval from 2 to 30 seconds
-- **Background priority** -- Settings switch that runs the mutagen daemon at background priority, so sync yields CPU and disk to whatever you're doing; transfers slow down while the Mac is busy, and Helix reapplies it after a daemon restart
+- **Background priority** -- Mutagen yields CPU and disk while the Mac is busy, which can slow transfers. Settings shows whether the priority applied and why it failed. Helix retries a saved request after a daemon restart.
 - **Text size** -- Adjustable text size (System Default, Small, Medium, Large, Extra Large) in Settings
 
 ## Install
