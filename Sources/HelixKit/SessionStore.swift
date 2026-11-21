@@ -100,10 +100,13 @@ public final class SessionStore {
     private let provider: ManagedSessionProvider
     private var pollingTask: Task<Void, Never>?
     @ObservationIgnored private var pollingInterval: TimeInterval?
-    @ObservationIgnored private var stoppedDaemonCheckInFlight = false
+    @ObservationIgnored private var stoppedDaemonCheck: UUID?
     private var daemonControl: ManagedSessionProvider.Control {
         get { provider.control }
-        set { provider.control = newValue }
+        set {
+            if provider.control != newValue { stoppedDaemonCheck = nil }
+            provider.control = newValue
+        }
     }
     @ObservationIgnored private var activeSessionLists: [UUID: Task<SessionLists, Error>] = [:]
     private let fileTransport: FileTransport
@@ -230,6 +233,7 @@ public final class SessionStore {
     }
 
     public func replaceDaemonProcess(_ daemonProcess: any DaemonProcess) {
+        stoppedDaemonCheck = nil
         self.daemonProcess = daemonProcess
     }
 
@@ -387,17 +391,21 @@ public final class SessionStore {
     }
 
     private func checkStoppedDaemonStatus() async {
-        guard !stoppedDaemonCheckInFlight else { return }
-        stoppedDaemonCheckInFlight = true
-        defer { stoppedDaemonCheckInFlight = false }
+        guard stoppedDaemonCheck == nil else { return }
+        let check = UUID()
+        stoppedDaemonCheck = check
+        defer {
+            if stoppedDaemonCheck == check { stoppedDaemonCheck = nil }
+        }
         do {
             let running = try await daemonProcess.pid() != nil
-            guard daemonControl == .stopped else { return }
-            daemonStatus = running ? .startedOutside : .stopped
+            guard stoppedDaemonCheck == check else { return }
+            let observed: DaemonStatus = running ? .startedOutside : .stopped
+            if daemonStatus != observed { daemonStatus = observed }
         } catch is CancellationError {
             return
         } catch {
-            guard daemonControl == .stopped else { return }
+            guard stoppedDaemonCheck == check else { return }
             ConsoleLog.shared.log("Could not check the Mutagen process: \(error.localizedDescription)", level: .error)
         }
     }
