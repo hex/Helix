@@ -413,18 +413,46 @@ struct FileTransportReplaceTests {
         let recorder = CommandRecorder()
         let transport = FileTransport(execute: recorder.execute)
 
-        try await transport.replace(destination, withCopyOf: source)
+        let outcome = try await transport.replace(destination, withCopyOf: source)
 
+        #expect(outcome == .replaced)
         let token = try token(in: recorder.commands)
         let incoming = "/opt/app/file.txt.helix-incoming-\(token)"
         let setAside = "/opt/app/file.txt.helix-replaced-\(token)"
-        #expect(recorder.commands.map(\.executable) == ["/usr/bin/scp", "/usr/bin/ssh", "/usr/bin/ssh", "/usr/bin/ssh", "/usr/bin/ssh"])
+        #expect(recorder.commands.map(\.executable) == ["/usr/bin/scp", "/usr/bin/ssh", "/usr/bin/ssh", "/usr/bin/ssh", "/usr/bin/ssh", "/usr/bin/ssh"])
         #expect(recorder.commands.map(\.arguments) == [
             ["-r", "/tmp/a/file.txt", "deploy@server:\(incoming)"],
             ["deploy@server", "test -e '/opt/app/file.txt'"],
+            ["deploy@server", "test -d '/opt/app/file.txt'"],
             ["deploy@server", "mv '/opt/app/file.txt' '\(setAside)'"],
             ["deploy@server", "mv '\(incoming)' '/opt/app/file.txt'"],
             ["deploy@server", "rm -rf '\(setAside)'"],
+        ])
+    }
+
+    @Test("a file replacing a file takes its name in one rename, with nothing set aside")
+    func fileOverFileRenamesOnce() async throws {
+        let recorder = CommandRecorder()
+        let transport = FileTransport { executable, arguments in
+            let output = try await recorder.execute(executable, arguments)
+            // Neither the destination nor the copy beside it is a directory.
+            if arguments.last?.hasPrefix("test -d ") == true {
+                throw CLIError(exitCode: 1, stderr: "")
+            }
+            return output
+        }
+
+        let outcome = try await transport.replace(destination, withCopyOf: source)
+
+        #expect(outcome == .replaced)
+        let token = try token(in: recorder.commands)
+        let incoming = "/opt/app/file.txt.helix-incoming-\(token)"
+        #expect(recorder.commands.map(\.arguments) == [
+            ["-r", "/tmp/a/file.txt", "deploy@server:\(incoming)"],
+            ["deploy@server", "test -e '/opt/app/file.txt'"],
+            ["deploy@server", "test -d '/opt/app/file.txt'"],
+            ["deploy@server", "test -d '\(incoming)'"],
+            ["deploy@server", "mv '\(incoming)' '/opt/app/file.txt'"],
         ])
     }
 
@@ -440,7 +468,7 @@ struct FileTransportReplaceTests {
         }
 
         let error = try await #require(throws: (any Error).self) {
-            try await transport.replace(destination, withCopyOf: source)
+            _ = try await transport.replace(destination, withCopyOf: source)
         }
 
         let token = try token(in: recorder.commands)
@@ -456,28 +484,37 @@ struct FileTransportReplaceTests {
     func failedMoveIntoPlaceRestoresOriginal() async throws {
         let recorder = CommandRecorder()
         let transport = FileTransport { executable, arguments in
+            let movedAside = recorder.commands.contains { $0.arguments.last?.hasPrefix("mv '/opt/app/file.txt' ") == true }
             let output = try await recorder.execute(executable, arguments)
             if arguments.last?.hasPrefix("mv '/opt/app/file.txt.helix-incoming-") == true {
                 throw CLIError(exitCode: 1, stderr: "permission denied")
+            }
+            // Once the original is set aside, nothing holds the destination's name.
+            if movedAside, arguments.last == "test -e '/opt/app/file.txt'" || arguments.last == "test -L '/opt/app/file.txt'" {
+                throw CLIError(exitCode: 1, stderr: "")
             }
             return output
         }
 
         let error = try await #require(throws: (any Error).self) {
-            try await transport.replace(destination, withCopyOf: source)
+            _ = try await transport.replace(destination, withCopyOf: source)
         }
 
         let token = try token(in: recorder.commands)
         let incoming = "/opt/app/file.txt.helix-incoming-\(token)"
         let setAside = "/opt/app/file.txt.helix-replaced-\(token)"
-        #expect(error.localizedDescription == "Could not move deploy@server:\(incoming) into place at deploy@server:/opt/app/file.txt: permission denied")
+        #expect(error.localizedDescription == "Could not move deploy@server:\(incoming) into place at deploy@server:/opt/app/file.txt: permission denied. deploy@server:/opt/app/file.txt is unchanged, and the unused copy is still at deploy@server:\(incoming)")
         #expect(recorder.commands.map(\.arguments) == [
             ["-r", "/tmp/a/file.txt", "deploy@server:\(incoming)"],
             ["deploy@server", "test -e '/opt/app/file.txt'"],
+            ["deploy@server", "test -d '/opt/app/file.txt'"],
             ["deploy@server", "mv '/opt/app/file.txt' '\(setAside)'"],
             ["deploy@server", "mv '\(incoming)' '/opt/app/file.txt'"],
+            ["deploy@server", "test -e '/opt/app/file.txt'"],
+            ["deploy@server", "test -L '/opt/app/file.txt'"],
+            ["deploy@server", "test -e '\(incoming)'"],
+            ["deploy@server", "test -e '\(setAside)'"],
             ["deploy@server", "mv '\(setAside)' '/opt/app/file.txt'"],
-            ["deploy@server", "rm -rf '\(incoming)'"],
         ])
     }
 }

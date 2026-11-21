@@ -793,13 +793,14 @@ struct ConflictResolutionTests {
 
         #expect(store.lastError == nil)
         // Should check winner exists, then replace loser with a copy of winner
-        #expect(copyRecorder.commands.count == 6)
+        #expect(copyRecorder.commands.count == 7)
         let token = try replaceToken(copiedBeside: "/tmp/b/file.txt", in: copyRecorder.commands)
-        #expect(copyRecorder.commands.map(\.executable) == ["/bin/test", "/bin/cp", "/bin/test", "/bin/mv", "/bin/mv", "/bin/rm"])
+        #expect(copyRecorder.commands.map(\.executable) == ["/bin/test", "/bin/cp", "/bin/test", "/bin/test", "/bin/mv", "/bin/mv", "/bin/rm"])
         #expect(copyRecorder.commands.map(\.arguments) == [
             ["-e", "/tmp/a/file.txt"],
             ["-Rp", "/tmp/a/file.txt", "/tmp/b/file.txt.helix-incoming-\(token)"],
             ["-e", "/tmp/b/file.txt"],
+            ["-d", "/tmp/b/file.txt"],
             ["/tmp/b/file.txt", "/tmp/b/file.txt.helix-replaced-\(token)"],
             ["/tmp/b/file.txt.helix-incoming-\(token)", "/tmp/b/file.txt"],
             ["-rf", "/tmp/b/file.txt.helix-replaced-\(token)"],
@@ -824,13 +825,14 @@ struct ConflictResolutionTests {
         await store.resolveConflict(session: session, conflict: conflict, winner: .beta)
 
         #expect(store.lastError == nil)
-        #expect(copyRecorder.commands.count == 6)
+        #expect(copyRecorder.commands.count == 7)
         let token = try replaceToken(copiedBeside: "/tmp/a/data.json", in: copyRecorder.commands)
         // Beta (/tmp/b) -> Alpha (/tmp/a)
         #expect(copyRecorder.commands.map(\.arguments) == [
             ["-e", "/tmp/b/data.json"],
             ["-Rp", "/tmp/b/data.json", "/tmp/a/data.json.helix-incoming-\(token)"],
             ["-e", "/tmp/a/data.json"],
+            ["-d", "/tmp/a/data.json"],
             ["/tmp/a/data.json", "/tmp/a/data.json.helix-replaced-\(token)"],
             ["/tmp/a/data.json.helix-incoming-\(token)", "/tmp/a/data.json"],
             ["-rf", "/tmp/a/data.json.helix-replaced-\(token)"],
@@ -854,8 +856,8 @@ struct ConflictResolutionTests {
 
         // No additional syncList call — polling handles the refresh
         #expect(refreshCountAfter == refreshCountBefore)
-        // Transport operations still attempted (check + the five commands of a replace)
-        #expect(copyRecorder.commands.count == 6)
+        // Transport operations still attempted (check + the six commands of a replace)
+        #expect(copyRecorder.commands.count == 7)
         // Flush still called
         let flushCalls = recorder.calls.filter { $0.hasPrefix("syncFlush") }
         #expect(flushCalls.count == 1)
@@ -1000,8 +1002,8 @@ struct ConflictResolutionTests {
         await store.resolveConflicts(session: session, conflicts: [c1, c2], winner: .alpha)
 
         #expect(store.lastError == nil)
-        // Per conflict: test -e winner, then cp to incoming, test -e loser, mv aside, mv into place, rm set-aside (12 commands)
-        #expect(cmdRecorder.commands.count == 12)
+        // Per conflict: test -e winner, then cp to incoming, test -e loser, test -d loser, mv aside, mv into place, rm set-aside (14 commands)
+        #expect(cmdRecorder.commands.count == 14)
         // Verify both files were resolved
         let rmCommands = cmdRecorder.commands.filter { $0.executable == "/bin/rm" }
         #expect(rmCommands.count == 2)

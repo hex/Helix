@@ -16,6 +16,7 @@ public struct ReplaceError: LocalizedError {
         case moveCopyIntoPlace
         case removeCopy
         case restoreOriginal
+        case inspectDisk
     }
 
     public struct StepFailure: Sendable {
@@ -23,10 +24,19 @@ public struct ReplaceError: LocalizedError {
         public let cause: any Error
     }
 
+    /// What a failed replacement left at the destination.
+    public enum Aftermath: Sendable, Equatable {
+        /// The destination holds what it held before the replacement started.
+        case destinationUnchanged
+        /// The destination could not be shown to hold either the original or the replacement.
+        case destinationUnverified
+    }
+
     public let source: String
     public let destination: String
     public let incoming: String
     public let setAside: String
+    public let aftermath: Aftermath
     public let failure: StepFailure
     public let recoveryFailures: [StepFailure]
 
@@ -36,7 +46,19 @@ public struct ReplaceError: LocalizedError {
             let text = sentence(for: recoveryFailure)
             return "Then " + text.prefix(1).lowercased() + text.dropFirst()
         }
-        return ([first] + recoveries).joined(separator: ". ")
+        return ([first] + recoveries + [aftermathSentence].compactMap { $0 }).joined(separator: ". ")
+    }
+
+    /// What the user finds on disk, for a failure that came after the copy was made and kept.
+    private var aftermathSentence: String? {
+        switch (aftermath, failure.step) {
+        case (.destinationUnverified, _):
+            return "Nothing was deleted: look for the original at \(setAside) and for the replacement at \(incoming)"
+        case (.destinationUnchanged, .setOriginalAside), (.destinationUnchanged, .moveCopyIntoPlace):
+            return "\(destination) is unchanged, and the unused copy is still at \(incoming)"
+        case (.destinationUnchanged, _):
+            return nil
+        }
     }
 
     private func sentence(for failure: StepFailure) -> String {
@@ -54,6 +76,8 @@ public struct ReplaceError: LocalizedError {
             return "Could not remove the copy at \(incoming): \(cause)"
         case .restoreOriginal:
             return "Could not move the original back from \(setAside) to \(destination): \(cause)"
+        case .inspectDisk:
+            return "Could not check what the failed move left on disk: \(cause)"
         }
     }
 }
@@ -144,77 +168,122 @@ public struct FileTransport: Sendable {
 
     // MARK: - Replace
 
-    /// Replaces `destination` with a copy of `source` without a moment in which `destination` is missing.
-    /// The copy lands beside it as `<name>.helix-incoming-<uuid>`, an existing destination moves aside
-    /// to `<name>.helix-replaced-<uuid>`, the copy moves into place, and the set-aside original is removed.
-    /// A failed copy leaves `destination` untouched and a failed move into place moves the original back;
-    /// each of those failures, recovery failures included, is thrown as a `ReplaceError`.
+    /// Replaces `destination` with a copy of `source`. The copy lands beside it as
+    /// `<name>.helix-incoming-<uuid>` and then takes its name. Where one rename can do that (nothing at the
+    /// destination, or neither side a directory) the destination never goes missing. Otherwise the original
+    /// first moves aside to `<name>.helix-replaced-<uuid>` and is removed once the copy is in place.
+    ///
+    /// A failure before anything at the destination is touched removes the copy and throws. From the first
+    /// move onward a failure deletes nothing: what is on disk decides whether the replacement happened, the
+    /// original is still or again in place, or neither can be shown, and the thrown `ReplaceError` says which.
     /// A set-aside original that cannot be removed does not undo the replacement: it is returned in the outcome.
     public func replace(_ destination: EndpointURL, withCopyOf source: EndpointURL) async throws -> ReplaceOutcome {
         let token = UUID().uuidString
         let incoming = destination.withPath(destination.path + ".helix-incoming-\(token)")
         let setAside = destination.withPath(destination.path + ".helix-replaced-\(token)")
 
-        func failure(_ step: ReplaceError.Step, _ cause: any Error, recoveryFailures: [ReplaceError.StepFailure] = []) -> ReplaceError {
+        func failure(
+            _ step: ReplaceError.Step, _ cause: any Error,
+            aftermath: ReplaceError.Aftermath, recoveryFailures: [ReplaceError.StepFailure] = []
+        ) -> ReplaceError {
             ReplaceError(
                 source: source.formatted, destination: destination.formatted,
-                incoming: incoming.formatted, setAside: setAside.formatted,
+                incoming: incoming.formatted, setAside: setAside.formatted, aftermath: aftermath,
                 failure: ReplaceError.StepFailure(step: step, cause: cause), recoveryFailures: recoveryFailures
             )
         }
-        func recover(_ step: ReplaceError.Step, _ action: () async throws -> Void) async -> [ReplaceError.StepFailure] {
+        func removeCopy() async -> [ReplaceError.StepFailure] {
             do {
-                try await action()
+                try await remove(endpoint: incoming)
                 return []
             } catch {
-                return [ReplaceError.StepFailure(step: step, cause: error)]
+                return [ReplaceError.StepFailure(step: .removeCopy, cause: error)]
             }
         }
-        func removeCopy() async -> [ReplaceError.StepFailure] {
-            await recover(.removeCopy) { try await remove(endpoint: incoming) }
+        /// Whether anything, a dangling symlink included, holds the name.
+        func holdsName(_ endpoint: EndpointURL) async throws -> Bool {
+            if try await pathExists(endpoint: endpoint) { return true }
+            return try await isSymlink(endpoint: endpoint)
+        }
+        /// Ends a replacement whose move at `step` failed, by reading what the move left on disk.
+        func settle(_ step: ReplaceError.Step, _ cause: any Error, swap: Swap) async throws -> ReplaceOutcome {
+            let onDisk: (destination: Bool, incoming: Bool, setAside: Bool)
+            do {
+                onDisk = (try await holdsName(destination), try await holdsName(incoming), try await holdsName(setAside))
+            } catch {
+                throw failure(step, cause, aftermath: .destinationUnverified, recoveryFailures: [ReplaceError.StepFailure(step: .inspectDisk, cause: error)])
+            }
+            switch (onDisk.destination, onDisk.incoming, onDisk.setAside, swap) {
+            case (true, false, true, .setAsideThenRename):
+                return .replacedLeavingOriginal(path: setAside.formatted, reason: cause.localizedDescription)
+            case (true, false, false, .renameOverOriginal), (true, false, false, .renameIntoFreeName):
+                return .replaced
+            case (true, true, false, .setAsideThenRename), (true, true, false, .renameOverOriginal),
+                 (false, true, false, .renameIntoFreeName):
+                throw failure(step, cause, aftermath: .destinationUnchanged)
+            case (false, true, true, .setAsideThenRename):
+                do {
+                    try await move(setAside, toPath: destination.path)
+                } catch {
+                    throw failure(step, cause, aftermath: .destinationUnverified, recoveryFailures: [ReplaceError.StepFailure(step: .restoreOriginal, cause: error)])
+                }
+                throw failure(step, cause, aftermath: .destinationUnchanged)
+            default:
+                throw failure(step, cause, aftermath: .destinationUnverified)
+            }
         }
 
         do {
             try await copy(from: source, to: incoming)
         } catch {
-            throw failure(.copySource, error, recoveryFailures: await removeCopy())
+            throw failure(.copySource, error, aftermath: .destinationUnchanged, recoveryFailures: await removeCopy())
         }
-        let destinationExists: Bool
+        let swap: Swap
         do {
-            // A dangling symlink fails `test -e` yet still holds the name, and mv cannot rename a directory over it.
-            if try await pathExists(endpoint: destination) {
-                destinationExists = true
+            if try await !holdsName(destination) {
+                swap = .renameIntoFreeName
+            } else if try await directoryExists(endpoint: destination) {
+                // mv moves its source inside a destination that is a directory or a symlink to one.
+                swap = .setAsideThenRename
+            } else if try await directoryExists(endpoint: incoming) {
+                // mv cannot rename a directory over a file or a symlink.
+                swap = .setAsideThenRename
             } else {
-                destinationExists = try await isSymlink(endpoint: destination)
+                swap = .renameOverOriginal
             }
         } catch {
-            throw failure(.checkDestination, error, recoveryFailures: await removeCopy())
+            throw failure(.checkDestination, error, aftermath: .destinationUnchanged, recoveryFailures: await removeCopy())
         }
-        if destinationExists {
+
+        if swap == .setAsideThenRename {
             do {
                 try await move(destination, toPath: setAside.path)
             } catch {
-                throw failure(.setOriginalAside, error, recoveryFailures: await removeCopy())
+                return try await settle(.setOriginalAside, error, swap: swap)
             }
         }
         do {
             try await move(incoming, toPath: destination.path)
         } catch {
-            var recoveryFailures: [ReplaceError.StepFailure] = []
-            if destinationExists {
-                recoveryFailures += await recover(.restoreOriginal) { try await move(setAside, toPath: destination.path) }
-            }
-            recoveryFailures += await removeCopy()
-            throw failure(.moveCopyIntoPlace, error, recoveryFailures: recoveryFailures)
+            return try await settle(.moveCopyIntoPlace, error, swap: swap)
         }
-        if destinationExists {
-            do {
-                try await remove(endpoint: setAside)
-            } catch {
-                return .replacedLeavingOriginal(path: setAside.formatted, reason: error.localizedDescription)
-            }
+        guard swap == .setAsideThenRename else { return .replaced }
+        do {
+            try await remove(endpoint: setAside)
+        } catch {
+            return .replacedLeavingOriginal(path: setAside.formatted, reason: error.localizedDescription)
         }
         return .replaced
+    }
+
+    /// How the incoming copy takes the destination's name.
+    private enum Swap {
+        /// Nothing holds the name, so one rename puts the copy there.
+        case renameIntoFreeName
+        /// Neither side is a directory, so one rename replaces the original with no moment in which the name is free.
+        case renameOverOriginal
+        /// A directory is involved, which one rename cannot replace: the original moves aside first.
+        case setAsideThenRename
     }
 
     /// Renames a path on its own host; source and target always share the endpoint's machine.

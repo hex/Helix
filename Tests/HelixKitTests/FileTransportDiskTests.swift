@@ -65,7 +65,7 @@ struct FileTransportReplaceDiskTests {
             try "winner".write(to: winner, atomically: false, encoding: .utf8)
             try "loser".write(to: loser, atomically: false, encoding: .utf8)
 
-            try await FileTransport().replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+            _ = try await FileTransport().replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
 
             #expect(try text(at: loser) == "winner")
             #expect(try text(at: winner) == "winner")
@@ -83,7 +83,7 @@ struct FileTransportReplaceDiskTests {
             try "winner".write(to: winner.appendingPathComponent("kept.txt"), atomically: false, encoding: .utf8)
             try "loser".write(to: loser.appendingPathComponent("dropped.txt"), atomically: false, encoding: .utf8)
 
-            try await FileTransport().replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+            _ = try await FileTransport().replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
 
             #expect(try FileManager.default.contentsOfDirectory(atPath: loser.path) == ["kept.txt"])
             #expect(try text(at: loser.appendingPathComponent("kept.txt")) == "winner")
@@ -99,7 +99,7 @@ struct FileTransportReplaceDiskTests {
             try "winner".write(to: winner, atomically: false, encoding: .utf8)
             try FileManager.default.createSymbolicLink(atPath: loser.path, withDestinationPath: "nowhere")
 
-            try await FileTransport().replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+            _ = try await FileTransport().replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
 
             #expect(try FileManager.default.attributesOfItem(atPath: loser.path)[.type] as? FileAttributeType == .typeRegular)
             #expect(try text(at: loser) == "winner")
@@ -114,7 +114,7 @@ struct FileTransportReplaceDiskTests {
             let loser = scratch.appendingPathComponent("loser.txt")
             try "winner".write(to: winner, atomically: false, encoding: .utf8)
 
-            try await FileTransport().replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+            _ = try await FileTransport().replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
 
             #expect(try text(at: loser) == "winner")
             #expect(try replaceSiblings(in: scratch) == [])
@@ -145,6 +145,92 @@ struct FileTransportReplaceDiskTests {
         }
     }
 
+    /// A loser directory holding "dropped.txt" and a winner directory holding "kept.txt", both in `scratch`.
+    private func makeDirectoryConflict(in scratch: URL) throws -> (winner: URL, loser: URL) {
+        let winner = scratch.appendingPathComponent("winner")
+        let loser = scratch.appendingPathComponent("loser")
+        try FileManager.default.createDirectory(at: winner, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: loser, withIntermediateDirectories: false)
+        try "winner".write(to: winner.appendingPathComponent("kept.txt"), atomically: false, encoding: .utf8)
+        try "loser".write(to: loser.appendingPathComponent("dropped.txt"), atomically: false, encoding: .utf8)
+        return (winner, loser)
+    }
+
+    private func movesCopyIntoPlace(_ executable: String, _ arguments: [String]) -> Bool {
+        executable == "/bin/mv" && arguments.first?.contains(".helix-incoming-") == true
+    }
+
+    @Test("a move into place that ran and then reported failure leaves the winner in place and the original beside it, not inside it")
+    func moveIntoPlaceRanThenFailed() async throws {
+        try await withScratchDirectory { scratch in
+            let (winner, loser) = try makeDirectoryConflict(in: scratch)
+            let transport = FileTransport(execute: executorFailing(afterRunning: true, where: movesCopyIntoPlace))
+
+            let outcome = try await transport.replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+
+            let siblings = try replaceSiblings(in: scratch)
+            try #require(siblings.count == 1)
+            let leftover = scratch.appendingPathComponent(siblings[0])
+            #expect(siblings[0].hasPrefix("loser.helix-replaced-"))
+            #expect(outcome == .replacedLeavingOriginal(path: leftover.path, reason: "connection lost"))
+            #expect(try FileManager.default.contentsOfDirectory(atPath: loser.path) == ["kept.txt"])
+            #expect(try text(at: loser.appendingPathComponent("kept.txt")) == "winner")
+            #expect(try FileManager.default.contentsOfDirectory(atPath: leftover.path) == ["dropped.txt"])
+            #expect(try text(at: leftover.appendingPathComponent("dropped.txt")) == "loser")
+        }
+    }
+
+    @Test("a move into place that fails puts the original back and keeps the unused copy")
+    func moveIntoPlaceFails() async throws {
+        try await withScratchDirectory { scratch in
+            let (winner, loser) = try makeDirectoryConflict(in: scratch)
+            let transport = FileTransport(execute: executorFailing(where: movesCopyIntoPlace))
+
+            let error = try await #require(throws: ReplaceError.self) {
+                _ = try await transport.replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+            }
+
+            let siblings = try replaceSiblings(in: scratch)
+            try #require(siblings.count == 1)
+            let unusedCopy = scratch.appendingPathComponent(siblings[0])
+            #expect(siblings[0].hasPrefix("loser.helix-incoming-"))
+            #expect(error.aftermath == .destinationUnchanged)
+            #expect(error.localizedDescription == "Could not move \(unusedCopy.path) into place at \(loser.path): connection lost. \(loser.path) is unchanged, and the unused copy is still at \(unusedCopy.path)")
+            #expect(try FileManager.default.contentsOfDirectory(atPath: loser.path) == ["dropped.txt"])
+            #expect(try text(at: loser.appendingPathComponent("dropped.txt")) == "loser")
+            #expect(try text(at: unusedCopy.appendingPathComponent("kept.txt")) == "winner")
+        }
+    }
+
+    @Test("when the original cannot be moved back, both siblings stay on disk and the error names them")
+    func restoreFails() async throws {
+        try await withScratchDirectory { scratch in
+            let (winner, loser) = try makeDirectoryConflict(in: scratch)
+            let transport = FileTransport { executable, arguments in
+                if executable == "/bin/mv", arguments.last == loser.path {
+                    throw CLIError(exitCode: 255, stderr: "connection lost")
+                }
+                return try await runProcess(executablePath: executable, arguments: arguments)
+            }
+
+            let error = try await #require(throws: ReplaceError.self) {
+                _ = try await transport.replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+            }
+
+            let siblings = try replaceSiblings(in: scratch)
+            try #require(siblings.count == 2)
+            let incoming = scratch.appendingPathComponent(siblings[0])
+            let setAside = scratch.appendingPathComponent(siblings[1])
+            #expect(siblings[0].hasPrefix("loser.helix-incoming-"))
+            #expect(siblings[1].hasPrefix("loser.helix-replaced-"))
+            #expect(error.aftermath == .destinationUnverified)
+            #expect(error.localizedDescription == "Could not move \(incoming.path) into place at \(loser.path): connection lost. Then could not move the original back from \(setAside.path) to \(loser.path): connection lost. Nothing was deleted: look for the original at \(setAside.path) and for the replacement at \(incoming.path)")
+            #expect(FileManager.default.fileExists(atPath: loser.path) == false)
+            #expect(try text(at: setAside.appendingPathComponent("dropped.txt")) == "loser")
+            #expect(try text(at: incoming.appendingPathComponent("kept.txt")) == "winner")
+        }
+    }
+
     @Test("a copy that fails partway leaves the destination as it was and no partial copy")
     func copyFails() async throws {
         try await withScratchDirectory { scratch in
@@ -155,7 +241,7 @@ struct FileTransportReplaceDiskTests {
             let transport = FileTransport(execute: executorFailing(afterRunning: true) { executable, _ in executable == "/bin/cp" })
 
             await #expect(throws: ReplaceError.self) {
-                try await transport.replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+                _ = try await transport.replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
             }
 
             #expect(try text(at: loser) == "loser")
