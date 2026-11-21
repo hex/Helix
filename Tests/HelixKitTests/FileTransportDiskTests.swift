@@ -160,6 +160,29 @@ struct FileTransportReplaceDiskTests {
         executable == "/bin/mv" && arguments.first?.contains(".helix-incoming-") == true
     }
 
+    @Test("Interrupted set-aside removal leaves a verified winner and an unverified old tree")
+    func interruptedSetAsideRemovalReportsUnverifiedTree() async throws {
+        try await withScratchDirectory { scratch in
+            let (winner, loser) = try makeDirectoryConflict(in: scratch)
+            try "also old".write(to: loser.appendingPathComponent("stays.txt"), atomically: false, encoding: .utf8)
+            let transport = FileTransport { executable, arguments in
+                if executable == "/bin/rm" {
+                    let path = try #require(arguments.last)
+                    try FileManager.default.removeItem(at: URL(fileURLWithPath: path).appendingPathComponent("dropped.txt"))
+                    throw ProcessDeadlineError(executablePath: executable, deadline: .seconds(15))
+                }
+                return try await runProcess(executablePath: executable, arguments: arguments)
+            }
+            let plan = ReplacePlan(replacing: .local(path: loser.path), withCopyOf: .local(path: winner.path))
+
+            let outcome = try await transport.replace(plan)
+
+            #expect(outcome == .replacedWithInterruptedRemoval(path: plan.setAside.formatted, reason: "/bin/rm exceeded its deadline of 15.0 seconds."))
+            #expect(try FileManager.default.contentsOfDirectory(atPath: plan.setAside.formatted) == ["stays.txt"])
+            #expect(try FileManager.default.contentsOfDirectory(atPath: loser.path) == ["kept.txt"])
+        }
+    }
+
     @Test("a move into place that ran and then reported failure leaves the winner in place and the original beside it, not inside it")
     func moveIntoPlaceRanThenFailed() async throws {
         try await withScratchDirectory { scratch in
@@ -335,6 +358,30 @@ struct FileTransportReplaceDiskTests {
 
 @Suite("Conflict interruptions on disk")
 struct ConflictInterruptionDiskTests {
+    @Test("A resume deadline reports uncertainty and skips flush after file placement")
+    @MainActor
+    func resumeDeadlineReportsUnconfirmedSession() async throws {
+        try await withScratchDirectory { scratch in
+            let fixture = try LocalConflictFixture(in: scratch)
+            let suite = "ConflictResumeDeadlineTests.\(UUID().uuidString)"
+            let defaults = try #require(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let provider = RecordingProvider(
+                syncSessions: [fixture.session], beforeSyncResume: { _ in
+                    throw ProcessDeadlineError(executablePath: "/usr/bin/mutagen", deadline: .seconds(15))
+                }
+            )
+            let store = SessionStore(provider: provider, defaults: defaults)
+
+            let result = await store.resolveConflict(session: fixture.session, conflict: fixture.conflict, winner: .alpha)
+
+            #expect(try String(contentsOf: fixture.loser, encoding: .utf8) == "winner")
+            #expect(result == ["file.txt"])
+            #expect(provider.calls == ["syncPause:sync_1", "syncResume:sync_1"])
+            #expect(store.lastError == "Could not confirm that Mutagen resumed \"project\". Flush was skipped. Check the session status before retrying. /usr/bin/mutagen exceeded its deadline of 15.0 seconds.")
+        }
+    }
+
     @Test("A partial incoming copy with failed cleanup holds the session", arguments: [false, true])
     @MainActor
     func failedCleanupHoldsSession(bulk: Bool) async throws {

@@ -1230,25 +1230,22 @@ public final class SessionStore {
             case .winnerMissing(let winnerURL):
                 ConsoleLog.shared.log("  winner file no longer exists at \(winnerURL.formatted)", level: .error)
                 lastError = "The file \"\(conflict.root)\" no longer exists at the source. It may have been renamed or deleted. Try refreshing sessions."
-                _ = try? await resumeUnlessHeld(session.identifier)
+                _ = await resumeAfterConflict(session, keeping: lastError)
                 return unresolved
             }
         } catch {
             ConsoleLog.shared.log("  transport FAILED: \(error.localizedDescription)", level: .error)
             lastError = error.localizedDescription
-            _ = try? await resumeUnlessHeld(session.identifier)
+            _ = await resumeAfterConflict(session, keeping: lastError)
             return unresolved
         }
 
         // Resume and flush to let mutagen re-scan with the resolved state.
         // Don't call refresh() here — syncList() right after flush catches mutagen mid-scan
         // with empty conflicts, causing UI flicker. The polling cycle brings authoritative data.
+        guard await resumeAfterConflict(session, keeping: leftoverNotice) else { return unresolved }
+        ConsoleLog.shared.log("  resumed session")
         do {
-            if case .heldBack(let message) = try await resumeUnlessHeld(session.identifier) {
-                lastError = message
-                return unresolved
-            }
-            ConsoleLog.shared.log("  resumed session")
             try await provider.syncFlush(session.identifier)
             ConsoleLog.shared.log("  flush succeeded")
             lastError = leftoverNotice
@@ -1257,6 +1254,22 @@ public final class SessionStore {
             lastError = ([error.localizedDescription] + [leftoverNotice].compactMap { $0 }).joined(separator: " ")
         }
         return []
+    }
+
+    private func resumeAfterConflict(_ session: SyncSession, keeping priorNotice: String?) async -> Bool {
+        do {
+            if case .heldBack(let hold) = try await resumeUnlessHeld(session.identifier) {
+                lastError = hold
+                return false
+            }
+            return true
+        } catch {
+            let name = session.name ?? session.identifier
+            let message = "Could not confirm that Mutagen resumed \"\(name)\". Flush was skipped. Check the session status before retrying. \(error.localizedDescription)"
+            ConsoleLog.shared.log(message, level: .error)
+            lastError = ([message] + [priorNotice].compactMap { $0 }).joined(separator: " ")
+            return false
+        }
     }
 
     public func dismissLeftoverNotice(for identifier: String) {
@@ -1334,11 +1347,9 @@ public final class SessionStore {
 
         ConsoleLog.shared.log("  resolved \(resolved)/\(conflicts.count) conflicts (\(failed) failed)")
 
+        let priorNotice = notices.isEmpty ? nil : notices.joined(separator: " ")
+        guard await resumeAfterConflict(session, keeping: priorNotice) else { return Set(conflicts.map(\.root)) }
         do {
-            if case .heldBack(let message) = try await resumeUnlessHeld(session.identifier) {
-                lastError = message
-                return unresolved
-            }
             try await provider.syncFlush(session.identifier)
             if failed > 0 {
                 notices.insert("\(failed) of \(conflicts.count) conflicts could not be resolved.", at: 0)

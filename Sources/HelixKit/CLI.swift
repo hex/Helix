@@ -45,7 +45,7 @@ public struct CLI: Sendable {
     // MARK: - Session Creation
 
     public func syncCreate(arguments: [String]) async throws -> String {
-        let output = try await run(arguments, deadline: CommandDeadline.operation)
+        let output = try await run(arguments, deadline: CommandDeadline.transfer)
         let prefix = "Created session "
         guard let receipt = output.split(whereSeparator: \.isNewline).last, receipt.hasPrefix(prefix) else {
             throw SyncCreateReceiptError()
@@ -69,7 +69,7 @@ public struct CLI: Sendable {
     }
 
     public func syncResume(_ identifier: String) async throws {
-        _ = try await run(["sync", "resume", identifier], deadline: CommandDeadline.operation)
+        _ = try await run(["sync", "resume", identifier], deadline: CommandDeadline.transfer)
     }
 
     public func syncFlush(_ identifier: String) async throws {

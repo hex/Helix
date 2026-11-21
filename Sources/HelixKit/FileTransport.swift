@@ -385,11 +385,11 @@ public struct FileTransport: Sendable {
     public func remove(endpoint: EndpointURL) async throws {
         switch endpoint {
         case .local(let path):
-            _ = try await execute("/bin/rm", ["-rf", path], deadline: CommandDeadline.operation)
+            _ = try await execute("/bin/rm", ["-rf", path], deadline: CommandDeadline.transfer)
         case .ssh(let user, let host, let port, let path):
-            _ = try await execute(.remoteShell(user: user, host: host, port: port, command: "rm -rf \(Self.shellWord(path))"), deadline: CommandDeadline.operation)
+            _ = try await execute(.remoteShell(user: user, host: host, port: port, command: "rm -rf \(Self.shellWord(path))"), deadline: CommandDeadline.transfer)
         case .docker(let container, let path):
-            _ = try await execute("/usr/bin/docker", ["exec", container, "rm", "-rf", path], deadline: CommandDeadline.operation)
+            _ = try await execute("/usr/bin/docker", ["exec", container, "rm", "-rf", path], deadline: CommandDeadline.transfer)
         }
     }
 
