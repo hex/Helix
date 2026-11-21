@@ -521,6 +521,74 @@ struct BulkPauseTests {
         #expect(nextLaunch.bulkPause == nil)
     }
 
+    /// A store whose session "sync_2" is held after an unverified replacement, with Pause All
+    /// recorded for "sync_1", "sync_2" and "sync_3" until `resumeAt`.
+    @MainActor
+    private func storeHoldingOnePausedSession(resumeAt: Date?, now: @escaping () -> Date) async -> SessionStore {
+        let conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
+        let running = [
+            makeSyncSession(id: "sync_1", name: "one"),
+            makeSyncSession(id: "sync_2", name: "two", conflicts: [conflict]),
+            makeSyncSession(id: "sync_3", name: "three"),
+        ]
+        // Every command succeeds except the move into place, so nothing on disk can be told apart afterwards.
+        let transport = FileTransport { executable, arguments in
+            if executable == "/bin/mv", arguments.first?.contains(".helix-incoming-") == true {
+                throw CLIError(exitCode: 1, stderr: "permission denied")
+            }
+            return ""
+        }
+        let store = SessionStore(provider: RecordingProvider(syncSessions: running), fileTransport: transport, defaults: defaults, now: now)
+        await store.pauseAllSync(until: resumeAt)
+        await store.resolveConflict(session: running[1], conflict: conflict, winner: .alpha)
+        return store
+    }
+
+    private var allPaused: [SyncSession] {
+        [
+            makeSyncSession(id: "sync_1", name: "one", paused: true),
+            makeSyncSession(id: "sync_2", name: "two", paused: true),
+            makeSyncSession(id: "sync_3", name: "three", paused: true),
+        ]
+    }
+
+    @Test("Resume after Pause All leaves a held session paused and resumes the others")
+    @MainActor
+    func resumeSkipsHeldSession() async {
+        defer { removeDefaults() }
+        let store = await storeHoldingOnePausedSession(resumeAt: nil, now: Date.init)
+        let whilePaused = RecordingProvider(syncSessions: allPaused)
+        store.replaceProvider(whilePaused)
+
+        await store.resumeBulkPause()
+
+        #expect(whilePaused.calls == ["syncResume:sync_1", "syncResume:sync_3"])
+        #expect(store.bulkPause == nil)
+        #expect(store.sessionHolds.keys.sorted() == ["sync_2"])
+        #expect(store.lastError == nil)
+    }
+
+    @Test("A timed pause reaching its deadline leaves a held session paused and resumes the others")
+    @MainActor
+    func deadlineSkipsHeldSession() async {
+        defer { removeDefaults() }
+        let deadline = Date(timeIntervalSince1970: 1_800_001_800)
+        let clock = CallLog()
+        let store = await storeHoldingOnePausedSession(resumeAt: deadline) {
+            clock.entries.isEmpty ? Date(timeIntervalSince1970: 1_800_000_000) : deadline
+        }
+        let whilePaused = RecordingProvider(syncSessions: allPaused)
+        store.replaceProvider(whilePaused)
+        clock.record(executable: "deadline reached", arguments: [])
+
+        await store.refresh()
+        await store.refresh()
+
+        #expect(whilePaused.calls == ["syncResume:sync_1", "syncResume:sync_3"])
+        #expect(store.bulkPause == nil)
+        #expect(store.sessionHolds.keys.sorted() == ["sync_2"])
+    }
+
     @Test("Pause All during an active bulk pause keeps the first sessions and takes the newer deadline")
     @MainActor
     func secondPauseAllKeepsFirstSessions() async {

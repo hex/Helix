@@ -320,7 +320,7 @@ public final class SessionStore {
         await finishBulkAction(failures: failures)
     }
 
-    /// Resumes the sessions Pause All paused that are still paused. A session that
+    /// Resumes the sessions Pause All paused that are still paused, except held ones. A session that
     /// fails to resume stays in the record so the next attempt retries it.
     public func resumeBulkPause() async {
         guard let record = bulkPause, !bulkPauseInFlight else { return }
@@ -332,7 +332,10 @@ public final class SessionStore {
         var failures: [String] = []
         for session in syncSessions where session.paused && record.sessionIdentifiers.contains(session.identifier) {
             do {
-                try await provider.syncResume(session.identifier)
+                // A held session leaves the record without being resumed: its hold keeps it paused from here on.
+                switch try await resumeUnlessHeld(session.identifier) {
+                case .resumed, .heldBack: break
+                }
             } catch {
                 unresumed.append(session.identifier)
                 failures.append("Could not resume \(session.name ?? session.identifier): \(error.localizedDescription)")
@@ -340,6 +343,23 @@ public final class SessionStore {
         }
         bulkPause = unresumed.isEmpty ? nil : BulkPause(sessionIdentifiers: unresumed, resumeAt: record.resumeAt)
         await finishBulkAction(failures: failures)
+    }
+
+    /// How the store's own attempt to resume a session ended.
+    private enum UnpromptedResume {
+        case resumed
+        case heldBack(message: String)
+    }
+
+    /// The only way the store resumes a session that the user did not ask it by name to resume: at the end
+    /// of a conflict resolve, for Resume after Pause All, and at a timed pause's deadline. A held session
+    /// stays paused.
+    private func resumeUnlessHeld(_ identifier: String) async throws -> UnpromptedResume {
+        if let message = sessionHolds[identifier] {
+            return .heldBack(message: message)
+        }
+        try await provider.syncResume(identifier)
+        return .resumed
     }
 
     private func persistBulkPause() {
@@ -598,13 +618,13 @@ public final class SessionStore {
             case .winnerMissing(let winnerURL):
                 ConsoleLog.shared.log("  winner file no longer exists at \(winnerURL.formatted)", level: .error)
                 lastError = "The file \"\(conflict.root)\" no longer exists at the source. It may have been renamed or deleted. Try refreshing sessions."
-                try? await provider.syncResume(session.identifier)
+                _ = try? await resumeUnlessHeld(session.identifier)
                 return
             }
         } catch {
             ConsoleLog.shared.log("  transport FAILED: \(error.localizedDescription)", level: .error)
             lastError = error.localizedDescription
-            try? await provider.syncResume(session.identifier)
+            _ = try? await resumeUnlessHeld(session.identifier)
             return
         }
 
@@ -612,7 +632,10 @@ public final class SessionStore {
         // Don't call refresh() here — syncList() right after flush catches mutagen mid-scan
         // with empty conflicts, causing UI flicker. The polling cycle brings authoritative data.
         do {
-            try await provider.syncResume(session.identifier)
+            if case .heldBack(let message) = try await resumeUnlessHeld(session.identifier) {
+                lastError = message
+                return
+            }
             ConsoleLog.shared.log("  resumed session")
             try await provider.syncFlush(session.identifier)
             ConsoleLog.shared.log("  flush succeeded")
@@ -696,7 +719,10 @@ public final class SessionStore {
         ConsoleLog.shared.log("  resolved \(resolved)/\(conflicts.count) conflicts (\(failed) failed)")
 
         do {
-            try await provider.syncResume(session.identifier)
+            if case .heldBack(let message) = try await resumeUnlessHeld(session.identifier) {
+                lastError = message
+                return
+            }
             try await provider.syncFlush(session.identifier)
             if failed > 0 {
                 notices.insert("\(failed) of \(conflicts.count) conflicts could not be resolved.", at: 0)
