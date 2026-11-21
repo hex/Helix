@@ -1,5 +1,5 @@
 // ABOUTME: Builds every ssh and scp command line Helix runs, with the options that end one when its host stops answering.
-// ABOUTME: The only place that names the ssh and scp executables, so no call can leave those options out.
+// ABOUTME: FileTransport, the connection test and the remote directory browser all take their command lines from here.
 
 import Foundation
 
