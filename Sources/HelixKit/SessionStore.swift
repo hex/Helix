@@ -57,7 +57,8 @@ public final class SessionStore {
         didSet { persistBulkPause() }
     }
     /// Why a sync session is kept paused, by session identifier: a conflict replacement left a path that
-    /// could not be shown to hold either version, and the message names where the data is. While a session
+    /// could not be shown to hold either version,
+    /// or Helix quit while a replacement was under way, and the message names where the data is. While a session
     /// has an entry the store never resumes it on its own; only `resumeSync` on that session does.
     public private(set) var sessionHolds: [String: String] = [:] {
         didSet { persist(sessionHolds, forKey: Self.sessionHoldsKey) }
