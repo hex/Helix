@@ -24,7 +24,7 @@
 - **Transfer progress** -- While a session stages files, the detail view shows a progress bar, files and bytes received, and the file mutagen is sending; the session list and menu bar show the same percentage as `mutagen sync list -l`
 - **Create sessions** -- Step-by-step wizard for sync sessions; streamlined form for port forwarding
 - **Session configuration** -- See settings that differ from Mutagen's defaults and overrides for Alpha and Beta.
-- **Edit sessions** -- Rename a session or change its sync mode, ignore rules, symlinks, compression, and watch settings. Helix prepares a paused replacement before removing the original. The replacement starts with fresh sync history. Editing preserves staging mode, hashing, limits, and how Mutagen handles version control directories.
+- **Edit sessions** -- Rename a session or change its sync mode, ignore rules, symlinks, compression, and watch settings. Helix prepares a paused replacement before removing the original. The replacement starts with fresh sync history. Helix carries over the existing settings for the session and both endpoints. If Mutagen cannot express an endpoint override, Helix names it and keeps the original. If Helix quits mid-edit, the main window identifies the sessions to inspect after relaunch. When a sync Create reports an uncertain outcome, check for the named session before retrying.
 - **Unique names** -- Rejects a name another session already holds, so `mutagen sync pause <name>` always resolves to one session
 - **Labels** -- Tag sessions with key=value pairs and filter the dashboard by them
 - **Connection testing** -- Check an SSH endpoint before creating a session, then browse the remote filesystem to pick a path

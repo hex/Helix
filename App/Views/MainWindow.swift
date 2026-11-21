@@ -39,6 +39,23 @@ struct MainWindow: View {
                     .frame(minHeight: 100, idealHeight: 180, maxHeight: 300)
             }
         }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if let notice = store.interruptedEditNotice {
+                HStack(alignment: .top) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundStyle(.orange)
+                        .accessibilityHidden(true)
+                    Text(notice)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button("Dismiss") {
+                        store.dismissInterruptedEditNotice()
+                    }
+                }
+                .padding()
+                .background(.regularMaterial)
+            }
+        }
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Menu {

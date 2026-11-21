@@ -49,6 +49,12 @@ public struct SyncCreateOptions {
     public var ignoreVCS: Bool?
     public var maxEntryCount: UInt64?
     public var maxStagingFileSize: String?
+    private var ignoreSyntax: String?
+    private var probeMode: String?
+    private var scanMode: String?
+    private var permissions: PermissionsConfig?
+    private var alphaConfiguration: SyncConfiguration?
+    private var betaConfiguration: SyncConfiguration?
 
     public init() {}
 
@@ -69,6 +75,22 @@ public struct SyncCreateOptions {
         hash = session.hash
         maxEntryCount = session.maxEntryCount
         maxStagingFileSize = session.maxStagingFileSize.map { String($0) }
+        ignoreSyntax = session.ignore.syntax
+        probeMode = session.probeMode
+        scanMode = session.scanMode
+        permissions = session.permissions
+        preserveEndpointOverrides(from: session)
+    }
+
+    mutating func preserveEndpointOverrides(from session: SyncSession) {
+        alphaConfiguration = session.alpha.configuration
+        betaConfiguration = session.beta.configuration
+    }
+
+    var unsupportedEndpointOverrides: [String] {
+        let alpha = alphaConfiguration?.settingsWithoutEndpointFlags ?? []
+        let beta = betaConfiguration?.settingsWithoutEndpointFlags ?? []
+        return alpha.map { "Alpha " + $0 } + beta.map { "Beta " + $0 }
     }
 
     public func arguments(alpha: String, beta: String) -> [String] {
@@ -95,7 +117,34 @@ public struct SyncCreateOptions {
         }
         if let maxEntryCount { args += ["--max-entry-count", String(maxEntryCount)] }
         if let maxStagingFileSize { args += ["--max-staging-file-size", maxStagingFileSize] }
+        if let ignoreSyntax { args += ["--ignore-syntax", ignoreSyntax] }
+        if let probeMode { args += ["--probe-mode", probeMode] }
+        if let scanMode { args += ["--scan-mode", scanMode] }
+        args += Self.permissionArguments(permissions)
+        if let alphaConfiguration { args += Self.endpointArguments(alphaConfiguration, suffix: "-alpha") }
+        if let betaConfiguration { args += Self.endpointArguments(betaConfiguration, suffix: "-beta") }
 
+        return args
+    }
+
+    private static func endpointArguments(_ configuration: SyncConfiguration, suffix: String) -> [String] {
+        var args: [String] = []
+        if let value = configuration.probeMode { args += ["--probe-mode\(suffix)", value] }
+        if let value = configuration.scanMode { args += ["--scan-mode\(suffix)", value] }
+        if let value = configuration.stageMode { args += ["--stage-mode\(suffix)", value] }
+        if let value = configuration.watch?.mode { args += ["--watch-mode\(suffix)", value] }
+        if let value = configuration.watch?.pollingInterval { args += ["--watch-polling-interval\(suffix)", String(value)] }
+        args += permissionArguments(configuration.permissions, suffix: suffix)
+        if let value = configuration.compression?.algorithm { args += ["--compression\(suffix)", value] }
+        return args
+    }
+
+    private static func permissionArguments(_ permissions: PermissionsConfig?, suffix: String = "") -> [String] {
+        var args: [String] = []
+        if let value = permissions?.defaultFileMode { args += ["--default-file-mode\(suffix)", value] }
+        if let value = permissions?.defaultDirectoryMode { args += ["--default-directory-mode\(suffix)", value] }
+        if let value = permissions?.defaultOwner { args += ["--default-owner\(suffix)", value] }
+        if let value = permissions?.defaultGroup { args += ["--default-group\(suffix)", value] }
         return args
     }
 
@@ -114,6 +163,22 @@ public struct SyncCreateOptions {
             }
         }
         return parts.joined(separator: " \\\n  ")
+    }
+}
+
+private extension SyncConfiguration {
+    var settingsWithoutEndpointFlags: [String] {
+        var settings: [String] = []
+        if mode != nil { settings.append("mode") }
+        if hash != nil { settings.append("hash") }
+        if maxEntryCount != nil { settings.append("max-entry-count") }
+        if maxStagingFileSize != nil { settings.append("max-staging-file-size") }
+        if ignore?.paths?.isEmpty == false { settings.append("ignore") }
+        if ignore?.syntax != nil { settings.append("ignore-syntax") }
+        if ignore?.vcs != nil { settings.append("ignore-vcs") }
+        if symlink?.mode != nil { settings.append("symlink-mode") }
+        if permissions?.mode != nil { settings.append("permissions-mode") }
+        return settings
     }
 }
 

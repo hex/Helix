@@ -537,7 +537,7 @@ struct SessionStoreTests {
 struct RecreateSessionTests {
     private let createEdited = "syncCreate:sync create /tmp/a /tmp/b --name test --paused --mode one-way-safe"
 
-    @Test("Editing a sync session preserves staging, VCS, hash, and limits")
+    @Test("Editing preserves session settings and overrides on both endpoints")
     @MainActor
     func editPreservesConfiguredLimits() async throws {
         let fixture = try #require(Bundle.module.url(
@@ -548,6 +548,9 @@ struct RecreateSessionTests {
         let modes = "--mode one-way-safe --symlink-mode posix-raw --compression none --hash xxh128"
         let options = "--watch-mode force-poll --watch-polling-interval 21 --permissions-mode portable --stage-mode neighboring --ignore cache/"
         let limits = "--max-entry-count 4294967296 --max-staging-file-size 10485760"
+        let sessionFlags = "--ignore-syntax docker --probe-mode assume --scan-mode full --default-file-mode 0644 --default-directory-mode 0755 --default-owner alice --default-group developers"
+        let alpha = "--probe-mode-alpha probe --scan-mode-alpha full --stage-mode-alpha internal --watch-mode-alpha portable --watch-polling-interval-alpha 10 --default-file-mode-alpha 0600 --default-directory-mode-alpha 0700 --default-owner-alpha localmirror --default-group-alpha localmirrors --compression-alpha none"
+        let beta = "--scan-mode-beta accelerated --default-group-beta mirrors --compression-beta deflate"
 
         for (payload, vcsFlag) in [
             (json, "--ignore-vcs"),
@@ -561,8 +564,77 @@ struct RecreateSessionTests {
 
             await store.recreateSync(session, options: edited, alpha: "/srv/project", beta: "alice@example.com:/srv/mirror")
 
-            #expect(recorder.calls.first == "\(start) \(modes) \(options) \(vcsFlag) \(limits)")
+            #expect(recorder.calls.first == "\(start) \(modes) \(options) \(vcsFlag) \(limits) \(sessionFlags) \(alpha) \(beta)")
         }
+    }
+
+    @Test("Reports an interrupted edit without changing either session")
+    @MainActor
+    func interruptedEditNoticeSurvivesRefresh() async throws {
+        let suiteName = "InterruptedEditTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let original = makeSyncSession(id: "sync_1", name: "project")
+        let replacement = makeSyncSession(id: "sync_" + String(repeating: "J", count: 43), name: "project", paused: true)
+        let create = Gate()
+        let pause = Gate()
+        let provider = RecordingProvider(
+            syncSessions: [original], sessionsAfterCreate: [original, replacement],
+            beforeSyncPause: { _ in await pause.pass() }, duringSyncCreate: { await create.pass() }
+        )
+        let store = SessionStore(provider: provider, defaults: defaults)
+        let editing = Task {
+            await store.recreateSync(
+                original, options: SyncCreateOptions(from: original), alpha: "/srv/project", beta: "/srv/mirror"
+            )
+        }
+
+        await create.reached()
+        let beforeReceipt = defaults.dictionary(forKey: "syncEditInProgress") as? [String: String]
+        await create.open()
+        await pause.reached()
+        let afterReceipt = defaults.dictionary(forKey: "syncEditInProgress") as? [String: String]
+        let relaunchProvider = RecordingProvider(syncSessions: [original, replacement])
+        let relaunched = SessionStore(provider: relaunchProvider, defaults: defaults)
+        await relaunched.refresh()
+        let notice = relaunched.interruptedEditNotice
+        let persistedNotice = defaults.string(forKey: "interruptedSyncEditNotice")
+        await pause.open()
+        let result = await editing.value
+        relaunched.dismissInterruptedEditNotice()
+
+        #expect(beforeReceipt == ["original": original.identifier, "name": "project"])
+        #expect(afterReceipt == [
+            "original": original.identifier, "replacement": replacement.identifier, "name": "project",
+        ])
+        #expect(notice == "Helix quit while editing \"project\". Original session: sync_1. Edited session: \(replacement.identifier). Inspect both sessions before resuming either one. Keep only the session you want to sync.")
+        #expect(persistedNotice == notice)
+        #expect(relaunchProvider.calls == [])
+        #expect(result == nil)
+        #expect(relaunched.interruptedEditNotice == nil)
+        #expect(defaults.object(forKey: "interruptedSyncEditNotice") == nil)
+        #expect(defaults.object(forKey: "syncEditInProgress") == nil)
+    }
+
+    @Test("Names endpoint settings the create CLI cannot preserve and keeps the original")
+    @MainActor
+    func editRejectsUnsupportedEndpointOverrides() async throws {
+        let fixture = try #require(Bundle.module.url(
+            forResource: "sync-list-configuration", withExtension: "json", subdirectory: "Fixtures"
+        ))
+        let json = try String(contentsOf: fixture, encoding: .utf8)
+            .replacingOccurrences(of: "\"stageMode\": \"internal\",", with: "\"stageMode\": \"internal\", \"hash\": \"sha1\",")
+            .replacingOccurrences(of: "\"scanMode\": \"accelerated\",", with: "\"scanMode\": \"accelerated\", \"maxEntryCount\": 100,")
+        let session = try JSONDecoder().decode(SyncSession.self, from: Data(json.utf8))
+        let provider = RecordingProvider(syncSessions: [session])
+        let store = SessionStore(provider: provider)
+
+        let result = await store.recreateSync(
+            session, options: SyncCreateOptions(from: session), alpha: "/srv/project", beta: "/srv/mirror"
+        )
+
+        #expect(result == "Mutagen cannot recreate these endpoint settings: Alpha hash, Beta max-entry-count. The original session was kept.")
+        #expect(provider.calls == [])
     }
 
     @Test("Keeps the original when Mutagen would round the staging file limit")
@@ -637,8 +709,32 @@ struct RecreateSessionTests {
 
         await store.recreateSync(session, options: options, alpha: "/tmp/a", beta: "/tmp/b")
 
-        #expect(store.lastError == "Could not prepare the edited session: simulated failure. The original session was kept.")
+        #expect(store.lastError == "Sync session \"test\" may have been created. Check the session list before retrying. The original session was kept. Mutagen reported: simulated failure")
         #expect(recorder.calls == [createEdited])
+    }
+
+    @Test("Warns that a named sync session may exist when Create cannot confirm the outcome", arguments: [true, false])
+    @MainActor
+    func uncertainCreateNamesSession(malformedReceipt: Bool) async {
+        let original = makeSyncSession(id: "sync_1", name: "project")
+        let provider = RecordingProvider(
+            syncSessions: [original], failOn: malformedReceipt ? nil : "syncCreate",
+            duringSyncCreate: {
+                let cli = CLI(executablePath: "/usr/bin/printf", baseArguments: ["%s\n"])
+                _ = try await cli.syncCreate(arguments: ["Created session sync_incomplete"])
+            }
+        )
+        let store = SessionStore(provider: provider)
+        var options = SyncCreateOptions(from: original)
+        options.name = "new-project"
+        let detail = malformedReceipt ? "Mutagen did not report a valid identifier for the created sync session." : "simulated failure"
+        let warning = "Sync session \"new-project\" may have been created. Check the session list before retrying."
+
+        let creation = await store.createSync(options: options, alpha: "/srv/project", beta: "/srv/mirror")
+        let editing = await store.recreateSync(original, options: options, alpha: "/srv/project", beta: "/srv/mirror")
+
+        #expect(creation == "\(warning) Mutagen reported: \(detail)")
+        #expect(editing == "\(warning) The original session was kept. Mutagen reported: \(detail)")
     }
 
     @Test("A failed replacement start removes it before resuming the original")
@@ -1160,7 +1256,7 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
     private var _created = false
     private let failOn: String?
     private let beforeSyncPause: (@Sendable (String) async -> Void)?
-    private let duringSyncCreate: (@Sendable () async -> Void)?
+    private let duringSyncCreate: (@Sendable () async throws -> Void)?
     private let beforeSyncTerminate: (@Sendable () async -> Void)?
 
     /// - Parameter duringSyncCreate: runs inside each create, after the create is recorded and before it returns.
@@ -1170,7 +1266,7 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
         sessionsAfterCreate: [SyncSession]? = nil,
         failOn: String? = nil,
         beforeSyncPause: (@Sendable (String) async -> Void)? = nil,
-        duringSyncCreate: (@Sendable () async -> Void)? = nil,
+        duringSyncCreate: (@Sendable () async throws -> Void)? = nil,
         beforeSyncTerminate: (@Sendable () async -> Void)? = nil
     ) {
         self.syncSessions = syncSessions
@@ -1217,7 +1313,7 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
     func syncCreate(arguments: [String]) async throws -> String {
         try record("syncCreate:\(arguments.joined(separator: " "))")
         lock.withLock { _created = true }
-        await duringSyncCreate?()
+        try await duringSyncCreate?()
         return sessionsAfterCreate?.first(where: { candidate in
             !syncSessions.contains(where: { $0.identifier == candidate.identifier })
         })?.identifier ?? "sync_replacement"

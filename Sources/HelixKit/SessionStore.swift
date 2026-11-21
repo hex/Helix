@@ -53,6 +53,7 @@ public final class SessionStore {
     public private(set) var daemonAutoStart = false
     public private(set) var mutagenVersion: String?
     public private(set) var lastError: String?
+    public private(set) var interruptedEditNotice: String?
     public private(set) var refreshCount = 0
     public var pendingSessionSelection: String?
     public private(set) var bulkPause: BulkPause? {
@@ -105,6 +106,8 @@ public final class SessionStore {
     /// The daemon process whose background priority Helix last set successfully.
     private var backgroundPriorityPID: ProcessID?
     @ObservationIgnored private var daemonPriorityInFlight = false
+    private static let syncEditInProgressKey = "syncEditInProgress"
+    private static let interruptedSyncEditNoticeKey = "interruptedSyncEditNotice"
     private static let bulkPauseKey = "bulkPause"
     private static let sessionHoldsKey = "sessionHolds"
     private static let replacementsUnderWayKey = "replacementsUnderWay"
@@ -136,6 +139,33 @@ public final class SessionStore {
         sessionHolds = savedMessages(forKey: Self.sessionHoldsKey, called: "sessions kept paused after a conflict")
         leftoverNotices = savedMessages(forKey: Self.leftoverNoticesKey, called: "originals left on disk after a conflict")
         holdSessionsWhoseReplacementWasCutShort()
+        restoreInterruptedEditNotice()
+    }
+
+    private func restoreInterruptedEditNotice() {
+        interruptedEditNotice = defaults.string(forKey: Self.interruptedSyncEditNoticeKey)
+        guard defaults.object(forKey: Self.syncEditInProgressKey) != nil else { return }
+        let edit = defaults.dictionary(forKey: Self.syncEditInProgressKey)
+        let notice: String
+        if let original = edit?["original"] as? String, let name = edit?["name"] as? String {
+            let replacementName = edit?["replacementName"] as? String ?? name
+            let candidate = replacementName.isEmpty
+                ? "an unnamed paused edited session"
+                : "a paused edited session named \"\(replacementName)\""
+            let replacement = (edit?["replacement"] as? String).map { "Edited session: \($0)." }
+                ?? "Look for \(candidate)."
+            notice = "Helix quit while editing \"\(name)\". Original session: \(original). \(replacement) Inspect both sessions before resuming either one. Keep only the session you want to sync."
+        } else {
+            notice = "Helix quit during a sync edit and could not read the saved session details. Inspect the session list before resuming any edited session."
+        }
+        interruptedEditNotice = notice
+        defaults.set(notice, forKey: Self.interruptedSyncEditNoticeKey)
+        defaults.removeObject(forKey: Self.syncEditInProgressKey)
+    }
+
+    public func dismissInterruptedEditNotice() {
+        interruptedEditNotice = nil
+        defaults.removeObject(forKey: Self.interruptedSyncEditNoticeKey)
     }
 
     /// Turns each replacement that the last launch saved and never settled into a hold, unless its session
@@ -288,7 +318,23 @@ public final class SessionStore {
     @discardableResult
     public func createSync(options: SyncCreateOptions, alpha: String, beta: String) async -> String? {
         let args = options.arguments(alpha: alpha, beta: beta)
-        return await performAction { _ = try await provider.syncCreate(arguments: args) }
+        do {
+            _ = try await provider.syncCreate(arguments: args)
+            lastError = nil
+            await refresh()
+        } catch {
+            lastError = syncCreateFailure(error, name: options.name)
+        }
+        return lastError
+    }
+
+    private func syncCreateFailure(_ error: Error, name: String?, originalKept: Bool = false) -> String {
+        if let unavailable = error as? SessionCommandsUnavailable {
+            return unavailable.localizedDescription
+        }
+        let session = name.map { "Sync session \"\($0)\"" } ?? "An unnamed sync session"
+        let original = originalKept ? " The original session was kept." : ""
+        return "\(session) may have been created. Check the session list before retrying.\(original) Mutagen reported: \(error.localizedDescription)"
     }
 
     @discardableResult
@@ -354,18 +400,31 @@ public final class SessionStore {
         }
 
         var staged = options
+        staged.preserveEndpointOverrides(from: current)
+        let unsupported = staged.unsupportedEndpointOverrides
+        if !unsupported.isEmpty {
+            let settings = unsupported.joined(separator: ", ")
+            return await finishSyncEdit("Mutagen cannot recreate these endpoint settings: \(settings). The original session was kept.")
+        }
         staged.paused = true
+        var edit = ["original": original, "name": sessionName]
+        if staged.name != sessionName { edit["replacementName"] = staged.name ?? "" }
+        defaults.set(edit, forKey: Self.syncEditInProgressKey)
+        defer { defaults.removeObject(forKey: Self.syncEditInProgressKey) }
+
         let replacement: String
         do {
             replacement = try await provider.syncCreate(arguments: staged.arguments(alpha: alpha, beta: beta))
         } catch {
-            return await finishSyncEdit("Could not prepare the edited session: \(error.localizedDescription). The original session was kept.")
+            return await finishSyncEdit(syncCreateFailure(error, name: options.name, originalKept: true))
         }
         guard !listed.contains(where: { $0.identifier == replacement }) else {
             return await finishSyncEdit("Mutagen returned existing session identifier \(replacement). The original session was kept.")
         }
         replacementBeingEdited = replacement
         updateBulkPause(replacing: original, with: replacement)
+        edit["replacement"] = replacement
+        defaults.set(edit, forKey: Self.syncEditInProgressKey)
 
         if !current.paused {
             do {
