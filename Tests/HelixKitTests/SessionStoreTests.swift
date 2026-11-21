@@ -1012,6 +1012,52 @@ struct ConflictResolutionTests {
         #expect(flushCalls.count == 1)
     }
 
+    @Test("A replacement that only fails to remove the set-aside original resumes, flushes and names the leftover")
+    @MainActor
+    func cleanupFailureStillResolves() async throws {
+        let conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
+        let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [conflict])
+        let recorder = RecordingProvider(syncSessions: [session])
+        let cmdRecorder = CommandRecorder()
+        let transport = FileTransport { executable, arguments in
+            let output = try await cmdRecorder.execute(executable, arguments)
+            if executable == "/bin/rm" { throw CLIError(exitCode: 1, stderr: "permission denied") }
+            return output
+        }
+        let store = SessionStore(provider: recorder, fileTransport: transport)
+
+        await store.resolveConflict(session: session, conflict: conflict, winner: .alpha)
+
+        let token = try replaceToken(copiedBeside: "/tmp/b/file.txt", in: cmdRecorder.commands)
+        #expect(recorder.calls == ["syncPause:sync_1", "syncResume:sync_1", "syncFlush:sync_1"])
+        #expect(store.lastError == "Resolved \"file.txt\", but left the original it replaced at /tmp/b/file.txt.helix-replaced-\(token): permission denied. Delete that path by hand.")
+    }
+
+    @Test("Bulk resolve counts a leftover set-aside original as resolved and names it")
+    @MainActor
+    func bulkCleanupFailureStillResolves() async throws {
+        let c1 = Conflict(root: "a.txt", alphaChanges: [], betaChanges: [])
+        let c2 = Conflict(root: "b.txt", alphaChanges: [], betaChanges: [])
+        let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [c1, c2])
+        let recorder = RecordingProvider(syncSessions: [session])
+        let cmdRecorder = CommandRecorder()
+        let transport = FileTransport { executable, arguments in
+            let output = try await cmdRecorder.execute(executable, arguments)
+            if executable == "/bin/rm", arguments.last?.hasPrefix("/tmp/b/a.txt") == true {
+                throw CLIError(exitCode: 1, stderr: "permission denied")
+            }
+            return output
+        }
+        let store = SessionStore(provider: recorder, fileTransport: transport)
+
+        await store.resolveConflicts(session: session, conflicts: [c1, c2], winner: .alpha)
+
+        let token = try replaceToken(copiedBeside: "/tmp/b/a.txt", in: cmdRecorder.commands)
+        #expect(recorder.calls == ["syncPause:sync_1", "syncResume:sync_1", "syncFlush:sync_1"])
+        #expect(cmdRecorder.commands.filter { $0.executable == "/bin/cp" }.count == 2)
+        #expect(store.lastError == "Resolved \"a.txt\", but left the original it replaced at /tmp/b/a.txt.helix-replaced-\(token): permission denied. Delete that path by hand.")
+    }
+
     @Test("conflictFileInfo returns file metadata from both endpoints")
     @MainActor
     func fileInfo() async {

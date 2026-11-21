@@ -14,7 +14,6 @@ public struct ReplaceError: LocalizedError {
         case checkDestination
         case setOriginalAside
         case moveCopyIntoPlace
-        case removeSetAsideOriginal
         case removeCopy
         case restoreOriginal
     }
@@ -51,14 +50,19 @@ public struct ReplaceError: LocalizedError {
             return "Could not move \(destination) aside to \(setAside): \(cause)"
         case .moveCopyIntoPlace:
             return "Could not move \(incoming) into place at \(destination): \(cause)"
-        case .removeSetAsideOriginal:
-            return "Replaced \(destination), but could not remove the original set aside at \(setAside): \(cause)"
         case .removeCopy:
             return "Could not remove the copy at \(incoming): \(cause)"
         case .restoreOriginal:
             return "Could not move the original back from \(setAside) to \(destination): \(cause)"
         }
     }
+}
+
+/// How a replacement that put the copy in place ended.
+public enum ReplaceOutcome: Sendable, Equatable {
+    case replaced
+    /// The destination holds the copy; the original it displaced is still beside it at `path`.
+    case replacedLeavingOriginal(path: String, reason: String)
 }
 
 public struct FileInfo: Sendable {
@@ -144,8 +148,9 @@ public struct FileTransport: Sendable {
     /// The copy lands beside it as `<name>.helix-incoming-<uuid>`, an existing destination moves aside
     /// to `<name>.helix-replaced-<uuid>`, the copy moves into place, and the set-aside original is removed.
     /// A failed copy leaves `destination` untouched and a failed move into place moves the original back;
-    /// every failure, recovery failures included, is thrown as a `ReplaceError`.
-    public func replace(_ destination: EndpointURL, withCopyOf source: EndpointURL) async throws {
+    /// each of those failures, recovery failures included, is thrown as a `ReplaceError`.
+    /// A set-aside original that cannot be removed does not undo the replacement: it is returned in the outcome.
+    public func replace(_ destination: EndpointURL, withCopyOf source: EndpointURL) async throws -> ReplaceOutcome {
         let token = UUID().uuidString
         let incoming = destination.withPath(destination.path + ".helix-incoming-\(token)")
         let setAside = destination.withPath(destination.path + ".helix-replaced-\(token)")
@@ -206,9 +211,10 @@ public struct FileTransport: Sendable {
             do {
                 try await remove(endpoint: setAside)
             } catch {
-                throw failure(.removeSetAsideOriginal, error)
+                return .replacedLeavingOriginal(path: setAside.formatted, reason: error.localizedDescription)
             }
         }
+        return .replaced
     }
 
     /// Renames a path on its own host; source and target always share the endpoint's machine.

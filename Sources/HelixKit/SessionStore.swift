@@ -525,10 +525,15 @@ public final class SessionStore {
             return
         }
 
+        let leftoverNotice: String?
         do {
             switch try await applyWinner(winner, to: conflict, in: session) {
             case .applied:
                 ConsoleLog.shared.log("  transport succeeded")
+                leftoverNotice = nil
+            case .appliedLeavingOriginal(let notice):
+                ConsoleLog.shared.log("  \(notice)", level: .error)
+                leftoverNotice = notice
             case .winnerMissing(let winnerURL):
                 ConsoleLog.shared.log("  winner file no longer exists at \(winnerURL.formatted)", level: .error)
                 lastError = "The file \"\(conflict.root)\" no longer exists at the source. It may have been renamed or deleted. Try refreshing sessions."
@@ -550,10 +555,10 @@ public final class SessionStore {
             ConsoleLog.shared.log("  resumed session")
             try await provider.syncFlush(session.identifier)
             ConsoleLog.shared.log("  flush succeeded")
-            lastError = nil
+            lastError = leftoverNotice
         } catch {
             ConsoleLog.shared.log("  flush FAILED: \(error.localizedDescription)", level: .error)
-            lastError = error.localizedDescription
+            lastError = ([error.localizedDescription] + [leftoverNotice].compactMap { $0 }).joined(separator: " ")
         }
     }
 
@@ -587,11 +592,16 @@ public final class SessionStore {
         }
 
         var resolved = 0
+        var notices: [String] = []
         for conflict in fileConflicts {
             do {
                 switch try await applyWinner(winner, to: conflict, in: session) {
                 case .applied:
                     resolved += 1
+                case .appliedLeavingOriginal(let notice):
+                    ConsoleLog.shared.log("  \(notice)", level: .error)
+                    resolved += 1
+                    notices.append(notice)
                 case .winnerMissing:
                     ConsoleLog.shared.log("  skipped '\(conflict.root)': winner file no longer exists", level: .error)
                     failed += 1
@@ -608,20 +618,21 @@ public final class SessionStore {
             try await provider.syncResume(session.identifier)
             try await provider.syncFlush(session.identifier)
             if failed > 0 {
-                let summary = "\(failed) of \(conflicts.count) conflicts could not be resolved."
-                lastError = refusal.map { "\(summary) \($0)" } ?? summary
-            } else {
-                lastError = nil
+                notices.insert("\(failed) of \(conflicts.count) conflicts could not be resolved.", at: 0)
+                if let refusal { notices.insert(refusal, at: 1) }
             }
+            lastError = notices.isEmpty ? nil : notices.joined(separator: " ")
         } catch {
             ConsoleLog.shared.log("  flush FAILED: \(error.localizedDescription)", level: .error)
-            lastError = error.localizedDescription
+            lastError = ([error.localizedDescription] + notices).joined(separator: " ")
         }
     }
 
     /// What applying a winner did to the files of one conflict.
     private enum ConflictFileOutcome {
         case applied
+        /// The loser's side matches the winner's; `notice` names the displaced original still on disk for the user to delete.
+        case appliedLeavingOriginal(notice: String)
         /// The winner's file is gone, so neither side was touched.
         case winnerMissing(EndpointURL)
     }
@@ -654,8 +665,14 @@ public final class SessionStore {
             return .winnerMissing(winnerURL)
         }
         ConsoleLog.shared.log("  action: REPLACE \(loserURL.formatted) with a copy of \(winnerURL.formatted)")
-        try await fileTransport.replace(loserURL, withCopyOf: winnerURL)
-        return .applied
+        switch try await fileTransport.replace(loserURL, withCopyOf: winnerURL) {
+        case .replaced:
+            return .applied
+        case .replacedLeavingOriginal(let path, let reason):
+            return .appliedLeavingOriginal(
+                notice: "Resolved \"\(conflict.root)\", but left the original it replaced at \(path): \(reason). Delete that path by hand."
+            )
+        }
     }
 
     /// Why a conflict at the sync root is left alone: its loser path is the endpoint itself.
