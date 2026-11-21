@@ -1677,12 +1677,14 @@ struct ConflictResolutionTests {
         let nextRecorder = CommandRecorder()
         let nextLaunch = SessionStore(provider: provider, fileTransport: FileTransport(execute: nextRecorder.execute), defaults: defaults)
         let holdsAtLaunch = nextLaunch.sessionHolds
+        let errorsLoggedAtLaunch = ConsoleLog.shared.entries.filter { $0.level == .error }.map(\.message)
         await nextLaunch.resumeBulkPause()
         let unresolved = await nextLaunch.resolveConflict(session: paused, conflict: conflict, winner: .beta)
         await gate.open()
         await resolve.value
 
         #expect(holdsAtLaunch == ["sync_1": hold])
+        #expect(errorsLoggedAtLaunch.filter { $0 == hold } == [hold])
         #expect(provider.calls == [])
         #expect(nextRecorder.commands.count == 0)
         #expect(unresolved == ["file.txt"])

@@ -128,6 +128,10 @@ public final class SessionStore {
     private func holdSessionsWhoseReplacementWasCutShort() {
         guard defaults.object(forKey: Self.replacementsUnderWayKey) != nil else { return }
         let cutShort = savedMessages(forKey: Self.replacementsUnderWayKey, called: "replacements Helix was making when it quit")
+        // Every message is logged, also that of a session that keeps an older hold: the log is then the only record of its paths.
+        for message in cutShort.values.sorted() {
+            ConsoleLog.shared.log(message, level: .error)
+        }
         let holds = sessionHolds.merging(cutShort) { held, _ in held }
         sessionHolds = holds
         persist(holds, forKey: Self.sessionHoldsKey)
