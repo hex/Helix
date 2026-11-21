@@ -123,26 +123,28 @@ public enum ConflictWinner: Sendable {
 }
 
 public struct FileTransport: Sendable {
-    let runCommand: @Sendable (String, [String]) async throws -> String
+    private let runCommand: @Sendable (String, [String], Duration) async throws -> String
 
     public init() {
-        self.runCommand = { executable, arguments in
-            try await runProcess(executablePath: executable, arguments: arguments)
+        self.runCommand = { executable, arguments, deadline in
+            try await runProcess(executablePath: executable, arguments: arguments, deadline: deadline)
         }
     }
 
     public init(execute: @escaping @Sendable (String, [String]) async throws -> String) {
-        self.runCommand = execute
+        self.runCommand = { executable, arguments, _ in try await execute(executable, arguments) }
     }
 
     /// Runs a command and logs it and its outcome to the console.
     /// - Parameter exitOneAnswer: what exit status 1 means for a command that answers a yes-or-no
     ///   question, logged in place of "(exit 1)".
-    private func execute(_ executable: String, _ arguments: [String], exitOneAnswer: String? = nil) async throws -> String {
+    private func execute(
+        _ executable: String, _ arguments: [String], deadline: Duration, exitOneAnswer: String? = nil
+    ) async throws -> String {
         let cmd = "\(executable) \(arguments.joined(separator: " "))"
         await MainActor.run { ConsoleLog.shared.log(cmd, level: .command) }
         do {
-            let result = try await runCommand(executable, arguments)
+            let result = try await runCommand(executable, arguments, deadline)
             await MainActor.run { ConsoleLog.shared.log(String(result.prefix(200))) }
             return result
         } catch let error as CLIError where error.exitCode == 1 {
@@ -154,8 +156,8 @@ public struct FileTransport: Sendable {
         }
     }
 
-    private func execute(_ command: SSHCommand, exitOneAnswer: String? = nil) async throws -> String {
-        try await execute(command.executablePath, command.arguments, exitOneAnswer: exitOneAnswer)
+    private func execute(_ command: SSHCommand, deadline: Duration, exitOneAnswer: String? = nil) async throws -> String {
+        try await execute(command.executablePath, command.arguments, deadline: deadline, exitOneAnswer: exitOneAnswer)
     }
 
     // MARK: - Copy
@@ -163,25 +165,25 @@ public struct FileTransport: Sendable {
     public func copy(from source: EndpointURL, to destination: EndpointURL) async throws {
         switch (source, destination) {
         case (.local(let src), .local(let dst)):
-            _ = try await execute("/bin/cp", ["-Rp", src, dst])
+            _ = try await execute("/bin/cp", ["-Rp", src, dst], deadline: CommandDeadline.transfer)
 
         case (.local(let src), .ssh(let user, let host, let port, let path)):
-            _ = try await execute(.recursiveCopy(from: src, to: scpRemote(user: user, host: host, path: path), port: port))
+            _ = try await execute(.recursiveCopy(from: src, to: scpRemote(user: user, host: host, path: path), port: port), deadline: CommandDeadline.transfer)
 
         case (.ssh(let user, let host, let port, let path), .local(let dst)):
-            _ = try await execute(.recursiveCopy(from: scpRemote(user: user, host: host, path: path), to: dst, port: port))
+            _ = try await execute(.recursiveCopy(from: scpRemote(user: user, host: host, path: path), to: dst, port: port), deadline: CommandDeadline.transfer)
 
         case (.local(let src), .docker(let container, let path)):
-            _ = try await execute("/usr/bin/docker", ["cp", src, "\(container):\(path)"])
+            _ = try await execute("/usr/bin/docker", ["cp", src, "\(container):\(path)"], deadline: CommandDeadline.transfer)
 
         case (.docker(let container, let path), .local(let dst)):
-            _ = try await execute("/usr/bin/docker", ["cp", "\(container):\(path)", dst])
+            _ = try await execute("/usr/bin/docker", ["cp", "\(container):\(path)", dst], deadline: CommandDeadline.transfer)
 
         case (.ssh(let u1, let h1, let p1, let path1), .ssh(let u2, let h2, let p2, let path2)):
             _ = try await execute(.recursiveCopy(
                 from: scpRemote(user: u1, host: h1, path: path1), to: scpRemote(user: u2, host: h2, path: path2),
                 port: p1 ?? p2, betweenRemoteHosts: true
-            ))
+            ), deadline: CommandDeadline.transfer)
 
         default:
             // Cross-transport (ssh<->docker, docker<->docker): relay via temp file
@@ -313,11 +315,11 @@ public struct FileTransport: Sendable {
     private func move(_ item: EndpointURL, toPath newPath: String) async throws {
         switch item {
         case .local(let path):
-            _ = try await execute("/bin/mv", [path, newPath])
+            _ = try await execute("/bin/mv", [path, newPath], deadline: CommandDeadline.operation)
         case .ssh(let user, let host, let port, let path):
-            _ = try await execute(.remoteShell(user: user, host: host, port: port, command: "mv \(Self.shellWord(path)) \(Self.shellWord(newPath))"))
+            _ = try await execute(.remoteShell(user: user, host: host, port: port, command: "mv \(Self.shellWord(path)) \(Self.shellWord(newPath))"), deadline: CommandDeadline.operation)
         case .docker(let container, let path):
-            _ = try await execute("/usr/bin/docker", ["exec", container, "mv", path, newPath])
+            _ = try await execute("/usr/bin/docker", ["exec", container, "mv", path, newPath], deadline: CommandDeadline.operation)
         }
     }
 
@@ -327,15 +329,15 @@ public struct FileTransport: Sendable {
         let output: String
         switch endpoint {
         case .local(let path):
-            output = try await execute("/usr/bin/stat", ["-f", "%z %m", path])
+            output = try await execute("/usr/bin/stat", ["-f", "%z %m", path], deadline: CommandDeadline.query)
         case .ssh(let user, let host, let port, let path):
             // GNU stat uses -c, macOS stat uses -f with different format specifiers
             output = try await execute(.remoteShell(
                 user: user, host: host, port: port,
                 command: "stat -c '%s %Y' \(Self.shellWord(path)) 2>/dev/null || stat -f '%z %m' \(Self.shellWord(path))"
-            ))
+            ), deadline: CommandDeadline.query)
         case .docker(let container, let path):
-            output = try await execute("/usr/bin/docker", ["exec", container, "stat", "-c", "%s %Y", path])
+            output = try await execute("/usr/bin/docker", ["exec", container, "stat", "-c", "%s %Y", path], deadline: CommandDeadline.query)
         }
         return try parseStatOutput(output)
     }
@@ -345,11 +347,11 @@ public struct FileTransport: Sendable {
     public func readFile(endpoint: EndpointURL) async throws -> String {
         switch endpoint {
         case .local(let path):
-            return try await execute("/bin/cat", [path])
+            return try await execute("/bin/cat", [path], deadline: CommandDeadline.transfer)
         case .ssh(let user, let host, let port, let path):
-            return try await execute(.remoteShell(user: user, host: host, port: port, command: "cat \(Self.shellWord(path))"))
+            return try await execute(.remoteShell(user: user, host: host, port: port, command: "cat \(Self.shellWord(path))"), deadline: CommandDeadline.transfer)
         case .docker(let container, let path):
-            return try await execute("/usr/bin/docker", ["exec", container, "cat", path])
+            return try await execute("/usr/bin/docker", ["exec", container, "cat", path], deadline: CommandDeadline.transfer)
         }
     }
 
@@ -358,11 +360,11 @@ public struct FileTransport: Sendable {
     public func remove(endpoint: EndpointURL) async throws {
         switch endpoint {
         case .local(let path):
-            _ = try await execute("/bin/rm", ["-rf", path])
+            _ = try await execute("/bin/rm", ["-rf", path], deadline: CommandDeadline.operation)
         case .ssh(let user, let host, let port, let path):
-            _ = try await execute(.remoteShell(user: user, host: host, port: port, command: "rm -rf \(Self.shellWord(path))"))
+            _ = try await execute(.remoteShell(user: user, host: host, port: port, command: "rm -rf \(Self.shellWord(path))"), deadline: CommandDeadline.operation)
         case .docker(let container, let path):
-            _ = try await execute("/usr/bin/docker", ["exec", container, "rm", "-rf", path])
+            _ = try await execute("/usr/bin/docker", ["exec", container, "rm", "-rf", path], deadline: CommandDeadline.operation)
         }
     }
 
@@ -374,14 +376,14 @@ public struct FileTransport: Sendable {
         do {
             switch endpoint {
             case .local(let path):
-                _ = try await execute("/bin/test", ["-d", path], exitOneAnswer: Self.noSuchDirectory)
+                _ = try await execute("/bin/test", ["-d", path], deadline: CommandDeadline.query, exitOneAnswer: Self.noSuchDirectory)
             case .ssh(let user, let host, let port, let path):
                 _ = try await execute(
                     .remoteShell(user: user, host: host, port: port, command: "test -d \(Self.shellWord(path))"),
-                    exitOneAnswer: Self.noSuchDirectory
+                    deadline: CommandDeadline.query, exitOneAnswer: Self.noSuchDirectory
                 )
             case .docker(let container, let path):
-                _ = try await execute("/usr/bin/docker", ["exec", container, "test", "-d", path], exitOneAnswer: Self.noSuchDirectory)
+                _ = try await execute("/usr/bin/docker", ["exec", container, "test", "-d", path], deadline: CommandDeadline.query, exitOneAnswer: Self.noSuchDirectory)
             }
             return true
         } catch let error as CLIError where error.exitCode == 1 {
@@ -395,11 +397,11 @@ public struct FileTransport: Sendable {
         do {
             switch endpoint {
             case .local(let path):
-                _ = try await execute("/bin/test", ["-L", path])
+                _ = try await execute("/bin/test", ["-L", path], deadline: CommandDeadline.query)
             case .ssh(let user, let host, let port, let path):
-                _ = try await execute(.remoteShell(user: user, host: host, port: port, command: "test -L \(Self.shellWord(path))"))
+                _ = try await execute(.remoteShell(user: user, host: host, port: port, command: "test -L \(Self.shellWord(path))"), deadline: CommandDeadline.query)
             case .docker(let container, let path):
-                _ = try await execute("/usr/bin/docker", ["exec", container, "test", "-L", path])
+                _ = try await execute("/usr/bin/docker", ["exec", container, "test", "-L", path], deadline: CommandDeadline.query)
             }
             return true
         } catch let error as CLIError where error.exitCode == 1 {
@@ -411,11 +413,11 @@ public struct FileTransport: Sendable {
         let output: String
         switch endpoint {
         case .local(let path):
-            output = try await execute("/usr/bin/readlink", [path])
+            output = try await execute("/usr/bin/readlink", [path], deadline: CommandDeadline.query)
         case .ssh(let user, let host, let port, let path):
-            output = try await execute(.remoteShell(user: user, host: host, port: port, command: "readlink \(Self.shellWord(path))"))
+            output = try await execute(.remoteShell(user: user, host: host, port: port, command: "readlink \(Self.shellWord(path))"), deadline: CommandDeadline.query)
         case .docker(let container, let path):
-            output = try await execute("/usr/bin/docker", ["exec", container, "readlink", path])
+            output = try await execute("/usr/bin/docker", ["exec", container, "readlink", path], deadline: CommandDeadline.query)
         }
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -426,11 +428,11 @@ public struct FileTransport: Sendable {
         do {
             switch endpoint {
             case .local(let path):
-                _ = try await execute("/bin/test", ["-e", path])
+                _ = try await execute("/bin/test", ["-e", path], deadline: CommandDeadline.query)
             case .ssh(let user, let host, let port, let path):
-                _ = try await execute(.remoteShell(user: user, host: host, port: port, command: "test -e \(Self.shellWord(path))"))
+                _ = try await execute(.remoteShell(user: user, host: host, port: port, command: "test -e \(Self.shellWord(path))"), deadline: CommandDeadline.query)
             case .docker(let container, let path):
-                _ = try await execute("/usr/bin/docker", ["exec", container, "test", "-e", path])
+                _ = try await execute("/usr/bin/docker", ["exec", container, "test", "-e", path], deadline: CommandDeadline.query)
             }
             return true
         } catch let error as CLIError where error.exitCode == 1 {
@@ -440,14 +442,14 @@ public struct FileTransport: Sendable {
 
     // MARK: - Run Command
 
-    public func run(on endpoint: EndpointURL, command: String) async throws -> String {
+    public func run(on endpoint: EndpointURL, command: String, deadline: Duration = CommandDeadline.query) async throws -> String {
         switch endpoint {
         case .local(let path):
-            return try await execute("/bin/sh", ["-c", "cd \(Self.shellWord(path)) && \(command)"])
+            return try await execute("/bin/sh", ["-c", "cd \(Self.shellWord(path)) && \(command)"], deadline: deadline)
         case .ssh(let user, let host, let port, let path):
-            return try await execute(.remoteShell(user: user, host: host, port: port, command: "cd \(Self.shellWord(path)) && \(command)"))
+            return try await execute(.remoteShell(user: user, host: host, port: port, command: "cd \(Self.shellWord(path)) && \(command)"), deadline: deadline)
         case .docker(let container, let path):
-            return try await execute("/usr/bin/docker", ["exec", container, "sh", "-c", "cd \(Self.shellWord(path)) && \(command)"])
+            return try await execute("/usr/bin/docker", ["exec", container, "sh", "-c", "cd \(Self.shellWord(path)) && \(command)"], deadline: deadline)
         }
     }
 

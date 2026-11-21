@@ -59,7 +59,8 @@ public struct MutagenDaemon: DaemonProcess {
         do {
             output = try await runProcess(
                 executablePath: "/usr/bin/pgrep",
-                arguments: ["-U", String(getuid()), "-f", "-x", "--", Self.literalPattern("\(cliPath) daemon run")]
+                arguments: ["-U", String(getuid()), "-f", "-x", "--", Self.literalPattern("\(cliPath) daemon run")],
+                deadline: CommandDeadline.query
             )
         } catch let error as CLIError where error.exitCode == 1 {
             // pgrep exits 1 when no process matches.
@@ -78,7 +79,8 @@ public struct MutagenDaemon: DaemonProcess {
     public func setBackgroundPriority(_ enabled: Bool, pid: ProcessID) async throws {
         _ = try await runProcess(
             executablePath: "/usr/sbin/taskpolicy",
-            arguments: [enabled ? "-b" : "-B", "-p", pid.description]
+            arguments: [enabled ? "-b" : "-B", "-p", pid.description],
+            deadline: CommandDeadline.query
         )
     }
 

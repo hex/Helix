@@ -1,111 +1,201 @@
-// ABOUTME: Async wrapper for running shell processes with stdout/stderr capture.
-// ABOUTME: Shared by CLI (mutagen commands) and FileTransport (cp/scp/docker-cp).
+// ABOUTME: Runs commands with bounded execution and captures their output.
+// ABOUTME: Terminates a child and closes its pipes on cancellation or deadline expiry.
 
+import Darwin
+import Dispatch
 import Foundation
 
-/// Runs a command to its end and returns its standard output, or throws `CLIError` when it exits non-zero.
-///
-/// Cancelling the calling task sends the child SIGTERM. The call still waits for the child to end: it throws
-/// `CancellationError` when a signal ended the child, and reports the child's own exit otherwise. A call made
-/// in a task that is already cancelled throws `CancellationError` without starting the command.
-public func runProcess(executablePath: String, arguments: [String]) async throws -> String {
+public enum CommandDeadline {
+    public static let query: Duration = .seconds(15)
+    public static let operation: Duration = .seconds(45)
+    public static let transfer: Duration = .seconds(900)
+    static let terminationGrace: Duration = .milliseconds(250)
+}
+
+public struct ProcessDeadlineError: LocalizedError, Sendable {
+    public let executablePath: String
+    public let deadline: Duration
+
+    public var errorDescription: String? {
+        "\(executablePath) exceeded its deadline of \(deadline)."
+    }
+}
+
+/// Returns the child's stdout or throws its launch error, exit error, cancellation, or deadline error.
+public func runProcess(
+    executablePath: String, arguments: [String], deadline: Duration = CommandDeadline.query
+) async throws -> String {
+    precondition(deadline > .zero, "Command deadlines must be positive")
     try Task.checkCancellation()
 
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: executablePath)
-    process.arguments = arguments
-
-    let stdoutPipe = Pipe()
-    let stderrPipe = Pipe()
-    process.standardOutput = stdoutPipe
-    process.standardError = stderrPipe
-
-    // The end arrives through the termination handler: waitUntilExit, called off the main thread,
-    // can miss the exit of a short-lived child and then never return.
-    let childEnd = ChildEnd()
-    process.terminationHandler = { finished in
-        childEnd.report(ChildEnd.Report(status: finished.terminationStatus, reason: finished.terminationReason))
-    }
-
-    try process.run()
-
-    let child = RunningChild(process: process)
+    let child = RunningChild(executablePath: executablePath, arguments: arguments, deadline: deadline)
     return try await withTaskCancellationHandler {
-        // Both pipes are drained while the child runs: a child whose output fills a pipe's
-        // buffer blocks until that pipe is read, and never exits.
-        async let stdoutData = readToEnd(stdoutPipe.fileHandleForReading)
-        async let stderrData = readToEnd(stderrPipe.fileHandleForReading)
-        let stdout = String(data: await stdoutData, encoding: .utf8) ?? ""
-        let stderr = String(data: await stderrData, encoding: .utf8) ?? ""
-        let end = await childEnd.reported()
-
-        if end.reason == .uncaughtSignal && Task.isCancelled {
-            throw CancellationError()
+        try await withCheckedThrowingContinuation { continuation in
+            child.launch(continuation)
         }
-        guard end.status == 0 else {
-            throw CLIError(
-                exitCode: end.status,
-                stderr: stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            )
-        }
-        return stdout
     } onCancel: {
-        child.terminate()
+        child.interrupt(throwing: CancellationError())
     }
 }
 
-/// Reads a pipe to its end on a dispatch thread, so the blocking read never holds a Swift concurrency thread.
-private func readToEnd(_ handle: FileHandle) async -> Data {
-    await withCheckedContinuation { continuation in
-        DispatchQueue.global().async {
-            continuation.resume(returning: handle.readDataToEndOfFile())
+private final class RunningChild: @unchecked Sendable {
+    // The queue owns the process, the pipe buffers, and all lifecycle transitions.
+    private let queue = DispatchQueue(label: "helix.process")
+    private let process = Process()
+    private let executablePath: String
+    private let deadline: Duration
+    private let stdoutPipe = Pipe()
+    private let stderrPipe = Pipe()
+
+    private var continuation: CheckedContinuation<String, Error>?
+    private var channels: [DispatchIO] = []
+    private var deadlineTimer: DispatchSourceTimer?
+    private var openPipes = 0
+    private var stdout = Data()
+    private var stderr = Data()
+    private var exitStatus: Int32?
+    private var processGroup: pid_t?
+    private var interruption: Error?
+    private var escalating = false
+    private var finished = false
+
+    init(executablePath: String, arguments: [String], deadline: Duration) {
+        self.executablePath = executablePath
+        self.deadline = deadline
+        process.executableURL = URL(fileURLWithPath: executablePath)
+        process.arguments = arguments
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+    }
+
+    func launch(_ continuation: CheckedContinuation<String, Error>) {
+        queue.async { [self] in
+            self.continuation = continuation
+            if let interruption = self.interruption {
+                self.complete(.failure(interruption))
+                return
+            }
+
+            // Process delivers the exit through this handler even for very short-lived commands.
+            self.process.terminationHandler = { [self] child in
+                let status = child.terminationStatus
+                queue.async {
+                    self.exitStatus = status
+                    self.finishIfReady()
+                }
+            }
+
+            do {
+                try self.process.run()
+            } catch {
+                self.complete(.failure(error))
+                return
+            }
+
+            let pid = self.process.processIdentifier
+            let group = getpgid(pid)
+            // The child may have exited while its descendants still hold its process group.
+            if group == pid || (group == -1 && errno == ESRCH && kill(-pid, 0) == 0) {
+                self.processGroup = pid
+            }
+
+            // Drain both pipes while the child runs so a full buffer cannot stall it.
+            self.openPipes = 2
+            self.channels = [
+                self.drain(self.stdoutPipe.fileHandleForReading, as: \.stdout),
+                self.drain(self.stderrPipe.fileHandleForReading, as: \.stderr),
+            ]
+            let timer = DispatchSource.makeTimerSource(queue: self.queue)
+            timer.schedule(deadline: .now() + self.deadline.timeInterval)
+            timer.setEventHandler { [weak self] in
+                guard let self else { return }
+                self.beginInterruption(ProcessDeadlineError(executablePath: self.executablePath, deadline: self.deadline))
+            }
+            self.deadlineTimer = timer
+            timer.activate()
         }
     }
-}
 
-/// A launched child that any thread may ask to end.
-private struct RunningChild: @unchecked Sendable {
-    // Process is not Sendable. This type only ever calls terminate on it, which sends the child
-    // a signal and reads no state that the launching task writes after launch.
-    private let process: Process
-
-    init(process: Process) {
-        self.process = process
+    func interrupt(throwing error: Error) {
+        queue.async { self.beginInterruption(error) }
     }
 
-    func terminate() {
-        process.terminate()
-    }
-}
+    private func beginInterruption(_ error: Error) {
+        guard !finished, interruption == nil else { return }
+        interruption = error
+        guard continuation != nil else { return }
 
-/// How a child ended, handed from its termination handler to the one task that waits for it.
-/// The wait does not end when the waiting task is cancelled, only when the child does.
-private final class ChildEnd: @unchecked Sendable {
-    struct Report {
-        let status: Int32
-        let reason: Process.TerminationReason
-    }
+        escalating = true
+        signal(SIGTERM)
+        for channel in channels { channel.close(flags: .stop) }
 
-    private let lock = NSLock()
-    private var report: Report?
-    private var waiter: CheckedContinuation<Report, Never>?
-
-    func report(_ report: Report) {
-        lock.lock()
-        self.report = report
-        let waiter = self.waiter
-        self.waiter = nil
-        lock.unlock()
-        waiter?.resume(returning: report)
-    }
-
-    func reported() async -> Report {
-        await withCheckedContinuation { continuation in
-            lock.lock()
-            let report = self.report
-            if report == nil { waiter = continuation }
-            lock.unlock()
-            if let report { continuation.resume(returning: report) }
+        queue.asyncAfter(deadline: .now() + CommandDeadline.terminationGrace.timeInterval) {
+            self.signal(SIGKILL)
+            self.escalating = false
+            self.finishIfReady()
         }
+    }
+
+    private func signal(_ signal: Int32) {
+        if let processGroup {
+            kill(-processGroup, signal)
+        } else if exitStatus == nil, process.isRunning {
+            kill(process.processIdentifier, signal)
+        }
+    }
+
+    private func drain(_ handle: FileHandle, as output: ReferenceWritableKeyPath<RunningChild, Data>) -> DispatchIO {
+        let channel = DispatchIO(type: .stream, fileDescriptor: handle.fileDescriptor, queue: queue) { error in
+            do {
+                try handle.close()
+            } catch {
+                self.beginInterruption(error)
+            }
+            if error != 0 { self.pipeFailed(error) }
+            self.openPipes -= 1
+            self.finishIfReady()
+        }
+        channel.read(offset: 0, length: Int.max, queue: queue) { done, bytes, error in
+            if let bytes { self[keyPath: output].append(contentsOf: bytes) }
+            if error != 0 { self.pipeFailed(error) }
+            if done { channel.close() }
+        }
+        return channel
+    }
+
+    private func pipeFailed(_ error: Int32) {
+        beginInterruption(NSError(domain: NSPOSIXErrorDomain, code: Int(error), userInfo: [
+            NSLocalizedDescriptionKey: "Could not read output from \(executablePath): \(String(cString: strerror(error)))",
+        ]))
+    }
+
+    private func finishIfReady() {
+        guard !finished, !escalating, let exitStatus, openPipes == 0 else { return }
+        if let interruption {
+            complete(.failure(interruption))
+        } else if exitStatus == 0 {
+            complete(.success(String(data: stdout, encoding: .utf8) ?? ""))
+        } else {
+            let message = String(data: stderr, encoding: .utf8) ?? ""
+            complete(.failure(CLIError(exitCode: exitStatus, stderr: message.trimmingCharacters(in: .whitespacesAndNewlines))))
+        }
+    }
+
+    private func complete(_ result: Result<String, Error>) {
+        finished = true
+        deadlineTimer?.cancel()
+        deadlineTimer = nil
+        process.terminationHandler = nil
+        channels.removeAll()
+        let waiting = continuation
+        continuation = nil
+        waiting?.resume(with: result)
+    }
+}
+
+private extension Duration {
+    var timeInterval: TimeInterval {
+        let (seconds, attoseconds) = components
+        return Double(seconds) + Double(attoseconds) / 1e18
     }
 }

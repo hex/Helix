@@ -28,24 +28,24 @@ public struct CLI: Sendable {
     }
 
     public func syncList() async throws -> [SyncSession] {
-        let output = try await run(["sync", "list", "--template", "{{json .}}"])
+        let output = try await run(["sync", "list", "--template", "{{json .}}"], deadline: CommandDeadline.query)
         return try JSONDecoder().decode([SyncSession].self, from: Data(output.utf8))
     }
 
     public func forwardList() async throws -> [ForwardSession] {
-        let output = try await run(["forward", "list", "--template", "{{json .}}"])
+        let output = try await run(["forward", "list", "--template", "{{json .}}"], deadline: CommandDeadline.query)
         return try JSONDecoder().decode([ForwardSession].self, from: Data(output.utf8))
     }
 
     public func version() async throws -> String {
-        let output = try await run(["version"])
+        let output = try await run(["version"], deadline: CommandDeadline.query)
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - Session Creation
 
     public func syncCreate(arguments: [String]) async throws -> String {
-        let output = try await run(arguments)
+        let output = try await run(arguments, deadline: CommandDeadline.operation)
         let prefix = "Created session "
         guard let receipt = output.split(whereSeparator: \.isNewline).last, receipt.hasPrefix(prefix) else {
             throw SyncCreateReceiptError()
@@ -59,50 +59,50 @@ public struct CLI: Sendable {
     }
 
     public func forwardCreate(arguments: [String]) async throws {
-        _ = try await run(arguments)
+        _ = try await run(arguments, deadline: CommandDeadline.operation)
     }
 
     // MARK: - Sync Actions
 
     public func syncPause(_ identifier: String) async throws {
-        _ = try await run(["sync", "pause", identifier])
+        _ = try await run(["sync", "pause", identifier], deadline: CommandDeadline.operation)
     }
 
     public func syncResume(_ identifier: String) async throws {
-        _ = try await run(["sync", "resume", identifier])
+        _ = try await run(["sync", "resume", identifier], deadline: CommandDeadline.operation)
     }
 
     public func syncFlush(_ identifier: String) async throws {
-        _ = try await run(["sync", "flush", identifier])
+        _ = try await run(["sync", "flush", identifier], deadline: CommandDeadline.transfer)
     }
 
     public func syncReset(_ identifier: String) async throws {
-        _ = try await run(["sync", "reset", identifier])
+        _ = try await run(["sync", "reset", identifier], deadline: CommandDeadline.operation)
     }
 
     public func syncTerminate(_ identifier: String) async throws {
-        _ = try await run(["sync", "terminate", identifier])
+        _ = try await run(["sync", "terminate", identifier], deadline: CommandDeadline.operation)
     }
 
     // MARK: - Forward Actions
 
     public func forwardPause(_ identifier: String) async throws {
-        _ = try await run(["forward", "pause", identifier])
+        _ = try await run(["forward", "pause", identifier], deadline: CommandDeadline.operation)
     }
 
     public func forwardResume(_ identifier: String) async throws {
-        _ = try await run(["forward", "resume", identifier])
+        _ = try await run(["forward", "resume", identifier], deadline: CommandDeadline.operation)
     }
 
     public func forwardTerminate(_ identifier: String) async throws {
-        _ = try await run(["forward", "terminate", identifier])
+        _ = try await run(["forward", "terminate", identifier], deadline: CommandDeadline.operation)
     }
 
     // MARK: - Daemon
 
     public func daemonRunning() async throws -> Bool {
         do {
-            _ = try await run(["daemon", "start"])
+            _ = try await run(["daemon", "start"], deadline: CommandDeadline.operation)
             return true
         } catch let error as CLIError {
             if error.exitCode != 0 {
@@ -113,22 +113,22 @@ public struct CLI: Sendable {
     }
 
     public func daemonStop() async throws {
-        _ = try await run(["daemon", "stop"])
+        _ = try await run(["daemon", "stop"], deadline: CommandDeadline.operation)
     }
 
     public func daemonStart() async throws {
-        _ = try await run(["daemon", "start"])
+        _ = try await run(["daemon", "start"], deadline: CommandDeadline.operation)
     }
 
     public func daemonRegister() async throws {
-        _ = try await run(["daemon", "register"])
+        _ = try await run(["daemon", "register"], deadline: CommandDeadline.operation)
     }
 
     public func daemonUnregister() async throws {
-        _ = try await run(["daemon", "unregister"])
+        _ = try await run(["daemon", "unregister"], deadline: CommandDeadline.operation)
     }
 
-    func run(_ arguments: [String]) async throws -> String {
-        try await runProcess(executablePath: executablePath, arguments: baseArguments + arguments)
+    private func run(_ arguments: [String], deadline: Duration) async throws -> String {
+        try await runProcess(executablePath: executablePath, arguments: baseArguments + arguments, deadline: deadline)
     }
 }
