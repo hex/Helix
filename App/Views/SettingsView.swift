@@ -78,6 +78,14 @@ struct SettingsView: View {
                     }
                 }
 
+                Toggle("Run sync at background priority", isOn: Binding(
+                    get: { store.daemonBackgroundPriority },
+                    set: { enabled in Task { await store.setDaemonBackgroundPriority(enabled) } }
+                ))
+
+                Text("Mutagen yields CPU and disk to whatever you are doing. Transfers slow down while the Mac is busy.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             if let error = store.lastError {
@@ -154,6 +162,7 @@ struct SettingsView: View {
                 }
                 .onChange(of: cliPath) { _, newPath in
                     store.replaceProvider(CLI(executablePath: newPath))
+                    store.replaceDaemonProcess(MutagenDaemon(cliPath: newPath))
                 }
 
                 Text("Path to the mutagen binary. Changes take effect immediately.")

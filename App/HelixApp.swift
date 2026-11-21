@@ -11,12 +11,12 @@ struct HelixApp: App {
     @State private var store: SessionStore
     private let updaterController: SPUStandardUpdaterController
 
-    static let defaultCLIPath = "/opt/homebrew/bin/mutagen"
+    static let defaultCLIPath = CLI.defaultExecutablePath
 
     init() {
         let path = UserDefaults.standard.string(forKey: "cliPath") ?? Self.defaultCLIPath
         let cli = CLI(executablePath: path)
-        _store = State(initialValue: SessionStore(provider: cli))
+        _store = State(initialValue: SessionStore(provider: cli, daemonProcess: MutagenDaemon(cliPath: path)))
         updaterController = SPUStandardUpdaterController(
             startingUpdater: true,
             updaterDelegate: nil,

@@ -99,6 +99,10 @@ public final class SessionStore {
         self.provider = provider
     }
 
+    public func replaceDaemonProcess(_ daemonProcess: any DaemonProcess) {
+        self.daemonProcess = daemonProcess
+    }
+
     public var totalSessionCount: Int {
         syncSessions.count + forwardSessions.count
     }
