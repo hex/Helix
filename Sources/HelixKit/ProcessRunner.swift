@@ -25,16 +25,42 @@ public struct ProcessDeadlineError: LocalizedError, Sendable {
 public func runProcess(
     executablePath: String, arguments: [String], deadline: Duration = CommandDeadline.query
 ) async throws -> String {
-    precondition(deadline > .zero, "Command deadlines must be positive")
-    try Task.checkCancellation()
+    try await ProcessRunner.shared.run(executablePath: executablePath, arguments: arguments, deadline: deadline)
+}
 
-    let child = RunningChild(executablePath: executablePath, arguments: arguments, deadline: deadline)
-    return try await withTaskCancellationHandler {
-        try await withCheckedThrowingContinuation { continuation in
-            child.launch(continuation)
+public actor ProcessRunner {
+    public static let shared = ProcessRunner()
+
+    private var children: [ObjectIdentifier: RunningChild] = [:]
+    private var isShuttingDown = false
+
+    func run(executablePath: String, arguments: [String], deadline: Duration) async throws -> String {
+        precondition(deadline > .zero, "Command deadlines must be positive")
+        try Task.checkCancellation()
+        guard !isShuttingDown else { throw CancellationError() }
+
+        let child = RunningChild(executablePath: executablePath, arguments: arguments, deadline: deadline)
+        let identifier = ObjectIdentifier(child)
+        children[identifier] = child
+        defer { children.removeValue(forKey: identifier) }
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                child.launch(continuation)
+            }
+        } onCancel: {
+            child.interrupt(throwing: CancellationError())
         }
-    } onCancel: {
-        child.interrupt(throwing: CancellationError())
+    }
+
+    /// Closes command admission, ends every tracked command, and returns their count.
+    @discardableResult
+    public func terminateAll() async -> Int {
+        isShuttingDown = true
+        let running = Array(children.values)
+        for child in running { child.interrupt(throwing: CancellationError()) }
+        for child in running { await child.waitUntilFinished() }
+        children.removeAll()
+        return running.count
     }
 }
 
@@ -48,6 +74,7 @@ private final class RunningChild: @unchecked Sendable {
     private let stderrPipe = Pipe()
 
     private var continuation: CheckedContinuation<String, Error>?
+    private var completionWaiters: [CheckedContinuation<Void, Never>] = []
     private var channels: [DispatchIO] = []
     private var deadlineTimer: DispatchSourceTimer?
     private var openPipes = 0
@@ -120,6 +147,18 @@ private final class RunningChild: @unchecked Sendable {
         queue.async { self.beginInterruption(error) }
     }
 
+    func waitUntilFinished() async {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                if self.finished {
+                    continuation.resume()
+                } else {
+                    self.completionWaiters.append(continuation)
+                }
+            }
+        }
+    }
+
     private func beginInterruption(_ error: Error) {
         guard !finished, interruption == nil else { return }
         interruption = error
@@ -190,6 +229,8 @@ private final class RunningChild: @unchecked Sendable {
         let waiting = continuation
         continuation = nil
         waiting?.resume(with: result)
+        for waiter in completionWaiters { waiter.resume() }
+        completionWaiters.removeAll()
     }
 }
 
