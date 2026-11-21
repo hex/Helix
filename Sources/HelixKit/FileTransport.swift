@@ -369,14 +369,14 @@ public struct FileTransport: Sendable {
     public func run(on endpoint: EndpointURL, command: String) async throws -> String {
         switch endpoint {
         case .local(let path):
-            return try await execute("/bin/sh", ["-c", "cd '\(path)' && \(command)"])
+            return try await execute("/bin/sh", ["-c", "cd \(Self.shellWord(path)) && \(command)"])
         case .ssh(let user, let host, let port, let path):
             var args: [String] = []
             if let port { args += ["-p", "\(port)"] }
             args += [sshTarget(user: user, host: host), "cd \(Self.shellWord(path)) && \(command)"]
             return try await execute("/usr/bin/ssh", args)
         case .docker(let container, let path):
-            return try await execute("/usr/bin/docker", ["exec", container, "sh", "-c", "cd '\(path)' && \(command)"])
+            return try await execute("/usr/bin/docker", ["exec", container, "sh", "-c", "cd \(Self.shellWord(path)) && \(command)"])
         }
     }
 
@@ -409,7 +409,7 @@ public struct FileTransport: Sendable {
         return args
     }
 
-    /// Makes a path exactly one inert word for a POSIX shell on a remote host.
+    /// Makes a path exactly one inert word for a POSIX shell.
     /// Single quotes stop every expansion; an embedded single quote is written as `'\''`.
     /// A leading `~/` becomes `"$HOME"/` followed by the single-quoted rest, so only `$HOME` expands.
     static func shellWord(_ path: String) -> String {
