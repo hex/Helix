@@ -42,6 +42,12 @@ public enum HealthStatus: Sendable {
     case idle
 }
 
+public enum DaemonStatus: String, Sendable {
+    case running = "Running"
+    case stopped = "Stopped"
+    case unknown = "Status unknown"
+}
+
 @MainActor
 @Observable
 public final class SessionStore {
@@ -49,7 +55,8 @@ public final class SessionStore {
 
     public private(set) var syncSessions: [SyncSession] = []
     public private(set) var forwardSessions: [ForwardSession] = []
-    public private(set) var daemonRunning = false
+    public private(set) var daemonStatus = DaemonStatus.stopped
+    public var daemonRunning: Bool { daemonStatus == .running }
     public private(set) var daemonAutoStart = false
     public private(set) var mutagenVersion: String?
     public private(set) var lastError: String?
@@ -296,7 +303,7 @@ public final class SessionStore {
             if force || forwardDigest(lists.forward) != forwardDigest(forwardSessions) { forwardSessions = lists.forward }
             forgetSessions(notListedIn: lists.sync)
             forgetMissingEditPairs(existingEditPairs, listed: lists.sync)
-            if !daemonRunning { daemonRunning = true }
+            if !daemonRunning { daemonStatus = .running }
             if lastError != nil { lastError = nil }
             return true
         } catch is CancellationError {
@@ -305,7 +312,7 @@ public final class SessionStore {
         } catch {
             guard activeSessionLists[id] != nil else { return false }
             if !daemonRunning || lastError != error.localizedDescription {
-                daemonRunning = false
+                daemonStatus = .stopped
                 lastError = error.localizedDescription
             }
             return false
@@ -795,7 +802,7 @@ public final class SessionStore {
             try await provider.daemonStart()
             defaults.removeObject(forKey: Self.daemonStoppedKey)
             daemonControl = .managed
-            daemonRunning = true
+            daemonStatus = .running
             lastError = nil
             await refresh()
             schedulePollingIfManaged(refreshImmediately: false)
@@ -807,7 +814,7 @@ public final class SessionStore {
 
     @discardableResult
     public func stopDaemon() async -> Bool {
-        guard daemonControl == .managed || (daemonControl == .stopped && daemonRunning) else { return false }
+        guard daemonControl == .managed else { return false }
 
         if let operation = operationBlockingDaemonStop {
             lastError = "Wait for the \(operation) to finish before stopping the Mutagen daemon."
@@ -826,19 +833,37 @@ public final class SessionStore {
 
         do {
             try await provider.daemonStop()
-            daemonControl = .stopped
-            daemonRunning = false
-            syncSessions = []
-            forwardSessions = []
-            backgroundPriorityPID = nil
-            setDaemonPriorityError(daemonBackgroundPriorityRequested ? "Mutagen daemon not found." : nil)
-            lastError = nil
-            return true
         } catch {
-            daemonControl = .stopped
-            lastError = error.localizedDescription
-            return false
+            let stopError = "Could not stop Mutagen: \(error.localizedDescription)"
+            do {
+                if try await daemonProcess.pid() != nil {
+                    resumeManagingDaemon(status: .running, error: stopError)
+                    return false
+                }
+            } catch {
+                resumeManagingDaemon(
+                    status: .unknown, error: "\(stopError). Could not verify its status: \(error.localizedDescription)"
+                )
+                return false
+            }
         }
+
+        daemonControl = .stopped
+        daemonStatus = .stopped
+        syncSessions = []
+        forwardSessions = []
+        backgroundPriorityPID = nil
+        setDaemonPriorityError(daemonBackgroundPriorityRequested ? "Mutagen daemon not found." : nil)
+        lastError = nil
+        return true
+    }
+
+    private func resumeManagingDaemon(status: DaemonStatus, error: String) {
+        defaults.removeObject(forKey: Self.daemonStoppedKey)
+        daemonStatus = status
+        daemonControl = .managed
+        lastError = error
+        schedulePollingIfManaged(refreshImmediately: false)
     }
 
     private var operationBlockingDaemonStop: String? {

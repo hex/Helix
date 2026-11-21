@@ -536,6 +536,38 @@ struct SessionStoreTests {
         #expect(Set(afterStart.calls) == ["syncList", "forwardList"])
     }
 
+    @Test("A failed Stop checks actual liveness and keeps the matching controls usable",
+          arguments: [true, false])
+    @MainActor
+    func failedStopReconcilesLiveness(daemonPresent: Bool) async throws {
+        let suite = "FailedStopTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let session = makeSyncSession(id: "sync_1", name: "project")
+        let provider = RecordingProvider(syncSessions: [session], failOn: "daemonStop")
+        let daemon = RecordingDaemonProcess(pid: daemonPresent ? 123 : nil)
+        let store = SessionStore(provider: provider, defaults: defaults, daemonProcess: daemon)
+        await store.refresh()
+
+        let stopped = await store.stopDaemon()
+
+        #expect(stopped == !daemonPresent)
+        #expect(store.daemonRunning == daemonPresent)
+        #expect(defaults.bool(forKey: "daemonStoppedByHelix") == !daemonPresent)
+        if daemonPresent {
+            #expect(store.lastError == "Could not stop Mutagen: simulated failure")
+            await store.pauseSync(session.identifier)
+            #expect(provider.calls == ["daemonStop", "syncPause:sync_1"])
+        } else {
+            #expect(store.syncSessions == [])
+            // Restart starts once Stop has confirmed the daemon is gone.
+            if stopped { await store.startDaemon() }
+            #expect(provider.calls == ["daemonStop", "daemonStart"])
+            #expect(store.daemonRunning)
+            #expect(!defaults.bool(forKey: "daemonStoppedByHelix"))
+        }
+    }
+
     @Test("Daemon register sets autoStart to true")
     @MainActor
     func daemonRegister() async {

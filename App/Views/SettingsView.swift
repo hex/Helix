@@ -55,9 +55,9 @@ struct SettingsView: View {
             Section("Daemon") {
                 HStack {
                     Circle()
-                        .fill(store.daemonRunning ? .green : .red)
+                        .fill(daemonStatusColor)
                         .frame(width: 8, height: 8)
-                    Text(store.daemonRunning ? "Running" : "Stopped")
+                    Text(store.daemonStatus.rawValue)
                     Spacer()
 
                     if store.daemonRunning {
@@ -128,6 +128,14 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    private var daemonStatusColor: Color {
+        switch store.daemonStatus {
+        case .running: .green
+        case .stopped: .red
+        case .unknown: .orange
+        }
     }
 
     // MARK: - Advanced Tab
