@@ -231,6 +231,65 @@ struct FileTransportReplaceDiskTests {
         }
     }
 
+    @Test("a file replaces a symlink to a directory without landing inside that directory")
+    func fileOverSymlinkToDirectory() async throws {
+        try await withScratchDirectory { scratch in
+            let winner = scratch.appendingPathComponent("winner.txt")
+            let loser = scratch.appendingPathComponent("loser.txt")
+            let linked = scratch.appendingPathComponent("linked")
+            try "winner".write(to: winner, atomically: false, encoding: .utf8)
+            try FileManager.default.createDirectory(at: linked, withIntermediateDirectories: false)
+            try "inside".write(to: linked.appendingPathComponent("inside.txt"), atomically: false, encoding: .utf8)
+            try FileManager.default.createSymbolicLink(atPath: loser.path, withDestinationPath: "linked")
+
+            _ = try await FileTransport().replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+
+            #expect(try FileManager.default.attributesOfItem(atPath: loser.path)[.type] as? FileAttributeType == .typeRegular)
+            #expect(try text(at: loser) == "winner")
+            #expect(try FileManager.default.contentsOfDirectory(atPath: linked.path) == ["inside.txt"])
+            #expect(try FileManager.default.contentsOfDirectory(atPath: scratch.path).sorted() == ["linked", "loser.txt", "winner.txt"])
+        }
+    }
+
+    @Test("a file's move over a file that ran and then reported failure counts as replaced")
+    func renameOverFileRanThenFailed() async throws {
+        try await withScratchDirectory { scratch in
+            let winner = scratch.appendingPathComponent("winner.txt")
+            let loser = scratch.appendingPathComponent("loser.txt")
+            try "winner".write(to: winner, atomically: false, encoding: .utf8)
+            try "loser".write(to: loser, atomically: false, encoding: .utf8)
+            let transport = FileTransport(execute: executorFailing(afterRunning: true, where: movesCopyIntoPlace))
+
+            let outcome = try await transport.replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+
+            #expect(outcome == .replaced)
+            #expect(try text(at: loser) == "winner")
+            #expect(try replaceSiblings(in: scratch) == [])
+        }
+    }
+
+    @Test("a file's move over a file that fails leaves the original in place and keeps the unused copy")
+    func renameOverFileFails() async throws {
+        try await withScratchDirectory { scratch in
+            let winner = scratch.appendingPathComponent("winner.txt")
+            let loser = scratch.appendingPathComponent("loser.txt")
+            try "winner".write(to: winner, atomically: false, encoding: .utf8)
+            try "loser".write(to: loser, atomically: false, encoding: .utf8)
+            let transport = FileTransport(execute: executorFailing(where: movesCopyIntoPlace))
+
+            let error = try await #require(throws: ReplaceError.self) {
+                _ = try await transport.replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+            }
+
+            let siblings = try replaceSiblings(in: scratch)
+            try #require(siblings.count == 1)
+            #expect(siblings[0].hasPrefix("loser.txt.helix-incoming-"))
+            #expect(error.aftermath == .destinationUnchanged)
+            #expect(try text(at: loser) == "loser")
+            #expect(try text(at: scratch.appendingPathComponent(siblings[0])) == "winner")
+        }
+    }
+
     @Test("a copy that fails partway leaves the destination as it was and no partial copy")
     func copyFails() async throws {
         try await withScratchDirectory { scratch in
