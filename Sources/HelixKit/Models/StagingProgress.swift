@@ -20,7 +20,7 @@ public struct TransferProgress: Hashable, Sendable {
     public let receivedBytes: Int
     /// Known only when the staged files are the sending endpoint's whole tree.
     public let expectedBytes: Int?
-    /// Between 0 and 1; nil when its denominator is absent or zero.
+    /// Received over expected, as files or bytes; nil when its denominator is absent or zero.
     public let fraction: Double?
     public let currentPath: String?
     public let currentReceivedBytes: Int
