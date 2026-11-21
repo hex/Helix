@@ -86,17 +86,18 @@ public final class SessionStore {
         if syncSessions.isEmpty && forwardSessions.isEmpty {
             return .idle
         }
-        let hasDisconnected = syncSessions.contains { $0.phase == .disconnected }
+        let running = syncSessions.filter { !$0.paused }
+        let hasDisconnected = running.contains { $0.phase == .disconnected }
             || forwardSessions.contains { $0.source.connected == false || $0.destination.connected == false }
         if hasDisconnected {
             return .error
         }
         let hasConflicts = totalConflictCount > 0
-        let hasHalted = syncSessions.contains { $0.phase == .halted }
+        let hasHalted = running.contains { $0.phase == .halted }
         if hasConflicts || hasHalted {
             return .warning
         }
-        let hasActive = syncSessions.contains { $0.phase == .working }
+        let hasActive = running.contains { $0.phase == .working }
         if hasActive {
             return .active
         }

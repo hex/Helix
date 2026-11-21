@@ -133,6 +133,17 @@ struct SessionStoreTests {
         #expect(store.overallHealth == .error)
     }
 
+    @Test("Health status ignores the disconnected status of a paused session")
+    @MainActor
+    func healthPausedSession() async {
+        let paused = makeSyncSession(id: "sync_1", name: "resting", status: "disconnected", paused: true)
+        let watching = makeSyncSession(id: "sync_2", name: "ok", status: "watching")
+        let store = SessionStore(provider: FakeProvider(syncSessions: [paused, watching]))
+        await store.refresh()
+
+        #expect(store.overallHealth == .healthy)
+    }
+
     @Test("Refresh publishes a session whose only change is staging progress")
     @MainActor
     func refreshPublishesStagingProgress() async {
