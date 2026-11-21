@@ -1012,13 +1012,14 @@ struct ConflictResolutionTests {
     @Test("Resolves conflict by replacing loser with a copy of winner then flushing")
     @MainActor
     func happyPath() async throws {
+        defer { removeDefaults() }
         let conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
         let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [conflict])
         let resolvedSession = makeSyncSession(id: "sync_1", name: "s1")
         let recorder = RecordingProvider(syncSessions: [session], resolvedSyncSessions: [resolvedSession])
         let copyRecorder = CommandRecorder()
         let transport = FileTransport(execute: copyRecorder.execute)
-        let store = SessionStore(provider: recorder, fileTransport: transport)
+        let store = SessionStore(provider: recorder, fileTransport: transport, defaults: defaults)
         await store.refresh()
 
         await store.resolveConflict(session: session, conflict: conflict, winner: .alpha)
@@ -1046,12 +1047,13 @@ struct ConflictResolutionTests {
     @Test("Beta wins replaces alpha with a copy of beta")
     @MainActor
     func betaWins() async throws {
+        defer { removeDefaults() }
         let conflict = Conflict(root: "data.json", alphaChanges: [], betaChanges: [])
         let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [conflict])
         let resolvedSession = makeSyncSession(id: "sync_1", name: "s1")
         let copyRecorder = CommandRecorder()
         let transport = FileTransport(execute: copyRecorder.execute)
-        let store = SessionStore(provider: FakeProvider(syncSessions: [resolvedSession]), fileTransport: transport)
+        let store = SessionStore(provider: FakeProvider(syncSessions: [resolvedSession]), fileTransport: transport, defaults: defaults)
         await store.refresh()
 
         await store.resolveConflict(session: session, conflict: conflict, winner: .beta)
@@ -1074,12 +1076,13 @@ struct ConflictResolutionTests {
     @Test("Resolve does not call refresh after flush to avoid mid-scan flicker")
     @MainActor
     func resolveSkipsRefresh() async {
+        defer { removeDefaults() }
         let conflict = Conflict(root: "link.txt", alphaChanges: [], betaChanges: [])
         let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [conflict])
         let recorder = RecordingProvider(syncSessions: [session])
         let copyRecorder = CommandRecorder()
         let transport = FileTransport(execute: copyRecorder.execute)
-        let store = SessionStore(provider: recorder, fileTransport: transport)
+        let store = SessionStore(provider: recorder, fileTransport: transport, defaults: defaults)
         await store.refresh()
 
         let refreshCountBefore = recorder.calls.filter { $0 == "syncList" }.count
@@ -1100,6 +1103,7 @@ struct ConflictResolutionTests {
     @Test("Copy failure sets lastError and does not flush")
     @MainActor
     func copyFails() async {
+        defer { removeDefaults() }
         let conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
         let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [conflict])
         let recorder = RecordingProvider(syncSessions: [session])
@@ -1108,7 +1112,7 @@ struct ConflictResolutionTests {
             if executable == "/bin/test" && arguments.contains("-e") { return "" }
             throw CLIError(exitCode: 1, stderr: "permission denied")
         }
-        let store = SessionStore(provider: recorder, fileTransport: transport)
+        let store = SessionStore(provider: recorder, fileTransport: transport, defaults: defaults)
         await store.refresh()
 
         await store.resolveConflict(session: session, conflict: conflict, winner: .alpha)
@@ -1221,6 +1225,7 @@ struct ConflictResolutionTests {
     @Test("Bulk resolve pauses once, resolves all, then resumes and flushes once")
     @MainActor
     func bulkResolve() async {
+        defer { removeDefaults() }
         let c1 = Conflict(root: "a.txt", alphaChanges: [], betaChanges: [])
         let c2 = Conflict(root: "b.txt", alphaChanges: [], betaChanges: [])
         let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [c1, c2])
@@ -1228,7 +1233,7 @@ struct ConflictResolutionTests {
         let recorder = RecordingProvider(syncSessions: [session], resolvedSyncSessions: [resolvedSession])
         let cmdRecorder = CommandRecorder()
         let transport = FileTransport(execute: cmdRecorder.execute)
-        let store = SessionStore(provider: recorder, fileTransport: transport)
+        let store = SessionStore(provider: recorder, fileTransport: transport, defaults: defaults)
         await store.refresh()
 
         await store.resolveConflicts(session: session, conflicts: [c1, c2], winner: .alpha)
