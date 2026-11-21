@@ -36,6 +36,7 @@
 - **Auto-update** -- Built-in Sparkle integration checks for updates from the menu bar
 - **Launch at login** -- Optional login item via SMAppService
 - **Configurable polling** -- Adjust refresh interval from 2 to 30 seconds
+- **Background priority** -- Settings switch that runs the mutagen daemon at background priority, so sync yields CPU and disk to whatever you're doing; transfers slow down while the Mac is busy, and Helix reapplies it after a daemon restart
 - **Text size** -- Adjustable text size (System Default, Small, Medium, Large, Extra Large) in Settings
 
 ## Install
@@ -68,7 +69,7 @@ xcodebuild -project Helix.xcodeproj -scheme Helix -configuration Release build
 
 ## How It Works
 
-Helix is a SwiftUI companion app that wraps the mutagen CLI. It does not embed mutagen or communicate with the daemon directly -- instead it shells out to `mutagen sync list --template '{{json .}}'` and friends, parsing the JSON output into native Swift models.
+Helix is a SwiftUI companion app that wraps the mutagen CLI. It does not embed mutagen or communicate with the daemon directly -- instead it shells out to `mutagen sync list --template '{{json .}}'` and friends, parsing the JSON output into native Swift models. For the background priority switch, Helix finds the daemon process with `pgrep` and lowers its priority with `taskpolicy`, which needs no sudo.
 
 The architecture is split into two layers:
 
@@ -90,6 +91,7 @@ Helix/
   Sources/HelixKit/
     CLI.swift               # Concrete mutagen CLI wrapper
     SessionStore.swift      # Observable state + polling
+    DaemonProcess.swift     # Finds the daemon with pgrep, sets its priority with taskpolicy
     CommandBuilder.swift    # Typed option structs -> argument arrays
     FileTransport.swift     # Cross-endpoint copy/stat/remove
     Models/                 # SyncSession, ForwardSession, Endpoint, Conflict
