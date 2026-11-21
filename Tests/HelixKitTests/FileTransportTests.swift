@@ -413,7 +413,7 @@ struct FileTransportReplaceTests {
         let recorder = CommandRecorder()
         let transport = FileTransport(execute: recorder.execute)
 
-        let outcome = try await transport.replace(destination, withCopyOf: source)
+        let outcome = try await transport.replace(ReplacePlan(replacing: destination, withCopyOf: source))
 
         #expect(outcome == .replaced)
         let token = try token(in: recorder.commands)
@@ -442,7 +442,7 @@ struct FileTransportReplaceTests {
             return output
         }
 
-        let outcome = try await transport.replace(destination, withCopyOf: source)
+        let outcome = try await transport.replace(ReplacePlan(replacing: destination, withCopyOf: source))
 
         #expect(outcome == .replaced)
         let token = try token(in: recorder.commands)
@@ -468,7 +468,7 @@ struct FileTransportReplaceTests {
         }
 
         let error = try await #require(throws: (any Error).self) {
-            _ = try await transport.replace(destination, withCopyOf: source)
+            _ = try await transport.replace(ReplacePlan(replacing: destination, withCopyOf: source))
         }
 
         let token = try token(in: recorder.commands)
@@ -497,7 +497,7 @@ struct FileTransportReplaceTests {
         }
 
         let error = try await #require(throws: (any Error).self) {
-            _ = try await transport.replace(destination, withCopyOf: source)
+            _ = try await transport.replace(ReplacePlan(replacing: destination, withCopyOf: source))
         }
 
         let token = try token(in: recorder.commands)

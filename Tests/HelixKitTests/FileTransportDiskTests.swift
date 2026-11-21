@@ -65,7 +65,7 @@ struct FileTransportReplaceDiskTests {
             try "winner".write(to: winner, atomically: false, encoding: .utf8)
             try "loser".write(to: loser, atomically: false, encoding: .utf8)
 
-            _ = try await FileTransport().replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+            _ = try await FileTransport().replace(ReplacePlan(replacing: .local(path: loser.path), withCopyOf: .local(path: winner.path)))
 
             #expect(try text(at: loser) == "winner")
             #expect(try text(at: winner) == "winner")
@@ -83,7 +83,7 @@ struct FileTransportReplaceDiskTests {
             try "winner".write(to: winner.appendingPathComponent("kept.txt"), atomically: false, encoding: .utf8)
             try "loser".write(to: loser.appendingPathComponent("dropped.txt"), atomically: false, encoding: .utf8)
 
-            _ = try await FileTransport().replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+            _ = try await FileTransport().replace(ReplacePlan(replacing: .local(path: loser.path), withCopyOf: .local(path: winner.path)))
 
             #expect(try FileManager.default.contentsOfDirectory(atPath: loser.path) == ["kept.txt"])
             #expect(try text(at: loser.appendingPathComponent("kept.txt")) == "winner")
@@ -99,7 +99,7 @@ struct FileTransportReplaceDiskTests {
             try "winner".write(to: winner, atomically: false, encoding: .utf8)
             try FileManager.default.createSymbolicLink(atPath: loser.path, withDestinationPath: "nowhere")
 
-            _ = try await FileTransport().replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+            _ = try await FileTransport().replace(ReplacePlan(replacing: .local(path: loser.path), withCopyOf: .local(path: winner.path)))
 
             #expect(try FileManager.default.attributesOfItem(atPath: loser.path)[.type] as? FileAttributeType == .typeRegular)
             #expect(try text(at: loser) == "winner")
@@ -114,7 +114,7 @@ struct FileTransportReplaceDiskTests {
             let loser = scratch.appendingPathComponent("loser.txt")
             try "winner".write(to: winner, atomically: false, encoding: .utf8)
 
-            _ = try await FileTransport().replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+            _ = try await FileTransport().replace(ReplacePlan(replacing: .local(path: loser.path), withCopyOf: .local(path: winner.path)))
 
             #expect(try text(at: loser) == "winner")
             #expect(try replaceSiblings(in: scratch) == [])
@@ -132,7 +132,7 @@ struct FileTransportReplaceDiskTests {
             try "loser".write(to: loser.appendingPathComponent("dropped.txt"), atomically: false, encoding: .utf8)
             let transport = FileTransport(execute: executorFailing { executable, _ in executable == "/bin/rm" })
 
-            let outcome = try await transport.replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+            let outcome = try await transport.replace(ReplacePlan(replacing: .local(path: loser.path), withCopyOf: .local(path: winner.path)))
 
             let siblings = try replaceSiblings(in: scratch)
             try #require(siblings.count == 1)
@@ -166,7 +166,7 @@ struct FileTransportReplaceDiskTests {
             let (winner, loser) = try makeDirectoryConflict(in: scratch)
             let transport = FileTransport(execute: executorFailing(afterRunning: true, where: movesCopyIntoPlace))
 
-            let outcome = try await transport.replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+            let outcome = try await transport.replace(ReplacePlan(replacing: .local(path: loser.path), withCopyOf: .local(path: winner.path)))
 
             let siblings = try replaceSiblings(in: scratch)
             try #require(siblings.count == 1)
@@ -187,7 +187,7 @@ struct FileTransportReplaceDiskTests {
             let transport = FileTransport(execute: executorFailing(where: movesCopyIntoPlace))
 
             let error = try await #require(throws: ReplaceError.self) {
-                _ = try await transport.replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+                _ = try await transport.replace(ReplacePlan(replacing: .local(path: loser.path), withCopyOf: .local(path: winner.path)))
             }
 
             #expect(try replaceSiblings(in: scratch) == [])
@@ -211,7 +211,7 @@ struct FileTransportReplaceDiskTests {
             }
 
             let error = try await #require(throws: ReplaceError.self) {
-                _ = try await transport.replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+                _ = try await transport.replace(ReplacePlan(replacing: .local(path: loser.path), withCopyOf: .local(path: winner.path)))
             }
 
             let siblings = try replaceSiblings(in: scratch)
@@ -239,7 +239,7 @@ struct FileTransportReplaceDiskTests {
             try "inside".write(to: linked.appendingPathComponent("inside.txt"), atomically: false, encoding: .utf8)
             try FileManager.default.createSymbolicLink(atPath: loser.path, withDestinationPath: "linked")
 
-            _ = try await FileTransport().replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+            _ = try await FileTransport().replace(ReplacePlan(replacing: .local(path: loser.path), withCopyOf: .local(path: winner.path)))
 
             #expect(try FileManager.default.attributesOfItem(atPath: loser.path)[.type] as? FileAttributeType == .typeRegular)
             #expect(try text(at: loser) == "winner")
@@ -257,7 +257,7 @@ struct FileTransportReplaceDiskTests {
             try "loser".write(to: loser, atomically: false, encoding: .utf8)
             let transport = FileTransport(execute: executorFailing(afterRunning: true, where: movesCopyIntoPlace))
 
-            let outcome = try await transport.replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+            let outcome = try await transport.replace(ReplacePlan(replacing: .local(path: loser.path), withCopyOf: .local(path: winner.path)))
 
             #expect(outcome == .replaced)
             #expect(try text(at: loser) == "winner")
@@ -275,7 +275,7 @@ struct FileTransportReplaceDiskTests {
             let transport = FileTransport(execute: executorFailing(where: movesCopyIntoPlace))
 
             let error = try await #require(throws: ReplaceError.self) {
-                _ = try await transport.replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+                _ = try await transport.replace(ReplacePlan(replacing: .local(path: loser.path), withCopyOf: .local(path: winner.path)))
             }
 
             #expect(try replaceSiblings(in: scratch) == [])
@@ -299,7 +299,7 @@ struct FileTransportReplaceDiskTests {
             }
 
             let error = try await #require(throws: ReplaceError.self) {
-                _ = try await transport.replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+                _ = try await transport.replace(ReplacePlan(replacing: .local(path: loser.path), withCopyOf: .local(path: winner.path)))
             }
 
             let siblings = try replaceSiblings(in: scratch)
@@ -323,7 +323,7 @@ struct FileTransportReplaceDiskTests {
             let transport = FileTransport(execute: executorFailing(afterRunning: true) { executable, _ in executable == "/bin/cp" })
 
             await #expect(throws: ReplaceError.self) {
-                _ = try await transport.replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+                _ = try await transport.replace(ReplacePlan(replacing: .local(path: loser.path), withCopyOf: .local(path: winner.path)))
             }
 
             #expect(try text(at: loser) == "loser")

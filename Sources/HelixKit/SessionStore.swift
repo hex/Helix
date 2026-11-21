@@ -898,7 +898,7 @@ public final class SessionStore {
         }
         ConsoleLog.shared.log("  action: REPLACE \(loserURL.formatted) with a copy of \(winnerURL.formatted)")
         do {
-            switch try await fileTransport.replace(loserURL, withCopyOf: winnerURL) {
+            switch try await fileTransport.replace(ReplacePlan(replacing: loserURL, withCopyOf: winnerURL)) {
             case .replaced:
                 return .applied
             case .replacedLeavingOriginal(let path, let reason):
@@ -906,7 +906,7 @@ public final class SessionStore {
                     notice: "Resolved \"\(conflict.root)\", but left the original it replaced at \(path): \(reason). Delete that path by hand."
                 )
             }
-        } catch let error as ReplaceError {
+        } catch {
             switch error.aftermath {
             case .destinationUnchanged:
                 throw error

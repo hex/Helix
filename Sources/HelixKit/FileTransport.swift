@@ -85,6 +85,24 @@ public struct ReplaceError: LocalizedError {
     }
 }
 
+/// The paths one replacement uses, fixed before it runs a command, so that a caller can record them first.
+public struct ReplacePlan {
+    public let destination: EndpointURL
+    public let source: EndpointURL
+    /// Where the copy of the source lands, beside the destination: `<name>.helix-incoming-<uuid>`.
+    public let incoming: EndpointURL
+    /// Where the original waits when one rename cannot replace it: `<name>.helix-replaced-<uuid>`.
+    public let setAside: EndpointURL
+
+    public init(replacing destination: EndpointURL, withCopyOf source: EndpointURL) {
+        let token = UUID().uuidString
+        self.destination = destination
+        self.source = source
+        incoming = destination.withPath(destination.path + ".helix-incoming-\(token)")
+        setAside = destination.withPath(destination.path + ".helix-replaced-\(token)")
+    }
+}
+
 /// How a replacement that put the copy in place ended.
 public enum ReplaceOutcome: Sendable, Equatable {
     case replaced
@@ -171,10 +189,10 @@ public struct FileTransport: Sendable {
 
     // MARK: - Replace
 
-    /// Replaces `destination` with a copy of `source`. The copy lands beside it as
-    /// `<name>.helix-incoming-<uuid>` and then takes its name. Where one rename can do that (nothing at the
+    /// Replaces the plan's destination with a copy of its source. The copy lands beside it at the plan's
+    /// incoming path and then takes its name. Where one rename can do that (nothing at the
     /// destination, or neither side a directory) the destination never goes missing. Otherwise the original
-    /// first moves aside to `<name>.helix-replaced-<uuid>` and is removed once the copy is in place.
+    /// first moves aside to the plan's set-aside path and is removed once the copy is in place.
     ///
     /// A failure before anything at the destination is touched removes the copy and throws. From the first
     /// move onward, what is on disk decides whether the replacement happened, the original is still or again
@@ -182,10 +200,8 @@ public struct FileTransport: Sendable {
     /// be in place gets the unused copy removed, so that sync does not carry it to the other side; where
     /// neither can be shown, nothing is deleted.
     /// A set-aside original that cannot be removed does not undo the replacement: it is returned in the outcome.
-    public func replace(_ destination: EndpointURL, withCopyOf source: EndpointURL) async throws -> ReplaceOutcome {
-        let token = UUID().uuidString
-        let incoming = destination.withPath(destination.path + ".helix-incoming-\(token)")
-        let setAside = destination.withPath(destination.path + ".helix-replaced-\(token)")
+    public func replace(_ plan: ReplacePlan) async throws(ReplaceError) -> ReplaceOutcome {
+        let (destination, source, incoming, setAside) = (plan.destination, plan.source, plan.incoming, plan.setAside)
 
         func failure(
             _ step: ReplaceError.Step, _ cause: any Error,
@@ -211,7 +227,7 @@ public struct FileTransport: Sendable {
             return try await isSymlink(endpoint: endpoint)
         }
         /// Ends a replacement whose move at `step` failed, by reading what the move left on disk.
-        func settle(_ step: ReplaceError.Step, _ cause: any Error, swap: Swap) async throws -> ReplaceOutcome {
+        func settle(_ step: ReplaceError.Step, _ cause: any Error, swap: Swap) async throws(ReplaceError) -> ReplaceOutcome {
             let onDisk: (destination: Bool, incoming: Bool, setAside: Bool)
             do {
                 onDisk = (try await holdsName(destination), try await holdsName(incoming), try await holdsName(setAside))
