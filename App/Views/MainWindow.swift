@@ -358,6 +358,12 @@ private struct SyncListRow: View {
                         }
                     }
                 }
+
+                if let fraction = session.transferProgress?.fraction {
+                    ProgressView(value: min(fraction, 1))
+                        .controlSize(.mini)
+                        .tint(isSelected ? .white : .accentColor)
+                }
             }
 
             Spacer()
