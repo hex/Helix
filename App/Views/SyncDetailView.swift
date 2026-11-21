@@ -152,6 +152,13 @@ struct SyncDetailView: View {
                     .foregroundStyle(.secondary)
             }
 
+            if let sessionError = session.lastError, !sessionError.isEmpty {
+                Text(sessionError)
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .padding(.top, 2)
+            }
+
             if let progress = session.transferProgress {
                 transferSection(progress)
             }

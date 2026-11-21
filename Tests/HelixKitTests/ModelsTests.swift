@@ -99,6 +99,30 @@ struct SyncSessionTests {
         ))
     }
 
+    @Test("Parses the session's last error, which mutagen omits when there is none")
+    func lastError() throws {
+        let json = """
+        [{"identifier":"sync_a","version":1,"creationTime":"2026-01-01T00:00:00Z",
+          "creatingVersion":"0.18.1","alpha":{"protocol":"local","path":"/tmp/a",
+          "ignore":{},"symlink":{},"watch":{},"permissions":{},"compression":{},"connected":true},
+          "beta":{"protocol":"ssh","host":"example.com","path":"/tmp/b",
+          "ignore":{},"symlink":{},"watch":{},"permissions":{},"compression":{},"connected":false},
+          "ignore":{},"symlink":{},"watch":{},"permissions":{},"compression":{},
+          "paused":false,"status":"connecting-beta",
+          "lastError":"beta polling error: unable to send poll request: message transmission failed: write |1: broken pipe"},
+         {"identifier":"sync_b","version":1,"creationTime":"2026-01-01T00:00:00Z",
+          "creatingVersion":"0.18.1","alpha":{"protocol":"local","path":"/tmp/c",
+          "ignore":{},"symlink":{},"watch":{},"permissions":{},"compression":{},"connected":true},
+          "beta":{"protocol":"local","path":"/tmp/d",
+          "ignore":{},"symlink":{},"watch":{},"permissions":{},"compression":{},"connected":true},
+          "ignore":{},"symlink":{},"watch":{},"permissions":{},"compression":{},
+          "paused":false,"status":"watching"}]
+        """
+        let sessions = try decoder.decode([SyncSession].self, from: json.data(using: .utf8)!)
+        #expect(sessions[0].lastError == "beta polling error: unable to send poll request: message transmission failed: write |1: broken pipe")
+        #expect(sessions[1].lastError == nil)
+    }
+
     @Test("Parses alpha endpoint with SSH protocol")
     func alphaEndpoint() throws {
         let data = try loadFixture("sync-list.json")

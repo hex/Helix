@@ -832,7 +832,7 @@ public final class SessionStore {
     }
 
     /// Hashes fields that affect the UI (identity, status, conflicts, connectivity,
-    /// staging progress). Excludes volatile counters like successfulCycles and endpoint
+    /// staging progress, last error). Excludes volatile counters like successfulCycles and endpoint
     /// scan statistics that change every mutagen scan cycle.
     private func syncDigest(_ sessions: [SyncSession]) -> Int {
         var hasher = Hasher()
@@ -847,6 +847,7 @@ public final class SessionStore {
             hasher.combine(s.beta.connected)
             hasher.combine(s.alpha.stagingProgress)
             hasher.combine(s.beta.stagingProgress)
+            hasher.combine(s.lastError)
         }
         return hasher.finalize()
     }
