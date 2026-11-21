@@ -187,6 +187,7 @@ private struct SyncSessionRow: View {
         .contextMenu {
             if session.paused {
                 Button("Resume") { Task { await store.resumeSync(session.identifier) } }
+                    .disabled(store.isResolving(session.identifier))
             } else {
                 Button("Pause") { Task { await store.pauseSync(session.identifier) } }
                 Button("Flush") { Task { await store.flushSync(session.identifier) } }

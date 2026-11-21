@@ -1495,6 +1495,37 @@ struct ConflictResolutionTests {
         #expect(store.sessionHolds == ["sync_1": holdMessage(root: "a.txt", destination: "/tmp/b/a.txt", token: token)])
     }
 
+    @Test("Resuming a session by hand while a conflict resolve runs on it is refused with an error and sends no resume")
+    @MainActor
+    func resumeDuringResolveRefused() async {
+        defer { removeDefaults() }
+        let conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
+        let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [conflict])
+        let provider = MainActorRecordingProvider(syncSessions: [session])
+        let gate = Gate()
+        let transport = FileTransport { _, _ in
+            await gate.pass()
+            return ""
+        }
+        let store = SessionStore(provider: provider, fileTransport: transport, defaults: defaults)
+        await store.refresh()
+
+        let resolve = Task { _ = await store.resolveConflict(session: session, conflict: conflict, winner: .alpha) }
+        await gate.reached()
+        await store.resumeSync("sync_1")
+        let callsWhileResolveIsMidway = provider.calls
+        let errorWhileResolveIsMidway = store.lastError
+        let resolvingWhileResolveIsMidway = store.isResolving("sync_1")
+        await gate.open()
+        await resolve.value
+
+        #expect(callsWhileResolveIsMidway == ["syncPause:sync_1"])
+        #expect(errorWhileResolveIsMidway == "The session \"s1\" was not resumed: a conflict resolve is running on it.")
+        #expect(provider.calls == ["syncPause:sync_1", "syncResume:sync_1", "syncFlush:sync_1"])
+        #expect(resolvingWhileResolveIsMidway)
+        #expect(!store.isResolving("sync_1"))
+    }
+
     @Test("A resolve returns the roots it left unresolved: failed, not attempted, and refused ones")
     @MainActor
     func resolveReturnsUnresolvedRoots() async {

@@ -79,6 +79,8 @@ public final class SessionStore {
     @ObservationIgnored private var bulkPauseInFlight = false
     /// The resolve requested last on each session; the next one on that session waits for it to end.
     @ObservationIgnored private var lastResolve: [String: Task<Set<String>, Never>] = [:]
+    /// How many conflict resolves are running or waiting their turn, by session identifier.
+    private var resolvesInFlight: [String: Int] = [:]
     /// The daemon process background priority was last applied to; nil while it is not applied.
     @ObservationIgnored private var backgroundPriorityPID: ProcessID?
     private static let bulkPauseKey = "bulkPause"
@@ -400,8 +402,22 @@ public final class SessionStore {
         await performAction { try await provider.syncPause(identifier) }
     }
 
+    /// Whether a conflict resolve is running, or waiting its turn, on the session.
+    public func isResolving(_ identifier: String) -> Bool {
+        resolvesInFlight[identifier] != nil
+    }
+
+    private func displayName(of identifier: String) -> String {
+        syncSessions.first { $0.identifier == identifier }?.name ?? identifier
+    }
+
     /// Resumes a session because the user asked for that session; this is what ends its hold.
+    /// Refused while a conflict resolve is moving the session's files.
     public func resumeSync(_ identifier: String) async {
+        guard !isResolving(identifier) else {
+            lastError = "The session \"\(displayName(of: identifier))\" was not resumed: a conflict resolve is running on it."
+            return
+        }
         do {
             try await provider.syncResume(identifier)
         } catch {
@@ -632,8 +648,10 @@ public final class SessionStore {
             return await resolve()
         }
         lastResolve[identifier] = turn
+        resolvesInFlight[identifier, default: 0] += 1
         let unresolved = await turn.value
         if lastResolve[identifier] == turn { lastResolve[identifier] = nil }
+        resolvesInFlight[identifier] = resolvesInFlight[identifier] == 1 ? nil : resolvesInFlight[identifier].map { $0 - 1 }
         return unresolved
     }
 

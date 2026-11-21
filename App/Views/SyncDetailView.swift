@@ -237,7 +237,7 @@ struct SyncDetailView: View {
                 Button("Resume") {
                     Task { await runAction("resume") { await store.resumeSync(session.identifier) } }
                 }
-                .disabled(actionInProgress != nil)
+                .disabled(actionInProgress != nil || store.isResolving(session.identifier))
             } else {
                 Button("Pause") {
                     Task { await runAction("pause") { await store.pauseSync(session.identifier) } }
