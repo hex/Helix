@@ -81,6 +81,14 @@ struct SettingsView: View {
                     }
                 }
 
+                if let progress = store.daemonStopProgress {
+                    HStack {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text(progress)
+                    }
+                }
+
                 Toggle("Run sync at background priority", isOn: Binding(
                     get: { store.daemonBackgroundPriority },
                     set: { enabled in Task { await store.setDaemonBackgroundPriority(enabled) } }

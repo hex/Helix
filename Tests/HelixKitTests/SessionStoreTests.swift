@@ -568,6 +568,55 @@ struct SessionStoreTests {
         }
     }
 
+    @Test("Stop drains an active command before saving its intent and reports a repeated request")
+    @MainActor
+    func stopWaitsBeforePersistingIntent() async throws {
+        let suite = "StopDrainTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let gate = Gate()
+        let session = makeSyncSession(id: "sync_1", name: "project")
+        let provider = RecordingProvider(
+            syncSessions: [session], beforeSyncPause: { _ in await gate.pass() }, recordQueries: true
+        )
+        let store = SessionStore(provider: provider, defaults: defaults)
+        await store.refresh()
+
+        let command = Task { await store.pauseSync(session.identifier) }
+        await gate.reached()
+        let stop = Task { await store.stopDaemon() }
+        var commandsFenced = false
+        for _ in 0..<100 {
+            let before = provider.calls.count
+            await store.fetchVersion()
+            if provider.calls.count == before {
+                commandsFenced = true
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        let progressWhileWaiting = store.daemonStopProgress
+        let persistedWhileWaiting = defaults.bool(forKey: "daemonStoppedByHelix")
+        let attemptedWhileWaiting = provider.calls.contains("daemonStop")
+        let duplicate = commandsFenced ? await store.stopDaemon() : true
+        let refused = store.lastError
+        await gate.open()
+        await command.value
+        let stopped = await stop.value
+
+        #expect(commandsFenced)
+        #expect(progressWhileWaiting == "Waiting for running Mutagen commands to finish.")
+        #expect(!persistedWhileWaiting)
+        #expect(!attemptedWhileWaiting)
+        #expect(!duplicate)
+        #expect(refused == "Mutagen is already stopping.")
+        #expect(stopped)
+        #expect(defaults.bool(forKey: "daemonStoppedByHelix"))
+        #expect(provider.calls.filter { $0 == "daemonStop" } == ["daemonStop"])
+        #expect(store.daemonStopProgress == nil)
+    }
+
     @Test("Daemon register sets autoStart to true")
     @MainActor
     func daemonRegister() async {

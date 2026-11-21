@@ -57,6 +57,8 @@ final class ManagedSessionProvider: SessionProvider {
     private var pendingCommands = 0
     private var commandsDrained: CheckedContinuation<Void, Never>?
 
+    var hasPendingCommands: Bool { pendingCommands > 0 }
+
     init(_ underlying: any SessionProvider) {
         self.underlying = underlying
     }
@@ -140,10 +142,15 @@ final class ManagedSessionProvider: SessionProvider {
         try await underlying.daemonStart()
     }
 
-    func daemonStop() async throws {
-        if pendingCommands > 0 {
+    func waitForPendingCommands() async {
+        precondition(control == .stopping && commandsDrained == nil)
+        if hasPendingCommands {
             await withCheckedContinuation { commandsDrained = $0 }
         }
+    }
+
+    func daemonStop() async throws {
+        precondition(control == .stopping && !hasPendingCommands)
         try await underlying.daemonStop()
     }
 

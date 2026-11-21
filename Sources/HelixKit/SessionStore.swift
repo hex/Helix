@@ -57,6 +57,7 @@ public final class SessionStore {
     public private(set) var forwardSessions: [ForwardSession] = []
     public private(set) var daemonStatus = DaemonStatus.stopped
     public var daemonRunning: Bool { daemonStatus == .running }
+    public private(set) var daemonStopProgress: String?
     public private(set) var daemonAutoStart = false
     public private(set) var mutagenVersion: String?
     public private(set) var lastError: String?
@@ -863,6 +864,10 @@ public final class SessionStore {
 
     @discardableResult
     public func stopDaemon() async -> Bool {
+        if daemonControl == .stopping {
+            lastError = "Mutagen is already stopping."
+            return false
+        }
         guard daemonControl == .managed else { return false }
 
         if let operation = operationBlockingDaemonStop {
@@ -870,19 +875,23 @@ public final class SessionStore {
             return false
         }
         daemonControl = .stopping
-        defaults.set(true, forKey: Self.daemonStoppedKey)
+        lastError = nil
         cancelPolling()
+        defer { daemonStopProgress = nil }
 
-        // List commands can autostart Mutagen. Discard their results and let the commands finish before Stop.
-        let requests = Array(activeSessionLists.values)
+        // List commands can autostart Mutagen; their results must not update the UI after Stop begins.
         activeSessionLists.removeAll()
-        for request in requests {
-            _ = await request.result
+        if provider.hasPendingCommands {
+            daemonStopProgress = "Waiting for running Mutagen commands to finish."
+            await provider.waitForPendingCommands()
         }
 
+        daemonStopProgress = "Stopping Mutagen."
+        defaults.set(true, forKey: Self.daemonStoppedKey)
         do {
             try await provider.daemonStop()
         } catch {
+            daemonStopProgress = "Checking whether Mutagen is running."
             let stopError = "Could not stop Mutagen: \(error.localizedDescription)"
             do {
                 if try await daemonProcess.pid() != nil {
