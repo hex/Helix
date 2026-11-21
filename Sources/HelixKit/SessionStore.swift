@@ -96,7 +96,8 @@ public final class SessionStore {
     private let now: () -> Date
     private var daemonProcess: any DaemonProcess
     @ObservationIgnored private var bulkPauseInFlight = false
-    @ObservationIgnored private var syncEditInFlight = false
+    /// The session `recreateSync` is replacing right now. No resolve or resume is started on it meanwhile.
+    @ObservationIgnored private var sessionBeingEdited: String?
     /// The end of the resolve or resume requested last on each session; the next one on that session waits for it.
     @ObservationIgnored private var lastTurn: [String: Task<Void, Never>] = [:]
     /// How many conflict resolves are running or waiting their turn, by session identifier.
@@ -320,7 +321,7 @@ public final class SessionStore {
             lastError = message
             return message
         }
-        guard !syncEditInFlight else { return "Another sync edit is already in progress." }
+        guard sessionBeingEdited == nil else { return "Another sync edit is already in progress." }
         // Mutagen parses numeric byte sizes as floating point before converting to an integer.
         if let size = options.maxStagingFileSize, let bytes = UInt64(size),
            UInt64(exactly: Double(bytes)) != bytes {
@@ -328,8 +329,8 @@ public final class SessionStore {
             lastError = message
             return message
         }
-        syncEditInFlight = true
-        defer { syncEditInFlight = false }
+        sessionBeingEdited = session.identifier
+        defer { sessionBeingEdited = nil }
 
         let provider = self.provider
         let listed: [SyncSession]
@@ -465,7 +466,8 @@ public final class SessionStore {
     }
 
     /// Resumes the sessions Pause All paused that are still paused, except held ones. A session that fails
-    /// to resume, or that a conflict resolve is working on, stays in the record so the next attempt retries it.
+    /// to resume, that a conflict resolve is working on, or that is being edited stays in the record so the
+    /// next attempt retries it.
     public func resumeBulkPause() async {
         guard let record = bulkPause, !bulkPauseInFlight else { return }
         bulkPauseInFlight = true
@@ -476,9 +478,10 @@ public final class SessionStore {
         var failures: [String] = []
         for session in syncSessions where session.paused && record.sessionIdentifiers.contains(session.identifier) {
             // A session whose conflict resolve is still moving files stays in the record, so the next
-            // attempt resumes it if the resolve left it paused without holding it.
+            // attempt resumes it if the resolve left it paused without holding it. So does a session that
+            // is being edited: a resume now could land on the original after the edit has paused it.
             let identifier = session.identifier
-            if isResolving(identifier) {
+            if isResolving(identifier) || sessionBeingEdited == identifier {
                 unresumed.append(identifier)
                 continue
             }
@@ -559,8 +562,12 @@ public final class SessionStore {
     }
 
     /// Resumes a session because the user asked for that session; this is what ends its hold.
-    /// Refused while a conflict resolve is moving the session's files.
+    /// Refused while a conflict resolve is moving the session's files, and while the session is being edited.
     public func resumeSync(_ identifier: String) async {
+        guard sessionBeingEdited != identifier else {
+            lastError = "The session \"\(displayName(of: identifier))\" was not resumed: it is being edited."
+            return
+        }
         guard !isResolving(identifier) else {
             lastError = "The session \"\(displayName(of: identifier))\" was not resumed: a conflict resolve is running on it."
             return
@@ -829,7 +836,8 @@ public final class SessionStore {
     }
 
     /// Runs `resolve` in the session's turn order.
-    /// A session that is held when its turn comes is refused before anything is paused or run.
+    /// A session that is being edited when the resolve is requested, or that is held when its turn comes,
+    /// is refused before anything is paused or run.
     /// - Returns: the roots left unresolved: what `resolve` returns, or all of `roots` for a refusal.
     private func resolveInTurn(
         on session: SyncSession,
@@ -837,6 +845,12 @@ public final class SessionStore {
         _ resolve: @escaping @MainActor () async -> Set<String>
     ) async -> Set<String> {
         let identifier = session.identifier
+        if sessionBeingEdited == identifier {
+            let message = "No conflict in the session \"\(session.name ?? identifier)\" was resolved: the session is being edited."
+            ConsoleLog.shared.log("resolve refused: \(message)", level: .error)
+            lastError = message
+            return roots
+        }
         resolvesInFlight[identifier, default: 0] += 1
         let unresolved = await inTurn(on: identifier) {
             if let hold = self.sessionHolds[identifier] {

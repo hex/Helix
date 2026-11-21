@@ -1051,19 +1051,23 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
     private var _created = false
     private let failOn: String?
     private let beforeSyncPause: (@Sendable (String) async -> Void)?
+    private let duringSyncCreate: (@Sendable () async -> Void)?
 
+    /// - Parameter duringSyncCreate: runs inside each create, after the create is recorded and before it returns.
     init(
         syncSessions: [SyncSession] = [],
         resolvedSyncSessions: [SyncSession]? = nil,
         sessionsAfterCreate: [SyncSession]? = nil,
         failOn: String? = nil,
-        beforeSyncPause: (@Sendable (String) async -> Void)? = nil
+        beforeSyncPause: (@Sendable (String) async -> Void)? = nil,
+        duringSyncCreate: (@Sendable () async -> Void)? = nil
     ) {
         self.syncSessions = syncSessions
         self.resolvedSyncSessions = resolvedSyncSessions
         self.sessionsAfterCreate = sessionsAfterCreate
         self.failOn = failOn
         self.beforeSyncPause = beforeSyncPause
+        self.duringSyncCreate = duringSyncCreate
     }
 
     var calls: [String] {
@@ -1101,6 +1105,7 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
     func syncCreate(arguments: [String]) async throws -> String {
         try record("syncCreate:\(arguments.joined(separator: " "))")
         lock.withLock { _created = true }
+        await duringSyncCreate?()
         return sessionsAfterCreate?.first(where: { candidate in
             !syncSessions.contains(where: { $0.identifier == candidate.identifier })
         })?.identifier ?? "sync_replacement"
@@ -1213,6 +1218,8 @@ struct ConflictResolutionTests {
     private func removeDefaults() {
         defaults.removePersistentDomain(forName: suiteName)
     }
+
+    private let createPaused = "syncCreate:sync create /tmp/a /tmp/b --paused"
 
     /// The per-call token in replace's sibling names, read from the copy that lands beside `destination`.
     private func replaceToken(copiedBeside destination: String, in commands: [RecordedCommand]) throws -> String {
@@ -1862,6 +1869,93 @@ struct ConflictResolutionTests {
         #expect(errorAfterRecreate == refusal)
         #expect(errorAfterIgnore == refusal)
         #expect(provider.calls == ["syncPause:sync_1", "syncResume:sync_1", "syncFlush:sync_1"])
+    }
+
+    @Test("A conflict resolve, single or bulk, requested while the session is being edited is refused with the reason before anything is paused or run")
+    @MainActor
+    func resolveDuringEditRefused() async {
+        defer { removeDefaults() }
+        let conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
+        let other = Conflict(root: "other.txt", alphaChanges: [], betaChanges: [])
+        let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [conflict, other])
+        let gate = Gate()
+        let provider = RecordingProvider(syncSessions: [session], duringSyncCreate: { await gate.pass() })
+        let cmdRecorder = CommandRecorder()
+        let store = SessionStore(provider: provider, fileTransport: FileTransport(execute: cmdRecorder.execute), defaults: defaults)
+        await store.refresh()
+        let refusal = "No conflict in the session \"s1\" was resolved: the session is being edited."
+
+        let editing = Task { await store.recreateSync(session, options: SyncCreateOptions(), alpha: "/tmp/a", beta: "/tmp/b") }
+        await gate.reached()
+        let unresolvedBySingle = await store.resolveConflict(session: session, conflict: conflict, winner: .alpha)
+        let errorAfterSingle = store.lastError
+        let unresolvedByBulk = await store.resolveConflicts(session: session, conflicts: [conflict, other], winner: .beta)
+        let errorAfterBulk = store.lastError
+        let callsWhileEditIsMidway = provider.calls
+        let resolvingWhileEditIsMidway = store.isResolving("sync_1")
+        await gate.open()
+        let editError = await editing.value
+
+        #expect(unresolvedBySingle == ["file.txt"])
+        #expect(unresolvedByBulk == ["file.txt", "other.txt"])
+        #expect(errorAfterSingle == refusal)
+        #expect(errorAfterBulk == refusal)
+        #expect(callsWhileEditIsMidway == [createPaused])
+        #expect(!resolvingWhileEditIsMidway)
+        #expect(cmdRecorder.commands.count == 0)
+        #expect(provider.calls == [createPaused, "syncPause:sync_1", "syncResume:sync_replacement", "syncTerminate:sync_1"])
+        #expect(editError == nil)
+    }
+
+    @Test("Resuming a session by hand while it is being edited is refused with an error and sends no resume")
+    @MainActor
+    func resumeDuringEditRefused() async {
+        defer { removeDefaults() }
+        let session = makeSyncSession(id: "sync_1", name: "s1", paused: true)
+        let gate = Gate()
+        let provider = RecordingProvider(syncSessions: [session], duringSyncCreate: { await gate.pass() })
+        let store = SessionStore(provider: provider, defaults: defaults)
+        await store.refresh()
+
+        let editing = Task { await store.recreateSync(session, options: SyncCreateOptions(), alpha: "/tmp/a", beta: "/tmp/b") }
+        await gate.reached()
+        await store.resumeSync("sync_1")
+        let callsWhileEditIsMidway = provider.calls
+        let errorWhileEditIsMidway = store.lastError
+        await gate.open()
+        let editError = await editing.value
+
+        #expect(callsWhileEditIsMidway == [createPaused])
+        #expect(errorWhileEditIsMidway == "The session \"s1\" was not resumed: it is being edited.")
+        #expect(provider.calls == [createPaused, "syncTerminate:sync_1"])
+        #expect(editError == nil)
+    }
+
+    @Test("Resume after Pause All leaves a session that is being edited paused and in the record")
+    @MainActor
+    func bulkResumeDuringEditKeepsSessionInRecord() async {
+        defer { removeDefaults() }
+        let running = makeSyncSession(id: "sync_1", name: "s1")
+        let paused = makeSyncSession(id: "sync_1", name: "s1", paused: true)
+        let store = SessionStore(provider: RecordingProvider(syncSessions: [running]), defaults: defaults)
+        await store.pauseAllSync()
+        let gate = Gate()
+        let provider = RecordingProvider(syncSessions: [paused], duringSyncCreate: { await gate.pass() })
+        store.replaceProvider(provider)
+        await store.refresh()
+
+        let editing = Task { await store.recreateSync(paused, options: SyncCreateOptions(), alpha: "/tmp/a", beta: "/tmp/b") }
+        await gate.reached()
+        await store.resumeBulkPause()
+        let callsWhileEditIsMidway = provider.calls
+        let recordWhileEditIsMidway = store.bulkPause
+        await gate.open()
+        let editError = await editing.value
+
+        #expect(callsWhileEditIsMidway == [createPaused])
+        #expect(recordWhileEditIsMidway == BulkPause(sessionIdentifiers: ["sync_1"], resumeAt: nil))
+        #expect(provider.calls == [createPaused, "syncTerminate:sync_1"])
+        #expect(editError == nil)
     }
 
     @Test("While a replacement is under way, a store launched on the same defaults holds the session with the three paths and neither resumes nor resolves it")
