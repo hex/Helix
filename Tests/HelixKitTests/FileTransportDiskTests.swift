@@ -160,6 +160,29 @@ struct FileTransportReplaceDiskTests {
         executable == "/bin/mv" && arguments.first?.contains(".helix-incoming-") == true
     }
 
+    @Test("Interrupted set-aside removal leaves a verified winner and an unverified old tree")
+    func interruptedSetAsideRemovalReportsUnverifiedTree() async throws {
+        try await withScratchDirectory { scratch in
+            let (winner, loser) = try makeDirectoryConflict(in: scratch)
+            try "also old".write(to: loser.appendingPathComponent("stays.txt"), atomically: false, encoding: .utf8)
+            let transport = FileTransport { executable, arguments in
+                if executable == "/bin/rm" {
+                    let path = try #require(arguments.last)
+                    try FileManager.default.removeItem(at: URL(fileURLWithPath: path).appendingPathComponent("dropped.txt"))
+                    throw ProcessDeadlineError(executablePath: executable, deadline: .seconds(15))
+                }
+                return try await runProcess(executablePath: executable, arguments: arguments)
+            }
+            let plan = ReplacePlan(replacing: .local(path: loser.path), withCopyOf: .local(path: winner.path))
+
+            let outcome = try await transport.replace(plan)
+
+            #expect(outcome == .replacedWithInterruptedRemoval(path: plan.setAside.formatted, reason: "/bin/rm exceeded its deadline of 15.0 seconds."))
+            #expect(try FileManager.default.contentsOfDirectory(atPath: plan.setAside.formatted) == ["stays.txt"])
+            #expect(try FileManager.default.contentsOfDirectory(atPath: loser.path) == ["kept.txt"])
+        }
+    }
+
     @Test("a move into place that ran and then reported failure leaves the winner in place and the original beside it, not inside it")
     func moveIntoPlaceRanThenFailed() async throws {
         try await withScratchDirectory { scratch in
@@ -307,7 +330,8 @@ struct FileTransportReplaceDiskTests {
             let unusedCopy = scratch.appendingPathComponent(siblings[0])
             #expect(siblings[0].hasPrefix("loser.txt.helix-incoming-"))
             #expect(error.aftermath == .destinationUnchanged)
-            #expect(error.localizedDescription == "Could not move \(unusedCopy.path) into place at \(loser.path): connection lost. Then could not remove the copy at \(unusedCopy.path): permission denied. \(loser.path) is unchanged, and the unused copy is still at \(unusedCopy.path)")
+            #expect(error.incomingCopy == .unverified(path: unusedCopy.path))
+            #expect(error.localizedDescription == "Could not move \(unusedCopy.path) into place at \(loser.path): connection lost. Then could not remove the copy at \(unusedCopy.path): permission denied. \(loser.path) is unchanged, and the unused copy may still be at \(unusedCopy.path)")
             #expect(try text(at: loser) == "loser")
             #expect(try text(at: unusedCopy) == "winner")
         }
@@ -329,6 +353,128 @@ struct FileTransportReplaceDiskTests {
             #expect(try text(at: loser) == "loser")
             #expect(try FileManager.default.contentsOfDirectory(atPath: scratch.path).sorted() == ["loser.txt", "winner.txt"])
         }
+    }
+}
+
+@Suite("Conflict interruptions on disk")
+struct ConflictInterruptionDiskTests {
+    @Test("A resume deadline reports uncertainty and skips flush after file placement")
+    @MainActor
+    func resumeDeadlineReportsUnconfirmedSession() async throws {
+        try await withScratchDirectory { scratch in
+            let fixture = try LocalConflictFixture(in: scratch)
+            let suite = "ConflictResumeDeadlineTests.\(UUID().uuidString)"
+            let defaults = try #require(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let provider = RecordingProvider(
+                syncSessions: [fixture.session], beforeSyncResume: { _ in
+                    throw ProcessDeadlineError(executablePath: "/usr/bin/mutagen", deadline: .seconds(15))
+                }
+            )
+            let store = SessionStore(provider: provider, defaults: defaults)
+
+            let result = await store.resolveConflict(session: fixture.session, conflict: fixture.conflict, winner: .alpha)
+
+            #expect(try String(contentsOf: fixture.loser, encoding: .utf8) == "winner")
+            #expect(result == ["file.txt"])
+            #expect(provider.calls == ["syncPause:sync_1", "syncResume:sync_1"])
+            #expect(store.lastError == "Could not confirm that Mutagen resumed \"project\". Flush was skipped. Check the session status before retrying. /usr/bin/mutagen exceeded its deadline of 15.0 seconds.")
+        }
+    }
+
+    @Test("A partial incoming copy with failed cleanup holds the session", arguments: [false, true])
+    @MainActor
+    func failedCleanupHoldsSession(bulk: Bool) async throws {
+        try await withScratchDirectory { scratch in
+            let fixture = try LocalConflictFixture(in: scratch)
+            let suite = "IncompleteCopyTests.\(UUID().uuidString)"
+            let defaults = try #require(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let provider = RecordingProvider(syncSessions: [fixture.session])
+            let transport = FileTransport { executable, arguments in
+                if executable == "/bin/cp" {
+                    let incoming = try #require(arguments.last)
+                    try "partial".write(toFile: incoming, atomically: false, encoding: .utf8)
+                    throw CLIError(exitCode: 1, stderr: "copy failed")
+                }
+                if executable == "/bin/rm" { throw CLIError(exitCode: 1, stderr: "permission denied") }
+                return try await runProcess(executablePath: executable, arguments: arguments)
+            }
+            let store = SessionStore(provider: provider, fileTransport: transport, defaults: defaults)
+
+            let unresolved = if bulk {
+                await store.resolveConflicts(session: fixture.session, conflicts: [fixture.conflict], winner: .alpha)
+            } else {
+                await store.resolveConflict(session: fixture.session, conflict: fixture.conflict, winner: .alpha)
+            }
+
+            let parent = fixture.loser.deletingLastPathComponent()
+            let sibling = try #require(try replaceSiblings(in: parent).first)
+            let incoming = parent.appendingPathComponent(sibling)
+            #expect(try String(contentsOf: incoming, encoding: .utf8) == "partial")
+            #expect(try String(contentsOf: fixture.loser, encoding: .utf8) == "loser")
+            #expect(unresolved == ["file.txt"])
+            #expect(provider.calls == ["syncPause:sync_1"])
+            #expect(store.sessionHolds["sync_1"]?.contains(incoming.path) == true)
+            #expect(store.lastError == store.sessionHolds["sync_1"])
+        }
+    }
+
+    @Test("An interrupted copy and cleanup leave both a journal and a hold")
+    @MainActor
+    func cancelledCopyKeepsRecoveryRecord() async throws {
+        try await withScratchDirectory { scratch in
+            let fixture = try LocalConflictFixture(in: scratch)
+            let suite = "InterruptedCopyTests.\(UUID().uuidString)"
+            let defaults = try #require(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let provider = RecordingProvider(syncSessions: [fixture.session])
+            let transport = FileTransport { executable, arguments in
+                if executable == "/bin/cp" {
+                    let incoming = try #require(arguments.last)
+                    try "partial".write(toFile: incoming, atomically: false, encoding: .utf8)
+                    throw CancellationError()
+                }
+                if executable == "/bin/rm" { throw CancellationError() }
+                return try await runProcess(executablePath: executable, arguments: arguments)
+            }
+            let store = SessionStore(provider: provider, fileTransport: transport, defaults: defaults)
+
+            let unresolved = await store.resolveConflict(session: fixture.session, conflict: fixture.conflict, winner: .alpha)
+
+            let sibling = try #require(try replaceSiblings(in: fixture.loser.deletingLastPathComponent()).first)
+            let incoming = fixture.loser.deletingLastPathComponent().appendingPathComponent(sibling)
+            #expect(try String(contentsOf: incoming, encoding: .utf8) == "partial")
+            #expect(try String(contentsOf: fixture.loser, encoding: .utf8) == "loser")
+            #expect(unresolved == ["file.txt"])
+            #expect(provider.calls == ["syncPause:sync_1"])
+            #expect(store.sessionHolds["sync_1"]?.contains(incoming.path) == true)
+            #expect(defaults.dictionary(forKey: "replacementsUnderWay")?["sync_1"] != nil)
+            #expect(SessionStore(provider: provider, defaults: defaults).sessionHolds == store.sessionHolds)
+        }
+    }
+}
+
+private struct LocalConflictFixture {
+    let session: SyncSession
+    let conflict: Conflict
+    let winner: URL
+    let loser: URL
+
+    init(in scratch: URL) throws {
+        let alpha = scratch.appendingPathComponent("alpha")
+        let beta = scratch.appendingPathComponent("beta")
+        try FileManager.default.createDirectory(at: alpha, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: beta, withIntermediateDirectories: false)
+        winner = alpha.appendingPathComponent("file.txt")
+        loser = beta.appendingPathComponent("file.txt")
+        try "winner".write(to: winner, atomically: false, encoding: .utf8)
+        try "loser".write(to: loser, atomically: false, encoding: .utf8)
+        conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
+        session = makeSyncSession(
+            id: "sync_1", name: "project", conflicts: [conflict],
+            alpha: makeEndpoint(path: alpha.path), beta: makeEndpoint(path: beta.path)
+        )
     }
 }
 

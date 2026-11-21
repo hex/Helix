@@ -32,6 +32,11 @@ public struct ReplaceError: LocalizedError {
         case destinationUnverified
     }
 
+    public enum IncomingCopy: Sendable, Equatable {
+        case absent
+        case unverified(path: String)
+    }
+
     public let source: String
     public let destination: String
     public let incoming: String
@@ -39,6 +44,17 @@ public struct ReplaceError: LocalizedError {
     public let aftermath: Aftermath
     public let failure: StepFailure
     public let recoveryFailures: [StepFailure]
+
+    public var incomingCopy: IncomingCopy {
+        if aftermath == .destinationUnverified || recoveryFailures.contains(where: { $0.step == .removeCopy }) {
+            return .unverified(path: incoming)
+        }
+        return .absent
+    }
+
+    var wasInterrupted: Bool {
+        failure.cause.isCommandInterruption || recoveryFailures.contains { $0.cause.isCommandInterruption }
+    }
 
     public var errorDescription: String? {
         let first = sentence(for: failure)
@@ -55,11 +71,12 @@ public struct ReplaceError: LocalizedError {
         case (.destinationUnverified, _):
             return "Nothing was deleted: look for the original at \(setAside) and for the replacement at \(incoming)"
         case (.destinationUnchanged, .setOriginalAside), (.destinationUnchanged, .moveCopyIntoPlace):
-            let copyRemains = recoveryFailures.contains { $0.step == .removeCopy }
-            return copyRemains
-                ? "\(destination) is unchanged, and the unused copy is still at \(incoming)"
-                : "\(destination) is unchanged"
+            if case .unverified(let path) = incomingCopy {
+                return "\(destination) is unchanged, and the unused copy may still be at \(path)"
+            }
+            return "\(destination) is unchanged"
         case (.destinationUnchanged, _):
+            if case .unverified(let path) = incomingCopy { return "The unused copy may still be at \(path)" }
             return nil
         }
     }
@@ -108,6 +125,8 @@ public enum ReplaceOutcome: Sendable, Equatable {
     case replaced
     /// The destination holds the copy; the original it displaced is still beside it at `path`.
     case replacedLeavingOriginal(path: String, reason: String)
+    /// The replacement is in place, but removal of the set-aside tree had no confirmed result.
+    case replacedWithInterruptedRemoval(path: String, reason: String)
 }
 
 public struct FileInfo: Sendable {
@@ -132,7 +151,11 @@ public struct FileTransport: Sendable {
     }
 
     public init(execute: @escaping @Sendable (String, [String]) async throws -> String) {
-        self.runCommand = { executable, arguments, _ in try await execute(executable, arguments) }
+        self.init { executable, arguments, _ in try await execute(executable, arguments) }
+    }
+
+    public init(execute: @escaping @Sendable (String, [String], Duration) async throws -> String) {
+        self.runCommand = execute
     }
 
     /// Runs a command and logs it and its outcome to the console.
@@ -232,6 +255,9 @@ public struct FileTransport: Sendable {
         }
         /// Ends a replacement whose move at `step` failed, by reading what the move left on disk.
         func settle(_ step: ReplaceError.Step, _ cause: any Error, swap: Swap) async throws(ReplaceError) -> ReplaceOutcome {
+            if cause.isCommandInterruption {
+                throw failure(step, cause, aftermath: .destinationUnverified)
+            }
             let onDisk: (destination: Bool, incoming: Bool, setAside: Bool)
             do {
                 onDisk = (try await holdsName(destination), try await holdsName(incoming), try await holdsName(setAside))
@@ -296,6 +322,9 @@ public struct FileTransport: Sendable {
         do {
             try await remove(endpoint: setAside)
         } catch {
+            if error.isCommandInterruption {
+                return .replacedWithInterruptedRemoval(path: setAside.formatted, reason: error.localizedDescription)
+            }
             return .replacedLeavingOriginal(path: setAside.formatted, reason: error.localizedDescription)
         }
         return .replaced
@@ -360,11 +389,11 @@ public struct FileTransport: Sendable {
     public func remove(endpoint: EndpointURL) async throws {
         switch endpoint {
         case .local(let path):
-            _ = try await execute("/bin/rm", ["-rf", path], deadline: CommandDeadline.operation)
+            _ = try await execute("/bin/rm", ["-rf", path], deadline: CommandDeadline.transfer)
         case .ssh(let user, let host, let port, let path):
-            _ = try await execute(.remoteShell(user: user, host: host, port: port, command: "rm -rf \(Self.shellWord(path))"), deadline: CommandDeadline.operation)
+            _ = try await execute(.remoteShell(user: user, host: host, port: port, command: "rm -rf \(Self.shellWord(path))"), deadline: CommandDeadline.transfer)
         case .docker(let container, let path):
-            _ = try await execute("/usr/bin/docker", ["exec", container, "rm", "-rf", path], deadline: CommandDeadline.operation)
+            _ = try await execute("/usr/bin/docker", ["exec", container, "rm", "-rf", path], deadline: CommandDeadline.transfer)
         }
     }
 

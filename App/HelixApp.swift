@@ -123,7 +123,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !isDrainingCommands {
             isDrainingCommands = true
             Task {
-                await ProcessRunner.shared.terminateAll()
+                let drain = await ProcessRunner.shared.terminateAll()
+                if drain.unfinished > 0 {
+                    ConsoleLog.shared.log("Quit stopped waiting for \(drain.unfinished) unfinished commands.", level: .error)
+                }
                 sender.reply(toApplicationShouldTerminate: true)
             }
         }

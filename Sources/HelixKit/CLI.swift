@@ -21,10 +21,21 @@ public struct CLI: Sendable {
 
     let executablePath: String
     let baseArguments: [String]
+    private let execute: @Sendable (String, [String], Duration) async throws -> String
 
     public init(executablePath: String = CLI.defaultExecutablePath, baseArguments: [String] = []) {
+        self.init(executablePath: executablePath, baseArguments: baseArguments) { path, arguments, deadline in
+            try await runProcess(executablePath: path, arguments: arguments, deadline: deadline)
+        }
+    }
+
+    init(
+        executablePath: String, baseArguments: [String],
+        execute: @escaping @Sendable (String, [String], Duration) async throws -> String
+    ) {
         self.executablePath = executablePath
         self.baseArguments = baseArguments
+        self.execute = execute
     }
 
     public func syncList() async throws -> [SyncSession] {
@@ -45,7 +56,7 @@ public struct CLI: Sendable {
     // MARK: - Session Creation
 
     public func syncCreate(arguments: [String]) async throws -> String {
-        let output = try await run(arguments, deadline: CommandDeadline.operation)
+        let output = try await run(arguments, deadline: CommandDeadline.transfer)
         let prefix = "Created session "
         guard let receipt = output.split(whereSeparator: \.isNewline).last, receipt.hasPrefix(prefix) else {
             throw SyncCreateReceiptError()
@@ -69,7 +80,7 @@ public struct CLI: Sendable {
     }
 
     public func syncResume(_ identifier: String) async throws {
-        _ = try await run(["sync", "resume", identifier], deadline: CommandDeadline.operation)
+        _ = try await run(["sync", "resume", identifier], deadline: CommandDeadline.transfer)
     }
 
     public func syncFlush(_ identifier: String) async throws {
@@ -129,6 +140,6 @@ public struct CLI: Sendable {
     }
 
     private func run(_ arguments: [String], deadline: Duration) async throws -> String {
-        try await runProcess(executablePath: executablePath, arguments: baseArguments + arguments, deadline: deadline)
+        try await execute(executablePath, baseArguments + arguments, deadline)
     }
 }

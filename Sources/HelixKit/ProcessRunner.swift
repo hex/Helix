@@ -9,6 +9,7 @@ public enum CommandDeadline {
     public static let query: Duration = .seconds(15)
     public static let operation: Duration = .seconds(45)
     public static let transfer: Duration = .seconds(900)
+    public static let quitDrain: Duration = .seconds(3)
     static let terminationGrace: Duration = .milliseconds(250)
 }
 
@@ -21,6 +22,12 @@ public struct ProcessDeadlineError: LocalizedError, Sendable {
     }
 }
 
+extension Error {
+    var isCommandInterruption: Bool {
+        self is CancellationError || self is ProcessDeadlineError
+    }
+}
+
 /// Returns the child's stdout or throws its launch error, exit error, cancellation, or deadline error.
 public func runProcess(
     executablePath: String, arguments: [String], deadline: Duration = CommandDeadline.query
@@ -29,20 +36,45 @@ public func runProcess(
 }
 
 public actor ProcessRunner {
+    public struct DrainReport: Sendable {
+        public let interrupted: Int
+        public let unfinished: Int
+    }
+
+    private struct DrainWaiter {
+        let continuation: CheckedContinuation<Void, Never>
+        let timer: Task<Void, Never>
+    }
+
     public static let shared = ProcessRunner()
 
+    private var drainWaiters: [UUID: DrainWaiter] = [:]
     private var children: [ObjectIdentifier: RunningChild] = [:]
     private var isShuttingDown = false
+    private let waitForDeadline: @Sendable (ContinuousClock.Instant) async throws -> Void
+
+    init(waitForDeadline: @escaping @Sendable (ContinuousClock.Instant) async throws -> Void = {
+        try await ContinuousClock().sleep(until: $0)
+    }) {
+        self.waitForDeadline = waitForDeadline
+    }
 
     func run(executablePath: String, arguments: [String], deadline: Duration) async throws -> String {
         precondition(deadline > .zero, "Command deadlines must be positive")
         try Task.checkCancellation()
         guard !isShuttingDown else { throw CancellationError() }
 
-        let child = RunningChild(executablePath: executablePath, arguments: arguments, deadline: deadline)
+        let child = RunningChild(
+            executablePath: executablePath, arguments: arguments, deadline: deadline, waitForDeadline: waitForDeadline
+        )
         let identifier = ObjectIdentifier(child)
         children[identifier] = child
-        defer { children.removeValue(forKey: identifier) }
+        defer {
+            children.removeValue(forKey: identifier)
+            if children.isEmpty {
+                for waiter in Array(drainWaiters.keys) { finishDrain(waiter) }
+            }
+        }
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 child.launch(continuation)
@@ -52,15 +84,31 @@ public actor ProcessRunner {
         }
     }
 
-    /// Closes command admission, ends every tracked command, and returns their count.
+    /// Closes command admission, interrupts tracked commands, and waits within the quit budget.
     @discardableResult
-    public func terminateAll() async -> Int {
+    public func terminateAll(within budget: Duration = CommandDeadline.quitDrain) async -> DrainReport {
+        precondition(budget >= .zero, "The quit budget must not be negative")
+        let deadline = ContinuousClock.now.advanced(by: budget)
         isShuttingDown = true
-        let running = Array(children.values)
-        for child in running { child.interrupt(throwing: CancellationError()) }
-        for child in running { await child.waitUntilFinished() }
-        children.removeAll()
-        return running.count
+        let count = children.count
+        for child in children.values { child.interrupt(throwing: CancellationError()) }
+        if count > 0, ContinuousClock.now < deadline {
+            let id = UUID()
+            await withCheckedContinuation { continuation in
+                let timer = Task { [weak self] in
+                    guard (try? await ContinuousClock().sleep(until: deadline)) != nil else { return }
+                    await self?.finishDrain(id)
+                }
+                drainWaiters[id] = DrainWaiter(continuation: continuation, timer: timer)
+            }
+        }
+        return DrainReport(interrupted: count, unfinished: children.count)
+    }
+
+    private func finishDrain(_ id: UUID) {
+        guard let waiter = drainWaiters.removeValue(forKey: id) else { return }
+        waiter.timer.cancel()
+        waiter.continuation.resume()
     }
 }
 
@@ -70,13 +118,13 @@ private final class RunningChild: @unchecked Sendable {
     private let process = Process()
     private let executablePath: String
     private let deadline: Duration
+    private let waitForDeadline: @Sendable (ContinuousClock.Instant) async throws -> Void
     private let stdoutPipe = Pipe()
     private let stderrPipe = Pipe()
 
     private var continuation: CheckedContinuation<String, Error>?
-    private var completionWaiters: [CheckedContinuation<Void, Never>] = []
     private var channels: [DispatchIO] = []
-    private var deadlineTimer: DispatchSourceTimer?
+    private var deadlineTimer: Task<Void, Never>?
     private var openPipes = 0
     private var stdout = Data()
     private var stderr = Data()
@@ -86,9 +134,13 @@ private final class RunningChild: @unchecked Sendable {
     private var escalating = false
     private var finished = false
 
-    init(executablePath: String, arguments: [String], deadline: Duration) {
+    init(
+        executablePath: String, arguments: [String], deadline: Duration,
+        waitForDeadline: @escaping @Sendable (ContinuousClock.Instant) async throws -> Void
+    ) {
         self.executablePath = executablePath
         self.deadline = deadline
+        self.waitForDeadline = waitForDeadline
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = arguments
         process.standardOutput = stdoutPipe
@@ -132,31 +184,27 @@ private final class RunningChild: @unchecked Sendable {
                 self.drain(self.stdoutPipe.fileHandleForReading, as: \.stdout),
                 self.drain(self.stderrPipe.fileHandleForReading, as: \.stderr),
             ]
-            let timer = DispatchSource.makeTimerSource(queue: self.queue)
-            timer.schedule(deadline: .now() + self.deadline.timeInterval)
-            timer.setEventHandler { [weak self] in
-                guard let self else { return }
-                self.beginInterruption(ProcessDeadlineError(executablePath: self.executablePath, deadline: self.deadline))
+            self.startDeadline()
+        }
+    }
+
+    private func startDeadline() {
+        let expiry = ContinuousClock.now.advanced(by: deadline)
+        let error = ProcessDeadlineError(executablePath: executablePath, deadline: deadline)
+        deadlineTimer = Task { [weak self, waitForDeadline] in
+            do {
+                try await waitForDeadline(expiry)
+                self?.interrupt(throwing: error)
+            } catch is CancellationError {
+                return
+            } catch {
+                self?.interrupt(throwing: error)
             }
-            self.deadlineTimer = timer
-            timer.activate()
         }
     }
 
     func interrupt(throwing error: Error) {
         queue.async { self.beginInterruption(error) }
-    }
-
-    func waitUntilFinished() async {
-        await withCheckedContinuation { continuation in
-            queue.async {
-                if self.finished {
-                    continuation.resume()
-                } else {
-                    self.completionWaiters.append(continuation)
-                }
-            }
-        }
     }
 
     private func beginInterruption(_ error: Error) {
@@ -229,8 +277,6 @@ private final class RunningChild: @unchecked Sendable {
         let waiting = continuation
         continuation = nil
         waiting?.resume(with: result)
-        for waiter in completionWaiters { waiter.resume() }
-        completionWaiters.removeAll()
     }
 }
 

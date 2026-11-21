@@ -867,6 +867,37 @@ struct RecreateSessionTests {
         #expect(editing == "\(warning) The original session was kept. Mutagen reported: \(detail)")
     }
 
+    @Test("An interrupted replacement activation keeps its edit record for relaunch", arguments: [true, false])
+    @MainActor
+    func interruptedActivationKeepsEditRecord(cancelled: Bool) async throws {
+        let suite = "InterruptedActivationTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let original = makeSyncSession(id: "sync_original", name: "project")
+        let replacement = makeSyncSession(id: "sync_" + String(repeating: "J", count: 43), name: "project", paused: true)
+        let provider = RecordingProvider(
+            syncSessions: [original], sessionsAfterCreate: [original, replacement],
+            beforeSyncResume: { identifier in
+                if identifier == replacement.identifier {
+                    if cancelled { throw CancellationError() }
+                    throw ProcessDeadlineError(executablePath: "/usr/bin/mutagen", deadline: .seconds(15))
+                }
+            }
+        )
+        let store = SessionStore(provider: provider, defaults: defaults)
+        await store.recreateSync(original, options: SyncCreateOptions(from: original), alpha: "/srv/project", beta: "/srv/mirror")
+
+        let saved = defaults.dictionary(forKey: "syncEditInProgress") as? [String: String]
+        #expect(saved?["original"] == original.identifier)
+        #expect(saved?["replacement"] == replacement.identifier)
+        #expect(!provider.calls.contains("syncResume:sync_original"))
+
+        let relaunched = SessionStore(provider: provider, defaults: defaults)
+        await relaunched.refresh()
+        #expect(relaunched.interruptedEditNotice?.contains(replacement.identifier) == true)
+        #expect(relaunched.leftoverSyncOriginals == [original.identifier: replacement.identifier])
+    }
+
     @Test("A failed replacement start removes it before resuming the original")
     @MainActor
     func startFailureRestoresOriginal() async {
@@ -1603,6 +1634,7 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
     private var _created = false
     private let failOn: String?
     private let beforeSyncPause: (@Sendable (String) async -> Void)?
+    private let beforeSyncResume: (@Sendable (String) async throws -> Void)?
     private let duringSyncCreate: (@Sendable () async throws -> Void)?
     private let beforeSyncTerminate: (@Sendable () async -> Void)?
     private let recordQueries: Bool
@@ -1614,6 +1646,7 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
         sessionsAfterCreate: [SyncSession]? = nil,
         failOn: String? = nil,
         beforeSyncPause: (@Sendable (String) async -> Void)? = nil,
+        beforeSyncResume: (@Sendable (String) async throws -> Void)? = nil,
         duringSyncCreate: (@Sendable () async throws -> Void)? = nil,
         beforeSyncTerminate: (@Sendable () async -> Void)? = nil,
         recordQueries: Bool = false
@@ -1623,6 +1656,7 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
         self.sessionsAfterCreate = sessionsAfterCreate
         self.failOn = failOn
         self.beforeSyncPause = beforeSyncPause
+        self.beforeSyncResume = beforeSyncResume
         self.duringSyncCreate = duringSyncCreate
         self.beforeSyncTerminate = beforeSyncTerminate
         self.recordQueries = recordQueries
@@ -1683,7 +1717,10 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
         await beforeSyncPause?(identifier)
         try record("syncPause:\(identifier)")
     }
-    func syncResume(_ identifier: String) async throws { try record("syncResume:\(identifier)") }
+    func syncResume(_ identifier: String) async throws {
+        try record("syncResume:\(identifier)")
+        try await beforeSyncResume?(identifier)
+    }
     func syncFlush(_ identifier: String) async throws {
         try record("syncFlush:\(identifier)")
         lock.lock()
