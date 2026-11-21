@@ -13,6 +13,14 @@ public func runProcess(executablePath: String, arguments: [String]) async throws
     process.standardOutput = stdoutPipe
     process.standardError = stderrPipe
 
+    // The exit code arrives through the termination handler: waitUntilExit, called off the main thread,
+    // can miss the exit of a short-lived child and then never return.
+    let (exitCodes, exitCodeSource) = AsyncStream<Int32>.makeStream()
+    process.terminationHandler = { finished in
+        exitCodeSource.yield(finished.terminationStatus)
+        exitCodeSource.finish()
+    }
+
     try process.run()
 
     // Both pipes are drained while the child runs: a child whose output fills a pipe's
@@ -21,7 +29,10 @@ public func runProcess(executablePath: String, arguments: [String]) async throws
     async let stderrData = readToEnd(stderrPipe.fileHandleForReading)
     let stdout = String(data: await stdoutData, encoding: .utf8) ?? ""
     let stderr = String(data: await stderrData, encoding: .utf8) ?? ""
-    let exitCode = await terminationStatus(of: process)
+    var exitCodeIterator = exitCodes.makeAsyncIterator()
+    guard let exitCode = await exitCodeIterator.next() else {
+        preconditionFailure("\(executablePath) ended without its termination handler reporting an exit code")
+    }
 
     guard exitCode == 0 else {
         throw CLIError(
@@ -37,16 +48,6 @@ private func readToEnd(_ handle: FileHandle) async -> Data {
     await withCheckedContinuation { continuation in
         DispatchQueue.global().async {
             continuation.resume(returning: handle.readDataToEndOfFile())
-        }
-    }
-}
-
-/// Waits for the process to exit on a dispatch thread and returns its exit code.
-private func terminationStatus(of process: Process) async -> Int32 {
-    await withCheckedContinuation { continuation in
-        DispatchQueue.global().async {
-            process.waitUntilExit()
-            continuation.resume(returning: process.terminationStatus)
         }
     }
 }
