@@ -409,8 +409,12 @@ public final class SessionStore {
         }
 
         do {
-            try await provider.syncResume(original)
-            messages.append("The original session was restored.")
+            switch try await resumeUnlessHeld(original) {
+            case .resumed:
+                messages.append("The original session was restored.")
+            case .heldBack(let hold):
+                messages.append("Original session \(original) was kept and stays paused. \(hold)")
+            }
         } catch {
             messages.append("Original session \(original) was kept. Could not resume it: \(error.localizedDescription).")
         }
@@ -512,8 +516,8 @@ public final class SessionStore {
     }
 
     /// The only way the store resumes a session that the user did not ask it by name to resume: at the end
-    /// of a conflict resolve, for Resume after Pause All, and at a timed pause's deadline. A held session
-    /// stays paused.
+    /// of a conflict resolve, for Resume after Pause All, at a timed pause's deadline, and to restore the
+    /// original of a failed edit. A held session stays paused.
     private func resumeUnlessHeld(_ identifier: String) async throws -> UnpromptedResume {
         if let message = sessionHolds[identifier] {
             return .heldBack(message: message)
