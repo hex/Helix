@@ -930,6 +930,48 @@ struct ConflictResolutionTests {
         #expect(flushCalls.isEmpty)
     }
 
+    @Test("A conflict at the sync root is refused before pausing or running any file command")
+    @MainActor
+    func rootConflictRefused() async {
+        let conflict = Conflict(root: "", alphaChanges: [], betaChanges: [])
+        let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [conflict])
+        let recorder = RecordingProvider(syncSessions: [session])
+        let cmdRecorder = CommandRecorder()
+        let transport = FileTransport(execute: cmdRecorder.execute)
+        let store = SessionStore(provider: recorder, fileTransport: transport)
+        await store.refresh()
+
+        await store.resolveConflict(session: session, conflict: conflict, winner: .alpha)
+
+        #expect(store.lastError == "The conflict in \"s1\" is at the sync root, where resolving it would replace a whole endpoint. Resolve a root-level conflict by hand.")
+        #expect(recorder.calls.isEmpty)
+        #expect(cmdRecorder.commands.isEmpty)
+    }
+
+    @Test("Bulk resolve counts a conflict at the sync root as failed and resolves the others")
+    @MainActor
+    func bulkRootConflictRefused() async {
+        let rootConflict = Conflict(root: "", alphaChanges: [], betaChanges: [])
+        let deletion = Conflict(
+            root: "gone.txt",
+            alphaChanges: [Change(path: "gone.txt", old: Entry(kind: "file", digest: nil, executable: nil), new: nil)],
+            betaChanges: []
+        )
+        let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [rootConflict, deletion])
+        let recorder = RecordingProvider(syncSessions: [session])
+        let cmdRecorder = CommandRecorder()
+        let transport = FileTransport(execute: cmdRecorder.execute)
+        let store = SessionStore(provider: recorder, fileTransport: transport)
+        await store.refresh()
+
+        await store.resolveConflicts(session: session, conflicts: [rootConflict, deletion], winner: .alpha)
+
+        #expect(store.lastError == "1 of 2 conflicts could not be resolved. The conflict in \"s1\" is at the sync root, where resolving it would replace a whole endpoint. Resolve a root-level conflict by hand.")
+        #expect(recorder.calls == ["syncPause:sync_1", "syncResume:sync_1", "syncFlush:sync_1"])
+        #expect(cmdRecorder.commands.map(\.executable) == ["/bin/rm"])
+        #expect(cmdRecorder.commands.map(\.arguments) == [["-rf", "/tmp/b/gone.txt"]])
+    }
+
     @Test("Bulk resolve pauses once, resolves all, then resumes and flushes once")
     @MainActor
     func bulkResolve() async {

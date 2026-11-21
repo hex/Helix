@@ -507,6 +507,12 @@ public final class SessionStore {
         conflict: Conflict,
         winner: ConflictWinner
     ) async {
+        guard !conflict.root.isEmpty else {
+            ConsoleLog.shared.log("resolveConflict: refused the conflict at the sync root", level: .error)
+            lastError = rootConflictRefusal(in: session)
+            return
+        }
+
         let alphaURL = appendingSubpath(to: session.alpha.endpointURL, subpath: conflict.root)
         let betaURL = appendingSubpath(to: session.beta.endpointURL, subpath: conflict.root)
 
@@ -582,6 +588,17 @@ public final class SessionStore {
 
         ConsoleLog.shared.log("resolveConflicts: \(winner) wins for \(conflicts.count) conflicts")
 
+        let fileConflicts = conflicts.filter { !$0.root.isEmpty }
+        let refusal = fileConflicts.count < conflicts.count ? rootConflictRefusal(in: session) : nil
+        var failed = conflicts.count - fileConflicts.count
+        if let refusal {
+            ConsoleLog.shared.log("  refused the conflict at the sync root", level: .error)
+            guard !fileConflicts.isEmpty else {
+                lastError = "\(failed) of \(conflicts.count) conflicts could not be resolved. \(refusal)"
+                return
+            }
+        }
+
         do {
             try await provider.syncPause(session.identifier)
             ConsoleLog.shared.log("  paused session")
@@ -592,8 +609,7 @@ public final class SessionStore {
         }
 
         var resolved = 0
-        var failed = 0
-        for conflict in conflicts {
+        for conflict in fileConflicts {
             let alphaURL = appendingSubpath(to: session.alpha.endpointURL, subpath: conflict.root)
             let betaURL = appendingSubpath(to: session.beta.endpointURL, subpath: conflict.root)
             let (winnerURL, loserURL) = switch winner {
@@ -629,7 +645,8 @@ public final class SessionStore {
             try await provider.syncResume(session.identifier)
             try await provider.syncFlush(session.identifier)
             if failed > 0 {
-                lastError = "\(failed) of \(conflicts.count) conflicts could not be resolved."
+                let summary = "\(failed) of \(conflicts.count) conflicts could not be resolved."
+                lastError = refusal.map { "\(summary) \($0)" } ?? summary
             } else {
                 lastError = nil
             }
@@ -637,6 +654,11 @@ public final class SessionStore {
             ConsoleLog.shared.log("  flush FAILED: \(error.localizedDescription)", level: .error)
             lastError = error.localizedDescription
         }
+    }
+
+    /// Why a conflict at the sync root is left alone: its loser path is the endpoint itself.
+    private func rootConflictRefusal(in session: SyncSession) -> String {
+        "The conflict in \"\(session.name ?? session.identifier)\" is at the sync root, where resolving it would replace a whole endpoint. Resolve a root-level conflict by hand."
     }
 
     // MARK: - Git Repo Detection
