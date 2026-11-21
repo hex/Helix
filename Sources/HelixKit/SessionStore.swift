@@ -45,6 +45,7 @@ public enum HealthStatus: Sendable {
 public enum DaemonStatus: String, Sendable {
     case running = "Running"
     case stopped = "Stopped"
+    case startedOutside = "Mutagen was started outside Helix"
     case unknown = "Status unknown"
 }
 
@@ -56,7 +57,7 @@ public final class SessionStore {
     public private(set) var syncSessions: [SyncSession] = []
     public private(set) var forwardSessions: [ForwardSession] = []
     public private(set) var daemonStatus = DaemonStatus.stopped
-    public var daemonRunning: Bool { daemonStatus == .running }
+    public var daemonRunning: Bool { daemonStatus == .running || daemonStatus == .startedOutside }
     public private(set) var daemonStopProgress: String?
     public private(set) var daemonAutoStart = false
     public private(set) var mutagenVersion: String?
@@ -99,9 +100,13 @@ public final class SessionStore {
     private let provider: ManagedSessionProvider
     private var pollingTask: Task<Void, Never>?
     @ObservationIgnored private var pollingInterval: TimeInterval?
+    @ObservationIgnored private var stoppedDaemonCheck: UUID?
     private var daemonControl: ManagedSessionProvider.Control {
         get { provider.control }
-        set { provider.control = newValue }
+        set {
+            if provider.control != newValue { stoppedDaemonCheck = nil }
+            provider.control = newValue
+        }
     }
     @ObservationIgnored private var activeSessionLists: [UUID: Task<SessionLists, Error>] = [:]
     private let fileTransport: FileTransport
@@ -228,6 +233,7 @@ public final class SessionStore {
     }
 
     public func replaceDaemonProcess(_ daemonProcess: any DaemonProcess) {
+        stoppedDaemonCheck = nil
         self.daemonProcess = daemonProcess
     }
 
@@ -288,6 +294,10 @@ public final class SessionStore {
     }
 
     public func refresh() async {
+        if daemonControl == .stopped {
+            await checkStoppedDaemonStatus()
+            return
+        }
         if await reloadSessions(), let resumeAt = bulkPause?.resumeAt, now() >= resumeAt {
             await resumeBulkPause()
         }
@@ -372,8 +382,32 @@ public final class SessionStore {
     }
 
     public func manualRefresh() async {
-        await reloadSessions(force: true)
+        if daemonControl == .stopped {
+            await checkStoppedDaemonStatus()
+        } else {
+            await reloadSessions(force: true)
+        }
         refreshCount += 1
+    }
+
+    private func checkStoppedDaemonStatus() async {
+        guard stoppedDaemonCheck == nil else { return }
+        let check = UUID()
+        stoppedDaemonCheck = check
+        defer {
+            if stoppedDaemonCheck == check { stoppedDaemonCheck = nil }
+        }
+        do {
+            let running = try await daemonProcess.pid() != nil
+            guard stoppedDaemonCheck == check else { return }
+            let observed: DaemonStatus = running ? .startedOutside : .stopped
+            if daemonStatus != observed { daemonStatus = observed }
+        } catch is CancellationError {
+            return
+        } catch {
+            guard stoppedDaemonCheck == check else { return }
+            ConsoleLog.shared.log("Could not check the Mutagen process: \(error.localizedDescription)", level: .error)
+        }
     }
 
     // MARK: - Session Creation
@@ -888,18 +922,22 @@ public final class SessionStore {
 
     // MARK: - Daemon
 
+    public func manageExternalDaemon() async {
+        guard daemonControl == .stopped, daemonStatus == .startedOutside else { return }
+        setManagedDaemonStatus(.running)
+        await refresh()
+        schedulePolling(refreshImmediately: false)
+    }
+
     public func startDaemon() async {
-        guard daemonControl == .managed || daemonControl == .stopped else { return }
+        guard daemonControl == .managed || (daemonControl == .stopped && daemonStatus != .startedOutside) else { return }
         let previousControl = daemonControl
         daemonControl = .starting
         do {
             try await provider.daemonStart()
-            defaults.removeObject(forKey: Self.daemonStoppedKey)
-            daemonControl = .managed
-            daemonStatus = .running
-            lastError = nil
+            setManagedDaemonStatus(.running)
             await refresh()
-            schedulePollingIfManaged(refreshImmediately: false)
+            schedulePolling(refreshImmediately: false)
         } catch {
             daemonControl = previousControl
             lastError = error.localizedDescription
@@ -912,7 +950,8 @@ public final class SessionStore {
             lastError = "Mutagen is already stopping."
             return false
         }
-        guard daemonControl == .managed else { return false }
+        let wasStopped = daemonControl == .stopped
+        guard daemonControl == .managed || (wasStopped && daemonStatus == .startedOutside) else { return false }
 
         if let operation = operationBlockingDaemonStop {
             lastError = "Wait for the \(operation) to finish before stopping the Mutagen daemon."
@@ -939,12 +978,13 @@ public final class SessionStore {
             let stopError = "Could not stop Mutagen: \(error.localizedDescription)"
             do {
                 if try await daemonProcess.pid() != nil {
-                    resumeManagingDaemon(status: .running, error: stopError)
+                    restoreAfterFailedStop(wasStopped: wasStopped, status: .running, error: stopError)
                     return false
                 }
             } catch {
-                resumeManagingDaemon(
-                    status: .unknown, error: "\(stopError). Could not verify its status: \(error.localizedDescription)"
+                restoreAfterFailedStop(
+                    wasStopped: wasStopped, status: .unknown,
+                    error: "\(stopError). Could not verify its status: \(error.localizedDescription)"
                 )
                 return false
             }
@@ -957,15 +997,25 @@ public final class SessionStore {
         backgroundPriorityPID = nil
         setDaemonPriorityError(daemonBackgroundPriorityRequested ? "Mutagen daemon not found." : nil)
         lastError = nil
+        schedulePolling(refreshImmediately: false)
         return true
     }
 
-    private func resumeManagingDaemon(status: DaemonStatus, error: String) {
+    private func setManagedDaemonStatus(_ status: DaemonStatus) {
         defaults.removeObject(forKey: Self.daemonStoppedKey)
-        daemonStatus = status
         daemonControl = .managed
+        daemonStatus = status
+        lastError = nil
+    }
+
+    private func restoreAfterFailedStop(wasStopped: Bool, status: DaemonStatus, error: String) {
+        if wasStopped {
+            daemonControl = .stopped
+        } else {
+            setManagedDaemonStatus(status)
+        }
         lastError = error
-        schedulePollingIfManaged(refreshImmediately: false)
+        schedulePolling(refreshImmediately: false)
     }
 
     private var operationBlockingDaemonStop: String? {
@@ -1636,7 +1686,7 @@ public final class SessionStore {
     public func startPolling(interval: TimeInterval = 5.0) {
         cancelPolling()
         pollingInterval = interval
-        schedulePollingIfManaged(refreshImmediately: true)
+        schedulePolling(refreshImmediately: true)
     }
 
     public func stopPolling() {
@@ -1649,8 +1699,9 @@ public final class SessionStore {
         pollingTask = nil
     }
 
-    private func schedulePollingIfManaged(refreshImmediately: Bool) {
-        guard daemonControl == .managed, pollingTask == nil, let interval = pollingInterval else { return }
+    private func schedulePolling(refreshImmediately: Bool) {
+        guard daemonControl == .managed || daemonControl == .stopped else { return }
+        guard pollingTask == nil, let interval = pollingInterval else { return }
         pollingTask = Task { [weak self] in
             if refreshImmediately { await self?.refresh() }
             while !Task.isCancelled {
