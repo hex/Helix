@@ -16,7 +16,7 @@
 
 ## Features
 
-- **Menu bar status** -- Live icon reflects overall session health at a glance (healthy, syncing, conflicts, errors)
+- **Menu bar status** -- Live icon reflects overall session health at a glance (healthy, syncing or connecting, a warning for conflicts or a session that cannot connect, errors)
 - **Menu bar menu** -- Right-click the icon to open Helix, pause every running sync session, pause them for the minutes you enter, or quit; Resume restores only the sessions Pause All paused, and a timed pause resumes on its own, even after you quit and reopen Helix
 - **Session dashboard** -- Browse, search, and filter all sync and forward sessions in a three-column window
 - **Connection errors** -- When a session cannot connect, the detail view shows mutagen's own reason under the status line

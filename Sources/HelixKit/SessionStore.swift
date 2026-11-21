@@ -142,10 +142,11 @@ public final class SessionStore {
         }
         let hasConflicts = totalConflictCount > 0
         let hasHalted = running.contains { $0.phase == .halted }
-        if hasConflicts || hasHalted {
+        let failsToConnect = running.contains { $0.phase == .connecting && !($0.lastError ?? "").isEmpty }
+        if hasConflicts || hasHalted || failsToConnect {
             return .warning
         }
-        let hasActive = running.contains { $0.phase == .working }
+        let hasActive = running.contains { $0.phase == .working || $0.phase == .connecting }
         if hasActive {
             return .active
         }

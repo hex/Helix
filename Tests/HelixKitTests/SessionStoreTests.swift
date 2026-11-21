@@ -185,6 +185,29 @@ struct SessionStoreTests {
         #expect(store.overallHealth == .warning)
     }
 
+    @Test("Health status is warning while a session fails to connect")
+    @MainActor
+    func healthConnectingWithError() async {
+        let session = makeSyncSession(
+            id: "sync_1", name: "unreachable", status: "connecting-beta",
+            lastError: "beta polling error: unable to send poll request: message transmission failed: write |1: broken pipe"
+        )
+        let store = SessionStore(provider: FakeProvider(syncSessions: [session]))
+        await store.refresh()
+
+        #expect(store.overallHealth == .warning)
+    }
+
+    @Test("Health status is active while a session connects without an error")
+    @MainActor
+    func healthConnecting() async {
+        let session = makeSyncSession(id: "sync_1", name: "starting", status: "connecting-beta")
+        let store = SessionStore(provider: FakeProvider(syncSessions: [session]))
+        await store.refresh()
+
+        #expect(store.overallHealth == .active)
+    }
+
     @Test("Total session count includes both sync and forward")
     @MainActor
     func totalCount() async {
@@ -703,7 +726,8 @@ func makeSyncSession(
     conflicts: [Conflict]? = nil,
     ignorePaths: [String]? = nil,
     alpha: Endpoint = makeEndpoint(path: "/tmp/a"),
-    beta: Endpoint = makeEndpoint(path: "/tmp/b")
+    beta: Endpoint = makeEndpoint(path: "/tmp/b"),
+    lastError: String? = nil
 ) -> SyncSession {
     SyncSession(
         identifier: id,
@@ -723,7 +747,8 @@ func makeSyncSession(
         watch: WatchConfig(mode: nil, pollingInterval: nil),
         permissions: PermissionsConfig(mode: nil, defaultFileMode: nil, defaultDirectoryMode: nil, defaultOwner: nil, defaultGroup: nil),
         compression: CompressionConfig(algorithm: nil),
-        conflicts: conflicts
+        conflicts: conflicts,
+        lastError: lastError
     )
 }
 
