@@ -279,6 +279,13 @@ public final class SessionStore {
             return message
         }
         guard !syncEditInFlight else { return "Another sync edit is already in progress." }
+        // Mutagen parses numeric byte sizes as floating point before converting to an integer.
+        if let size = options.maxStagingFileSize, let bytes = UInt64(size),
+           UInt64(exactly: Double(bytes)) != bytes {
+            let message = "Mutagen cannot recreate the staging file limit of \(bytes) bytes exactly. The original session was kept."
+            lastError = message
+            return message
+        }
         syncEditInFlight = true
         defer { syncEditInFlight = false }
 
@@ -1181,11 +1188,12 @@ public final class SessionStore {
             hasher.combine(s.name)
             hasher.combine(s.status)
             hasher.combine(s.paused)
-            hasher.combine(s.mode)
+            hasher.combine(s.configuration)
             hasher.combine(s.conflicts ?? [])
             hasher.combine(s.excludedConflicts)
             for endpoint in [s.alpha, s.beta] {
                 hasher.combine(endpoint.connected)
+                hasher.combine(endpoint.configuration)
                 hasher.combine(endpoint.stagingProgress)
                 hasher.combine(endpoint.scanProblems)
                 hasher.combine(endpoint.excludedScanProblems)

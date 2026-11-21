@@ -1,0 +1,76 @@
+{
+  "identifier": "sync_example",
+  "version": 1,
+  "creationTime": "2026-01-01T00:00:00Z",
+  "creatingVersion": "0.18.1",
+  "name": "project-mirror",
+  "alpha": {
+    "protocol": "local",
+    "path": "/srv/project",
+    "probeMode": "probe",
+    "stageMode": "internal",
+    "ignore": {},
+    "symlink": {},
+    "watch": {
+      "mode": "portable",
+      "pollingInterval": 10
+    },
+    "permissions": {
+      "defaultFileMode": "0600"
+    },
+    "compression": {},
+    "connected": true,
+    "scanned": true
+  },
+  "beta": {
+    "protocol": "ssh",
+    "user": "alice",
+    "host": "example.com",
+    "path": "/srv/mirror",
+    "scanMode": "accelerated",
+    "ignore": {},
+    "symlink": {},
+    "watch": {},
+    "permissions": {
+      "defaultGroup": "mirrors"
+    },
+    "compression": {
+      "algorithm": "deflate"
+    },
+    "connected": true,
+    "scanned": true
+  },
+  "mode": "one-way-safe",
+  "hash": "xxh128",
+  "maxEntryCount": 4294967296,
+  "maxStagingFileSize": 10485760,
+  "probeMode": "assume",
+  "scanMode": "full",
+  "stageMode": "neighboring",
+  "ignore": {
+    "syntax": "docker",
+    "paths": [
+      "cache/"
+    ],
+    "vcs": true
+  },
+  "symlink": {
+    "mode": "posix-raw"
+  },
+  "watch": {
+    "mode": "force-poll",
+    "pollingInterval": 21
+  },
+  "permissions": {
+    "mode": "portable",
+    "defaultFileMode": "0644",
+    "defaultDirectoryMode": "0755",
+    "defaultOwner": "alice",
+    "defaultGroup": "developers"
+  },
+  "compression": {
+    "algorithm": "none"
+  },
+  "paused": false,
+  "status": "watching"
+}

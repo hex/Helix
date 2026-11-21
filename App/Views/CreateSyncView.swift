@@ -346,7 +346,7 @@ struct CreateSyncView: View {
         opts.mode = syncMode
         opts.paused = createPaused
         opts.ignorePaths = ignorePaths
-        opts.ignoreVCS = ignoreVCS
+        if ignoreVCS { opts.ignoreVCS = true }
         if symlinkMode != "portable" { opts.symlinkMode = symlinkMode }
         if compression != "none" { opts.compression = compression }
         if watchMode != "portable" { opts.watchMode = watchMode }

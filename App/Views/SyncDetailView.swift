@@ -487,8 +487,18 @@ struct SyncDetailView: View {
 
     // MARK: - Configuration
 
+    private struct ConfigurationRow {
+        let label: String
+        let value: String
+    }
+
     private var configurationSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let configuration = session.configuration
+        let sessionRows = configurationRows(for: configuration)
+        let alphaRows = configurationRows(for: session.alpha.configuration, inheriting: configuration)
+        let betaRows = configurationRows(for: session.beta.configuration, inheriting: configuration)
+
+        return VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Configuration")
                     .font(.headline)
@@ -499,52 +509,90 @@ struct SyncDetailView: View {
                 .controlSize(.small)
             }
 
-            VStack(alignment: .leading, spacing: 0) {
-                configRow("Mode", session.mode ?? "two-way-safe")
-                configRow("Symlinks", session.symlink.mode ?? "portable")
-                configRow("Watch", session.watch.mode ?? "portable")
-                configRow("Permissions", session.permissions.mode ?? "portable")
-                configRow("Compression", session.compression.algorithm ?? "deflate")
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-
-            if let paths = session.ignore.paths, !paths.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Ignore Rules")
-                        .font(.callout)
-                        .fontWeight(.semibold)
-                        .foregroundStyle(.secondary)
-
-                    FlowLayout(spacing: 6) {
-                        ForEach(paths, id: \.self) { path in
-                            Text(path)
-                                .font(.caption)
-                                .monospaced()
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(.background.secondary)
-                                .clipShape(RoundedRectangle(cornerRadius: 4))
-                        }
-                    }
-                }
-                .padding(.top, 4)
+            if sessionRows.isEmpty && alphaRows.isEmpty && betaRows.isEmpty {
+                Text("All settings use Mutagen defaults.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                configurationGroup("Session", rows: sessionRows)
+                configurationGroup("Alpha Overrides", rows: alphaRows)
+                configurationGroup("Beta Overrides", rows: betaRows)
             }
         }
     }
 
+    @ViewBuilder
+    private func configurationGroup(_ label: String, rows: [ConfigurationRow]) -> some View {
+        if !rows.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(label)
+                    .font(.callout)
+                    .fontWeight(.semibold)
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(rows, id: \.label) { row in
+                        configRow(row.label, row.value)
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+        }
+    }
+
+    private func configurationRows(
+        for configuration: SyncConfiguration,
+        inheriting inherited: SyncConfiguration? = nil
+    ) -> [ConfigurationRow] {
+        let defaults = SyncConfiguration.defaults(forVersion: session.version)
+
+        func row<Value: Equatable>(
+            _ label: String,
+            _ field: KeyPath<SyncConfiguration, Value?>,
+            display: (Value) -> String = { String(describing: $0) }
+        ) -> ConfigurationRow? {
+            let baseline = inherited?[keyPath: field] ?? defaults[keyPath: field]
+            guard let value = configuration[keyPath: field], value != baseline else { return nil }
+            return ConfigurationRow(label: label, value: display(value))
+        }
+
+        let ignores = configuration.ignore?.paths ?? []
+        let rows: [ConfigurationRow?] = [
+            row("Mode", \.mode),
+            row("Hash", \.hash),
+            row("Max entries", \.maxEntryCount) { $0.formatted() },
+            row("Max staging file size", \.maxStagingFileSize) { "\($0.formatted()) bytes" },
+            row("Probe mode", \.probeMode),
+            row("Scan mode", \.scanMode),
+            row("Stage mode", \.stageMode),
+            ignores.isEmpty ? nil : ConfigurationRow(label: "Ignore rules", value: ignores.joined(separator: "\n")),
+            row("Ignore syntax", \.ignore?.syntax),
+            row("VCS directories", \.ignore?.vcs) { $0 ? "Ignore" : "Propagate" },
+            row("Symlinks", \.symlink?.mode),
+            row("Watch", \.watch?.mode),
+            row("Watch polling interval", \.watch?.pollingInterval) { "\($0.formatted()) s" },
+            row("Permissions", \.permissions?.mode),
+            row("Default file mode", \.permissions?.defaultFileMode),
+            row("Default directory mode", \.permissions?.defaultDirectoryMode),
+            row("Default owner", \.permissions?.defaultOwner),
+            row("Default group", \.permissions?.defaultGroup),
+            row("Compression", \.compression?.algorithm),
+        ]
+        return rows.compactMap { $0 }
+    }
+
     private func configRow(_ label: String, _ value: String) -> some View {
-        HStack {
+        HStack(alignment: .top) {
             Text(label)
                 .font(.callout)
                 .foregroundStyle(.secondary)
-                .frame(width: 100, alignment: .leading)
+                .frame(width: 150, alignment: .leading)
             Text(value)
-                .font(.callout)
-                .monospaced()
-            Spacer()
+                .font(.callout.monospaced())
+                .textSelection(.enabled)
+            Spacer(minLength: 0)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(.background.secondary)
     }
 

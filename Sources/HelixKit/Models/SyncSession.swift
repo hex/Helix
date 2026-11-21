@@ -16,6 +16,12 @@ public struct SyncSession: Codable, Identifiable, Hashable, Sendable {
     public let status: String
     public let successfulCycles: Int?
     public let mode: String?
+    public var hash: String? = nil
+    public var maxEntryCount: UInt64? = nil
+    public var maxStagingFileSize: UInt64? = nil
+    public var probeMode: String? = nil
+    public var scanMode: String? = nil
+    public var stageMode: String? = nil
     public let alpha: Endpoint
     public let beta: Endpoint
     public let ignore: IgnoreConfig
@@ -27,4 +33,12 @@ public struct SyncSession: Codable, Identifiable, Hashable, Sendable {
     public var excludedConflicts: UInt64? = nil
     /// Why mutagen last failed to connect or synchronize; absent when it reports no error.
     public var lastError: String? = nil
+
+    public var configuration: SyncConfiguration {
+        SyncConfiguration(
+            mode: mode, hash: hash, maxEntryCount: maxEntryCount, maxStagingFileSize: maxStagingFileSize,
+            probeMode: probeMode, scanMode: scanMode, stageMode: stageMode, ignore: ignore,
+            symlink: symlink, watch: watch, permissions: permissions, compression: compression
+        )
+    }
 }

@@ -15,6 +15,30 @@ struct SyncSessionTests {
         return try Data(contentsOf: url)
     }
 
+    @Test("Round-trips reported session configuration and endpoint overrides")
+    func decodesReportedConfiguration() throws {
+        let session = try decoder.decode(SyncSession.self, from: loadFixture("sync-list-configuration.json"))
+        let encoded = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(session)) as? [String: Any])
+        let alpha = try #require(encoded["alpha"] as? [String: Any])
+        let beta = try #require(encoded["beta"] as? [String: Any])
+
+        #expect(encoded["hash"] as? String == "xxh128")
+        #expect(encoded["maxEntryCount"] as? UInt64 == 4_294_967_296)
+        #expect(encoded["maxStagingFileSize"] as? UInt64 == 10_485_760)
+        #expect(alpha["stageMode"] as? String == "internal")
+        #expect(beta["scanMode"] as? String == "accelerated")
+        #expect(beta["stageMode"] == nil)
+        #expect(session.configuration.ignore?.vcs == true)
+        #expect(session.configuration.ignore?.syntax == "docker")
+        #expect(session.configuration.probeMode == "assume")
+        #expect(session.configuration.scanMode == "full")
+        #expect(session.configuration.stageMode == "neighboring")
+        #expect(session.alpha.configuration.watch?.pollingInterval == 10)
+        #expect(session.alpha.configuration.permissions?.defaultFileMode == "0600")
+        #expect(session.beta.configuration.permissions?.defaultGroup == "mirrors")
+        #expect(session.beta.configuration.compression?.algorithm == "deflate")
+    }
+
     @Test("Decodes real sync list JSON into array of SyncSession")
     func decodeSyncList() throws {
         let data = try loadFixture("sync-list.json")

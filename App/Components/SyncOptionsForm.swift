@@ -40,7 +40,7 @@ struct SyncOptionsForm: View {
                         .frame(minHeight: 80)
                         .clipShape(RoundedRectangle(cornerRadius: 4))
                         .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(.quaternary))
-                    Toggle("Apply .gitignore rules as sync ignore patterns", isOn: $ignoreVCS)
+                    Toggle("Ignore version control metadata", isOn: $ignoreVCS)
                 }
                 .padding(.top, 4)
             } label: {

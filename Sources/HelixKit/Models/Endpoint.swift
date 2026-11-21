@@ -14,6 +14,18 @@ public struct Endpoint: Codable, Hashable, Sendable {
     public let host: String?
     public let port: Int?
     public let path: String?
+    public var mode: String? = nil
+    public var hash: String? = nil
+    public var maxEntryCount: UInt64? = nil
+    public var maxStagingFileSize: UInt64? = nil
+    public var probeMode: String? = nil
+    public var scanMode: String? = nil
+    public var stageMode: String? = nil
+    public var ignore: IgnoreConfig? = nil
+    public var symlink: SymlinkConfig? = nil
+    public var watch: WatchConfig? = nil
+    public var permissions: PermissionsConfig? = nil
+    public var compression: CompressionConfig? = nil
     public let connected: Bool?
     public let scanned: Bool?
     public let directories: Int?
@@ -30,9 +42,19 @@ public struct Endpoint: Codable, Hashable, Sendable {
             || (excludedScanProblems ?? 0) > 0 || (excludedTransitionProblems ?? 0) > 0
     }
 
+    public var configuration: SyncConfiguration {
+        SyncConfiguration(
+            mode: mode, hash: hash, maxEntryCount: maxEntryCount, maxStagingFileSize: maxStagingFileSize,
+            probeMode: probeMode, scanMode: scanMode, stageMode: stageMode, ignore: ignore,
+            symlink: symlink, watch: watch, permissions: permissions, compression: compression
+        )
+    }
+
     enum CodingKeys: String, CodingKey {
         case protocol_ = "protocol"
         case user, host, port, path
+        case mode, hash, maxEntryCount, maxStagingFileSize, probeMode, scanMode, stageMode
+        case ignore, symlink, watch, permissions, compression
         case connected, scanned, directories, files, totalFileSize, stagingProgress
         case scanProblems, excludedScanProblems, transitionProblems, excludedTransitionProblems
     }

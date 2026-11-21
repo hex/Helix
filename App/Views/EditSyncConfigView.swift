@@ -29,11 +29,11 @@ struct EditSyncConfigView: View {
         _labels = State(initialValue: session.labels ?? [:])
         _syncMode = State(initialValue: session.mode ?? "two-way-safe")
         _ignoreInput = State(initialValue: (session.ignore.paths ?? []).joined(separator: "\n"))
-        _ignoreVCS = State(initialValue: false)
+        _ignoreVCS = State(initialValue: session.ignore.vcs ?? false)
         _symlinkMode = State(initialValue: session.symlink.mode ?? "portable")
         _compression = State(initialValue: session.compression.algorithm ?? "none")
         _watchMode = State(initialValue: session.watch.mode ?? "portable")
-        _stageMode = State(initialValue: "mutagen")
+        _stageMode = State(initialValue: session.stageMode ?? "mutagen")
     }
 
     var body: some View {
@@ -239,8 +239,8 @@ struct EditSyncConfigView: View {
             || symlinkMode != currentSymlink
             || compression != currentCompression
             || watchMode != currentWatch
-            || stageMode != "mutagen"
-            || ignoreVCS
+            || stageMode != (session.stageMode ?? "mutagen")
+            || ignoreVCS != (session.ignore.vcs ?? false)
     }
 
     // MARK: - Apply
@@ -251,11 +251,11 @@ struct EditSyncConfigView: View {
         opts.labels = labels
         opts.mode = syncMode
         opts.ignorePaths = ignorePaths
-        opts.ignoreVCS = ignoreVCS
+        if ignoreVCS != (session.ignore.vcs ?? false) { opts.ignoreVCS = ignoreVCS }
         if symlinkMode != "portable" { opts.symlinkMode = symlinkMode } else { opts.symlinkMode = nil }
         if compression != "none" { opts.compression = compression } else { opts.compression = nil }
         if watchMode != "portable" { opts.watchMode = watchMode } else { opts.watchMode = nil }
-        if stageMode != "mutagen" { opts.stageMode = stageMode } else { opts.stageMode = nil }
+        if stageMode != (session.stageMode ?? "mutagen") { opts.stageMode = stageMode }
         return opts
     }
 

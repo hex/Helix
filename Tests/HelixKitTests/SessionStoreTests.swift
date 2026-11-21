@@ -440,6 +440,49 @@ struct SessionStoreTests {
 struct RecreateSessionTests {
     private let createEdited = "syncCreate:sync create /tmp/a /tmp/b --name test --paused --mode one-way-safe"
 
+    @Test("Editing a sync session preserves staging, VCS, hash, and limits")
+    @MainActor
+    func editPreservesConfiguredLimits() async throws {
+        let fixture = try #require(Bundle.module.url(
+            forResource: "sync-list-configuration", withExtension: "json", subdirectory: "Fixtures"
+        ))
+        let json = try String(contentsOf: fixture, encoding: .utf8)
+        let start = "syncCreate:sync create /srv/project alice@example.com:/srv/mirror --name renamed-mirror --paused"
+        let modes = "--mode one-way-safe --symlink-mode posix-raw --compression none --hash xxh128"
+        let options = "--watch-mode force-poll --watch-polling-interval 21 --permissions-mode portable --stage-mode neighboring --ignore cache/"
+        let limits = "--max-entry-count 4294967296 --max-staging-file-size 10485760"
+
+        for (payload, vcsFlag) in [
+            (json, "--ignore-vcs"),
+            (json.replacingOccurrences(of: "\"vcs\": true", with: "\"vcs\": false"), "--no-ignore-vcs"),
+        ] {
+            let session = try JSONDecoder().decode(SyncSession.self, from: Data(payload.utf8))
+            let recorder = RecordingProvider(syncSessions: [session])
+            let store = SessionStore(provider: recorder)
+            var edited = SyncCreateOptions(from: session)
+            edited.name = "renamed-mirror"
+
+            await store.recreateSync(session, options: edited, alpha: "/srv/project", beta: "alice@example.com:/srv/mirror")
+
+            #expect(recorder.calls.first == "\(start) \(modes) \(options) \(vcsFlag) \(limits)")
+        }
+    }
+
+    @Test("Keeps the original when Mutagen would round the staging file limit")
+    @MainActor
+    func editRejectsInexactStagingFileLimit() async {
+        var session = makeSyncSession(id: "sync_1", name: "project-mirror")
+        session.maxStagingFileSize = 9_007_199_254_740_993
+        let recorder = RecordingProvider(syncSessions: [session])
+        let store = SessionStore(provider: recorder)
+        let edited = SyncCreateOptions(from: session)
+
+        let error = await store.recreateSync(session, options: edited, alpha: "/srv/project", beta: "/srv/mirror")
+
+        #expect(error == "Mutagen cannot recreate the staging file limit of 9007199254740993 bytes exactly. The original session was kept.")
+        #expect(recorder.calls == [])
+    }
+
     @Test("Starts the paused replacement before removing the original")
     @MainActor
     func happyPath() async {

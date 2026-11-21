@@ -46,8 +46,8 @@ public struct SyncCreateOptions {
     public var permissionsMode: String?
     public var stageMode: String?
     public var ignorePaths: [String] = []
-    public var ignoreVCS: Bool = false
-    public var maxEntryCount: Int?
+    public var ignoreVCS: Bool?
+    public var maxEntryCount: UInt64?
     public var maxStagingFileSize: String?
 
     public init() {}
@@ -64,6 +64,11 @@ public struct SyncCreateOptions {
         watchPollingInterval = session.watch.pollingInterval
         permissionsMode = session.permissions.mode
         compression = session.compression.algorithm
+        stageMode = session.stageMode
+        ignoreVCS = session.ignore.vcs
+        hash = session.hash
+        maxEntryCount = session.maxEntryCount
+        maxStagingFileSize = session.maxStagingFileSize.map { String($0) }
     }
 
     public func arguments(alpha: String, beta: String) -> [String] {
@@ -85,7 +90,9 @@ public struct SyncCreateOptions {
         for path in ignorePaths {
             args += ["--ignore", path]
         }
-        if ignoreVCS { args += ["--ignore-vcs"] }
+        if let ignoreVCS {
+            args.append(ignoreVCS ? "--ignore-vcs" : "--no-ignore-vcs")
+        }
         if let maxEntryCount { args += ["--max-entry-count", String(maxEntryCount)] }
         if let maxStagingFileSize { args += ["--max-staging-file-size", maxStagingFileSize] }
 
