@@ -1,0 +1,75 @@
+{
+  "identifier": "sync_example",
+  "version": 1,
+  "creationTime": "2026-01-01T00:00:00Z",
+  "creatingVersion": "0.18.1",
+  "name": "project-mirror",
+  "alpha": {
+    "protocol": "local",
+    "path": "/srv/project",
+    "ignore": {},
+    "symlink": {},
+    "watch": {},
+    "permissions": {},
+    "compression": {},
+    "connected": true,
+    "scanned": true,
+    "scanProblems": [
+      {
+        "path": "restricted",
+        "error": "permission denied"
+      }
+    ],
+    "excludedScanProblems": 2
+  },
+  "beta": {
+    "protocol": "ssh",
+    "user": "alice",
+    "host": "example.com",
+    "path": "/srv/mirror",
+    "ignore": {},
+    "symlink": {},
+    "watch": {},
+    "permissions": {},
+    "compression": {},
+    "connected": true,
+    "scanned": true,
+    "transitionProblems": [
+      {
+        "path": "old.txt",
+        "error": "directory not empty"
+      }
+    ],
+    "excludedTransitionProblems": 3
+  },
+  "mode": "one-way-safe",
+  "ignore": {},
+  "symlink": {},
+  "watch": {},
+  "permissions": {},
+  "compression": {},
+  "paused": false,
+  "status": "watching",
+  "conflicts": [
+    {
+      "root": "config.txt",
+      "alphaChanges": [
+        {
+          "path": "config.txt",
+          "new": {
+            "kind": "file"
+          }
+        }
+      ],
+      "betaChanges": [
+        {
+          "path": "config.txt",
+          "new": {
+            "kind": "file"
+          }
+        }
+      ]
+    }
+  ],
+  "excludedConflicts": 4
+}

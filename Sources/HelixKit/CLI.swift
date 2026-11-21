@@ -10,6 +10,12 @@ public struct CLIError: LocalizedError, Sendable {
     public var errorDescription: String? { stderr }
 }
 
+private struct SyncCreateReceiptError: LocalizedError {
+    var errorDescription: String? {
+        "Mutagen did not report a valid identifier for the created sync session."
+    }
+}
+
 public struct CLI: Sendable {
     public static let defaultExecutablePath = "/opt/homebrew/bin/mutagen"
 
@@ -38,8 +44,18 @@ public struct CLI: Sendable {
 
     // MARK: - Session Creation
 
-    public func syncCreate(arguments: [String]) async throws {
-        _ = try await run(arguments)
+    public func syncCreate(arguments: [String]) async throws -> String {
+        let output = try await run(arguments)
+        let prefix = "Created session "
+        guard let receipt = output.split(whereSeparator: \.isNewline).last, receipt.hasPrefix(prefix) else {
+            throw SyncCreateReceiptError()
+        }
+
+        let identifier = String(receipt.dropFirst(prefix.count))
+        guard identifier.range(of: #"^sync_[0-9a-zA-Z]{43}$"#, options: .regularExpression) != nil else {
+            throw SyncCreateReceiptError()
+        }
+        return identifier
     }
 
     public func forwardCreate(arguments: [String]) async throws {

@@ -35,7 +35,7 @@ struct FakeProvider: SessionProvider {
     }
     func daemonRunning() async throws -> Bool { isDaemonRunning }
     func version() async throws -> String { mutagenVersion }
-    func syncCreate(arguments: [String]) async throws {}
+    func syncCreate(arguments: [String]) async throws -> String { "sync_replacement" }
     func forwardCreate(arguments: [String]) async throws {}
     func syncPause(_ identifier: String) async throws {}
     func syncResume(_ identifier: String) async throws {}
@@ -228,6 +228,82 @@ struct SessionStoreTests {
         #expect(store.overallHealth == .active)
     }
 
+    @Test("Refresh updates conflict details and clears the badge when conflicts disappear")
+    @MainActor
+    func refreshUpdatesConflicts() async {
+        let original = Conflict(
+            root: "report.txt",
+            alphaChanges: [Change(path: "report.txt", old: nil, new: Entry(kind: "file", digest: nil, executable: nil))],
+            betaChanges: []
+        )
+        let replacement = Conflict(
+            root: "report.txt",
+            alphaChanges: [Change(path: "report.txt", old: nil, new: Entry(kind: "symlink", digest: nil, executable: nil))],
+            betaChanges: []
+        )
+        let conflicted = makeSyncSession(id: "sync_1", name: "reports", conflicts: [original])
+        let store = SessionStore(provider: FakeProvider(syncSessions: [conflicted]))
+        await store.refresh()
+        #expect(store.totalConflictCount == 1)
+
+        let updated = makeSyncSession(id: "sync_1", name: "reports", conflicts: [replacement])
+        store.replaceProvider(FakeProvider(syncSessions: [updated]))
+        await store.refresh()
+        #expect(store.syncSessions.first?.conflicts?.first?.alphaChanges.first?.new?.kind == "symlink")
+
+        let resolved = makeSyncSession(id: "sync_1", name: "reports")
+        store.replaceProvider(FakeProvider(syncSessions: [resolved]))
+        await store.refresh()
+        #expect(store.totalConflictCount == 0)
+        #expect(store.overallHealth == .healthy)
+    }
+
+    @Test("Refresh publishes problems with the same paths and warns only for running sessions")
+    @MainActor
+    func refreshPublishesEndpointProblems() async throws {
+        let fixture = try #require(Bundle.module.url(
+            forResource: "sync-list-diagnostics", withExtension: "json", subdirectory: "Fixtures"
+        ))
+        let json = try String(contentsOf: fixture, encoding: .utf8)
+        let decoder = JSONDecoder()
+        let initial = try decoder.decode(SyncSession.self, from: Data(json.utf8))
+        #expect(initial.alpha.scanProblems == [SyncProblem(path: "restricted", error: "permission denied")])
+        #expect(initial.alpha.excludedScanProblems == 2)
+        #expect(initial.beta.transitionProblems == [SyncProblem(path: "old.txt", error: "directory not empty")])
+        #expect(initial.beta.excludedTransitionProblems == 3)
+        #expect(initial.excludedConflicts == 4)
+        #expect(initial.beta.scanProblems == nil)
+        #expect(initial.beta.excludedScanProblems == nil)
+        let updatedJSON = json.replacingOccurrences(of: "permission denied", with: "operation not permitted")
+        let updated = try decoder.decode(SyncSession.self, from: Data(updatedJSON.utf8))
+        #expect(initial != updated)
+
+        let payload = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        let problemsOnly = payload.filter { $0.key != "conflicts" && $0.key != "excludedConflicts" }
+        let problemSession = try decoder.decode(SyncSession.self, from: JSONSerialization.data(withJSONObject: problemsOnly))
+        let store = SessionStore(provider: FakeProvider(syncSessions: [problemSession]))
+        await store.refresh()
+        #expect(store.overallHealth == .warning)
+
+        store.replaceProvider(FakeProvider(syncSessions: [initial]))
+        await store.refresh()
+        store.replaceProvider(FakeProvider(syncSessions: [updated]))
+        await store.refresh()
+        #expect(store.syncSessions == [updated])
+
+        let countedJSON = updatedJSON.replacingOccurrences(of: "\"excludedConflicts\": 4", with: "\"excludedConflicts\": 5")
+        let counted = try decoder.decode(SyncSession.self, from: Data(countedJSON.utf8))
+        store.replaceProvider(FakeProvider(syncSessions: [counted]))
+        await store.refresh()
+        #expect(store.syncSessions.first?.excludedConflicts == 5)
+
+        let pausedJSON = countedJSON.replacingOccurrences(of: "\"paused\": false", with: "\"paused\": true")
+        let paused = try decoder.decode(SyncSession.self, from: Data(pausedJSON.utf8))
+        store.replaceProvider(FakeProvider(syncSessions: [paused]))
+        await store.refresh()
+        #expect(store.overallHealth == .healthy)
+    }
+
     @Test("Total session count includes both sync and forward")
     @MainActor
     func totalCount() async {
@@ -310,6 +386,30 @@ struct SessionStoreTests {
         #expect(store.lastError == nil)
     }
 
+    @Test("Stop suppresses refreshes until Start restores the daemon and session lists")
+    @MainActor
+    func refreshDoesNotUndoDaemonStop() async {
+        let sync = makeSyncSession(id: "sync_1", name: "documents")
+        let forward = makeForwardSession(id: "fwd_1", name: "preview")
+        let store = SessionStore(provider: FakeProvider(syncSessions: [sync], forwardSessions: [forward]))
+        await store.refresh()
+        #expect(store.daemonRunning == true)
+
+        await store.stopDaemon()
+        await store.refresh()
+        #expect(store.daemonRunning == false)
+        #expect(store.syncSessions == [])
+        await store.manualRefresh()
+        #expect(store.daemonRunning == false)
+        #expect(store.forwardSessions == [])
+
+        await store.startDaemon()
+        #expect(store.daemonRunning == true)
+        #expect(store.syncSessions.map(\.identifier) == ["sync_1"])
+        #expect(store.forwardSessions.map(\.identifier) == ["fwd_1"])
+        #expect(store.lastError == nil)
+    }
+
     @Test("Daemon register sets autoStart to true")
     @MainActor
     func daemonRegister() async {
@@ -358,100 +458,128 @@ struct SessionStoreTests {
 
 @Suite("SessionStore recreateSync")
 struct RecreateSessionTests {
+    private let createEdited = "syncCreate:sync create /tmp/a /tmp/b --name test --paused --mode one-way-safe"
 
-    @Test("Terminates then creates with updated options")
+    @Test("Editing a sync session preserves staging, VCS, hash, and limits")
+    @MainActor
+    func editPreservesConfiguredLimits() async throws {
+        let fixture = try #require(Bundle.module.url(
+            forResource: "sync-list-configuration", withExtension: "json", subdirectory: "Fixtures"
+        ))
+        let json = try String(contentsOf: fixture, encoding: .utf8)
+        let start = "syncCreate:sync create /srv/project alice@example.com:/srv/mirror --name renamed-mirror --paused"
+        let modes = "--mode one-way-safe --symlink-mode posix-raw --compression none --hash xxh128"
+        let options = "--watch-mode force-poll --watch-polling-interval 21 --permissions-mode portable --stage-mode neighboring --ignore cache/"
+        let limits = "--max-entry-count 4294967296 --max-staging-file-size 10485760"
+
+        for (payload, vcsFlag) in [
+            (json, "--ignore-vcs"),
+            (json.replacingOccurrences(of: "\"vcs\": true", with: "\"vcs\": false"), "--no-ignore-vcs"),
+        ] {
+            let session = try JSONDecoder().decode(SyncSession.self, from: Data(payload.utf8))
+            let recorder = RecordingProvider(syncSessions: [session])
+            let store = SessionStore(provider: recorder)
+            var edited = SyncCreateOptions(from: session)
+            edited.name = "renamed-mirror"
+
+            await store.recreateSync(session, options: edited, alpha: "/srv/project", beta: "alice@example.com:/srv/mirror")
+
+            #expect(recorder.calls.first == "\(start) \(modes) \(options) \(vcsFlag) \(limits)")
+        }
+    }
+
+    @Test("Keeps the original when Mutagen would round the staging file limit")
+    @MainActor
+    func editRejectsInexactStagingFileLimit() async {
+        var session = makeSyncSession(id: "sync_1", name: "project-mirror")
+        session.maxStagingFileSize = 9_007_199_254_740_993
+        let recorder = RecordingProvider(syncSessions: [session])
+        let store = SessionStore(provider: recorder)
+        let edited = SyncCreateOptions(from: session)
+
+        let error = await store.recreateSync(session, options: edited, alpha: "/srv/project", beta: "/srv/mirror")
+
+        #expect(error == "Mutagen cannot recreate the staging file limit of 9007199254740993 bytes exactly. The original session was kept.")
+        #expect(recorder.calls == [])
+    }
+
+    @Test("Starts the paused replacement before removing the original")
     @MainActor
     func happyPath() async {
         let session = makeSyncSession(id: "sync_1", name: "test")
         let recorder = RecordingProvider(syncSessions: [session])
         let store = SessionStore(provider: recorder)
-        await store.refresh()
+        var options = SyncCreateOptions(from: session)
+        options.mode = "one-way-safe"
 
-        var newOptions = SyncCreateOptions()
-        newOptions.name = "test"
-        newOptions.mode = "one-way-safe"
-        await store.recreateSync(
-            session,
-            options: newOptions,
-            alpha: "/tmp/a",
-            beta: "/tmp/b"
-        )
+        await store.recreateSync(session, options: options, alpha: "/tmp/a", beta: "/tmp/b")
 
         #expect(store.lastError == nil)
-        let calls = recorder.calls
-        #expect(calls.count >= 2)
-        #expect(calls[0] == "syncTerminate:sync_1")
-        #expect(calls[1].hasPrefix("syncCreate:"))
+        #expect(recorder.calls == [createEdited, "syncPause:sync_1", "syncResume:sync_replacement", "syncTerminate:sync_1"])
     }
 
-    @Test("Terminate failure sets error and does not create")
+    @Test("Failure to remove the original leaves the edited session running")
     @MainActor
     func terminateFails() async {
         let session = makeSyncSession(id: "sync_1", name: "test")
-        let recorder = RecordingProvider(syncSessions: [session], failOn: "syncTerminate")
+        let recorder = RecordingProvider(syncSessions: [session], failOn: "syncTerminate:sync_1")
         let store = SessionStore(provider: recorder)
-        await store.refresh()
+        var options = SyncCreateOptions(from: session)
+        options.mode = "one-way-safe"
 
-        var newOptions = SyncCreateOptions()
-        newOptions.mode = "one-way-safe"
-        await store.recreateSync(
-            session,
-            options: newOptions,
-            alpha: "/tmp/a",
-            beta: "/tmp/b"
-        )
+        await store.recreateSync(session, options: options, alpha: "/tmp/a", beta: "/tmp/b")
 
-        #expect(store.lastError != nil)
-        #expect(store.lastError!.contains("No changes were made"))
-        let calls = recorder.calls
-        let createCalls = calls.filter { $0.hasPrefix("syncCreate") }
-        #expect(createCalls.isEmpty)
+        #expect(store.lastError == "The edited session sync_replacement is ready. Could not remove original session sync_1: simulated failure.")
+        #expect(recorder.calls == [createEdited, "syncPause:sync_1", "syncResume:sync_replacement", "syncTerminate:sync_1"])
     }
 
-    @Test("addToIgnoreList terminates then creates with path appended to ignores")
+    @Test("Adding an ignore rule prepares a paused replacement with both ignore paths")
     @MainActor
     func addToIgnoreList() async {
-        let session = makeSyncSession(
-            id: "sync_1",
-            name: "test",
-            ignorePaths: ["*.log"]
-        )
+        let session = makeSyncSession(id: "sync_1", name: "test", ignorePaths: ["*.log"])
         let recorder = RecordingProvider(syncSessions: [session])
         let store = SessionStore(provider: recorder)
-        await store.refresh()
 
         await store.addToIgnoreList(session: session, path: "node_modules/symlink")
 
         #expect(store.lastError == nil)
-        let calls = recorder.calls
-        #expect(calls.count >= 2)
-        #expect(calls[0] == "syncTerminate:sync_1")
-        #expect(calls[1].hasPrefix("syncCreate:"))
-        // Verify the new ignore path is present alongside the existing one
-        #expect(calls[1].contains("--ignore"))
-        #expect(calls[1].contains("*.log"))
-        #expect(calls[1].contains("node_modules/symlink"))
+        #expect(recorder.calls == [
+            "syncCreate:sync create /tmp/a /tmp/b --name test --paused --mode two-way-safe --ignore *.log --ignore node_modules/symlink",
+            "syncPause:sync_1", "syncResume:sync_replacement", "syncTerminate:sync_1",
+        ])
     }
 
-    @Test("Create failure after terminate sets descriptive error")
+    @Test("Failure to create the replacement leaves the original running")
     @MainActor
-    func createFailsAfterTerminate() async {
+    func createFailureKeepsOriginal() async {
         let session = makeSyncSession(id: "sync_1", name: "test")
         let recorder = RecordingProvider(syncSessions: [session], failOn: "syncCreate")
         let store = SessionStore(provider: recorder)
-        await store.refresh()
+        var options = SyncCreateOptions(from: session)
+        options.mode = "one-way-safe"
 
-        var newOptions = SyncCreateOptions()
-        newOptions.mode = "one-way-safe"
-        await store.recreateSync(
-            session,
-            options: newOptions,
-            alpha: "/tmp/a",
-            beta: "/tmp/b"
-        )
+        await store.recreateSync(session, options: options, alpha: "/tmp/a", beta: "/tmp/b")
 
-        #expect(store.lastError != nil)
-        #expect(store.lastError!.contains("terminated but recreation failed"))
+        #expect(store.lastError == "Could not prepare the edited session: simulated failure. The original session was kept.")
+        #expect(recorder.calls == [createEdited])
+    }
+
+    @Test("A failed replacement start removes it before resuming the original")
+    @MainActor
+    func startFailureRestoresOriginal() async {
+        let session = makeSyncSession(id: "sync_1", name: "test")
+        let recorder = RecordingProvider(syncSessions: [session], failOn: "syncResume:sync_replacement")
+        let store = SessionStore(provider: recorder)
+        var options = SyncCreateOptions(from: session)
+        options.mode = "one-way-safe"
+
+        await store.recreateSync(session, options: options, alpha: "/tmp/a", beta: "/tmp/b")
+
+        #expect(store.lastError == "Could not start the edited session: simulated failure. The original session was restored.")
+        #expect(recorder.calls == [
+            createEdited, "syncPause:sync_1", "syncResume:sync_replacement",
+            "syncTerminate:sync_replacement", "syncResume:sync_1",
+        ])
     }
 }
 
@@ -539,6 +667,40 @@ struct BulkPauseTests {
         #expect(lateLaunch.bulkPause == nil)
         let nextLaunch = SessionStore(provider: afterDeadline, defaults: defaults)
         #expect(nextLaunch.bulkPause == nil)
+    }
+
+    @Test("A completed pause can be resumed after relaunch while the batch is still in progress")
+    @MainActor
+    func bulkPausePersistsBetweenRequests() async throws {
+        defer { removeDefaults() }
+        let gate = Gate()
+        let first = makeSyncSession(id: "sync_1", name: "one")
+        let alreadyPaused = makeSyncSession(id: "sync_2", name: "two", paused: true)
+        let last = makeSyncSession(id: "sync_3", name: "three")
+        let provider = RecordingProvider(
+            syncSessions: [first, alreadyPaused, last], failOn: "syncPause:sync_3"
+        ) { identifier in
+            if identifier == "sync_3" { await gate.pass() }
+        }
+        let firstPaused = makeSyncSession(id: "sync_1", name: "one", paused: true)
+        let recovery = RecordingProvider(syncSessions: [firstPaused, alreadyPaused, last])
+        let recoveryDefaults = try #require(UserDefaults(suiteName: suiteName))
+        let deadline = Date(timeIntervalSince1970: 1_800_001_800)
+        let expected = BulkPause(sessionIdentifiers: ["sync_1"], resumeAt: deadline)
+        let store = SessionStore(provider: provider, defaults: defaults)
+        let pausing = Task { await store.pauseAllSync(until: deadline) }
+
+        await gate.reached()
+        let relaunched = SessionStore(provider: recovery, defaults: recoveryDefaults, now: { deadline })
+        let savedWhileWaiting = relaunched.bulkPause
+        await gate.open()
+        await pausing.value
+
+        #expect(savedWhileWaiting == expected)
+        #expect(store.bulkPause == expected)
+        #expect(store.lastError == "Could not pause three: simulated failure")
+        await relaunched.refresh()
+        #expect(recovery.calls == ["syncResume:sync_1"])
     }
 
     /// A store whose session "sync_2" is held after an unverified replacement, with Pause All
@@ -737,7 +899,7 @@ struct DaemonPriorityTests {
         defaults.removePersistentDomain(forName: suiteName)
     }
 
-    @Test("With no daemon running, turning background priority on applies nothing and reports no error")
+    @Test("Background priority stays off when the daemon is missing")
     @MainActor
     func noDaemonRunning() async {
         defer { removeDefaults() }
@@ -748,7 +910,28 @@ struct DaemonPriorityTests {
 
         #expect(daemon.calls == [])
         #expect(store.lastError == nil)
-        #expect(store.daemonBackgroundPriority == true)
+        #expect(store.daemonBackgroundPriority == false)
+        #expect(store.daemonPriorityError == "Mutagen daemon not found.")
+    }
+
+    @Test("Background priority stays off when changing priority fails")
+    @MainActor
+    func priorityChangeFails() async {
+        defer { removeDefaults() }
+        let daemon = RecordingDaemonProcess(
+            pid: 3114, priorityError: CLIError(exitCode: 1, stderr: "Operation not permitted")
+        )
+        let store = SessionStore(provider: FakeProvider(), defaults: defaults, daemonProcess: daemon)
+
+        let message = "Could not lower the priority of the Mutagen daemon (PID 3114): Operation not permitted"
+        await store.setDaemonBackgroundPriority(true)
+
+        #expect(store.daemonBackgroundPriority == false)
+        #expect(store.daemonPriorityError == message)
+        await store.refresh()
+        #expect(store.daemonBackgroundPriority == false)
+        #expect(store.daemonPriorityError == message)
+        #expect(store.lastError == nil)
     }
 
     @Test("Turning background priority on lowers the daemon's priority and turning it off restores it")
@@ -809,7 +992,10 @@ final class MainActorRecordingProvider: SessionProvider {
     func forwardList() async throws -> [ForwardSession] { [] }
     func daemonRunning() async throws -> Bool { true }
     func version() async throws -> String { "0.18.1" }
-    func syncCreate(arguments: [String]) async throws { calls.append("syncCreate:\(arguments.joined(separator: " "))") }
+    func syncCreate(arguments: [String]) async throws -> String {
+        calls.append("syncCreate:\(arguments.joined(separator: " "))")
+        return "sync_replacement"
+    }
     func forwardCreate(arguments: [String]) async throws {}
     func syncPause(_ identifier: String) async throws { calls.append("syncPause:\(identifier)") }
     func syncResume(_ identifier: String) async throws {
@@ -864,17 +1050,20 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
     private var _flushed = false
     private var _created = false
     private let failOn: String?
+    private let beforeSyncPause: (@Sendable (String) async -> Void)?
 
     init(
         syncSessions: [SyncSession] = [],
         resolvedSyncSessions: [SyncSession]? = nil,
         sessionsAfterCreate: [SyncSession]? = nil,
-        failOn: String? = nil
+        failOn: String? = nil,
+        beforeSyncPause: (@Sendable (String) async -> Void)? = nil
     ) {
         self.syncSessions = syncSessions
         self.resolvedSyncSessions = resolvedSyncSessions
         self.sessionsAfterCreate = sessionsAfterCreate
         self.failOn = failOn
+        self.beforeSyncPause = beforeSyncPause
     }
 
     var calls: [String] {
@@ -909,14 +1098,18 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
     func forwardList() async throws -> [ForwardSession] { [] }
     func daemonRunning() async throws -> Bool { true }
     func version() async throws -> String { "0.18.1" }
-    func syncCreate(arguments: [String]) async throws {
+    func syncCreate(arguments: [String]) async throws -> String {
         try record("syncCreate:\(arguments.joined(separator: " "))")
-        lock.lock()
-        _created = true
-        lock.unlock()
+        lock.withLock { _created = true }
+        return sessionsAfterCreate?.first(where: { candidate in
+            !syncSessions.contains(where: { $0.identifier == candidate.identifier })
+        })?.identifier ?? "sync_replacement"
     }
     func forwardCreate(arguments: [String]) async throws {}
-    func syncPause(_ identifier: String) async throws { try record("syncPause:\(identifier)") }
+    func syncPause(_ identifier: String) async throws {
+        await beforeSyncPause?(identifier)
+        try record("syncPause:\(identifier)")
+    }
     func syncResume(_ identifier: String) async throws { try record("syncResume:\(identifier)") }
     func syncFlush(_ identifier: String) async throws {
         try record("syncFlush:\(identifier)")
@@ -944,7 +1137,7 @@ struct FailingProvider: SessionProvider {
     }
     func daemonRunning() async throws -> Bool { false }
     func version() async throws -> String { throw CLIError(exitCode: 1, stderr: "not found") }
-    func syncCreate(arguments: [String]) async throws { throw CLIError(exitCode: 1, stderr: "failed") }
+    func syncCreate(arguments: [String]) async throws -> String { throw CLIError(exitCode: 1, stderr: "failed") }
     func forwardCreate(arguments: [String]) async throws { throw CLIError(exitCode: 1, stderr: "failed") }
     func syncPause(_ identifier: String) async throws { throw CLIError(exitCode: 1, stderr: "failed") }
     func syncResume(_ identifier: String) async throws { throw CLIError(exitCode: 1, stderr: "failed") }
@@ -2378,9 +2571,11 @@ final class RecordingDaemonProcess: DaemonProcess, @unchecked Sendable {
     private var _pid: ProcessID?
     private var _calls: [String] = []
     private let lock = NSLock()
+    private let priorityError: CLIError?
 
-    init(pid: Int32?) {
+    init(pid: Int32?, priorityError: CLIError? = nil) {
         _pid = pid.map { ProcessID($0)! }
+        self.priorityError = priorityError
     }
 
     var calls: [String] {
@@ -2402,9 +2597,10 @@ final class RecordingDaemonProcess: DaemonProcess, @unchecked Sendable {
     }
 
     func setBackgroundPriority(_ enabled: Bool, pid: ProcessID) async throws {
-        lock.lock()
-        _calls.append("\(enabled ? "background" : "restore"):\(pid.rawValue)")
-        lock.unlock()
+        if let priorityError { throw priorityError }
+        lock.withLock {
+            _calls.append("\(enabled ? "background" : "restore"):\(pid.rawValue)")
+        }
     }
 }
 

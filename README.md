@@ -17,16 +17,18 @@
 ## Features
 
 - **Menu bar status** -- Live icon reflects overall session health at a glance (healthy, syncing or connecting, a warning for conflicts or a session that cannot connect, errors)
-- **Menu bar menu** -- Right-click the icon to open Helix, pause every running sync session, pause them for the minutes you enter, or quit; Resume restores only the sessions Pause All paused, and a timed pause resumes on its own, even after you quit and reopen Helix
+- **Menu bar menu** -- Right-click the icon to open Helix, pause every running sync session, pause them for the minutes you enter, or quit; Resume restores only the sessions Pause All paused, and a timed pause resumes on its own, even after you quit and reopen Helix. Helix saves each completed pause before starting the next one.
 - **Session dashboard** -- Browse, search, and filter all sync and forward sessions in a three-column window
 - **Connection errors** -- When a session cannot connect, the detail view shows mutagen's own reason under the status line
+- **Sync diagnostics** -- See scan and transition errors by endpoint and path. The detail view shows how many problems and conflicts Mutagen omitted, and running sessions with problems show a warning in the status icon.
 - **Transfer progress** -- While a session stages files, the detail view shows a progress bar, files and bytes received, and the file mutagen is sending; the session list and menu bar show the same percentage as `mutagen sync list -l`
 - **Create sessions** -- Step-by-step wizard for sync sessions; streamlined form for port forwarding
-- **Edit sessions** -- Rename a session, or change its sync mode, ignore rules, symlinks, compression, and watch settings
+- **Session configuration** -- See settings that differ from Mutagen's defaults and overrides for Alpha and Beta.
+- **Edit sessions** -- Rename a session or change its sync mode, ignore rules, symlinks, compression, and watch settings. Helix prepares a paused replacement before removing the original. The replacement starts with fresh sync history. Editing preserves staging mode, hashing, limits, and how Mutagen handles version control directories.
 - **Unique names** -- Rejects a name another session already holds, so `mutagen sync pause <name>` always resolves to one session
 - **Labels** -- Tag sessions with key=value pairs and filter the dashboard by them
 - **Connection testing** -- Check an SSH endpoint before creating a session, then browse the remote filesystem to pick a path
-- **Conflict resolution** -- Inspect per-file conflicts side by side, keep either side with one click across local, SSH, and Docker endpoints; handles file-vs-directory type mismatches with confirmation before destructive operations; a replacement that fails partway deletes neither version; when Helix cannot tell what is at the destination, the session stays paused and shows where the data is until you resume it yourself, and neither Resume after Pause All nor another resolve resumes it; if Helix quits or crashes during a replacement, the next launch keeps that session paused the same way and names the paths to check; while a resolve runs on a session Helix refuses to resume it, and while a resolve runs or Helix keeps the session paused it refuses to edit the session or add to its ignore list, since both recreate it
+- **Conflict resolution** -- Inspect per-file conflicts side by side, keep either side with one click across local, SSH, and Docker endpoints; handles file-vs-directory type mismatches with confirmation before destructive operations; a replacement that fails partway deletes neither version; when Helix cannot tell what is at the destination, the session stays paused and shows where the data is until you resume it yourself, and neither Resume after Pause All nor another resolve resumes it; if Helix quits or crashes during a replacement, the next launch keeps that session paused the same way and names the paths to check; while a resolve runs on a session Helix refuses to resume it, and while a resolve runs or Helix keeps the session paused it refuses to edit the session or add to its ignore list, since both recreate it. Polling updates conflict details and clears the badge when Mutagen stops reporting conflicts.
 - **Diff viewer** -- Line and word-level diffs of conflicting files, backed by a Rust engine
 - **Symlink awareness** -- Shows what each side of a symlink conflict points at, and replaces a symlink with a directory where that is the only resolution
 - **Endpoint support** -- Local paths, SSH remotes, and Docker containers with transport-aware file operations
@@ -37,7 +39,8 @@
 - **Auto-update** -- Built-in Sparkle integration checks for updates from the menu bar
 - **Launch at login** -- Optional login item via SMAppService
 - **Configurable polling** -- Adjust refresh interval from 2 to 30 seconds
-- **Background priority** -- Settings switch that runs the mutagen daemon at background priority, so sync yields CPU and disk to whatever you're doing; transfers slow down while the Mac is busy, and Helix reapplies it after a daemon restart
+- **Daemon controls** -- Stop in Settings suspends automatic and manual refreshes until you click Start. This applies while Helix is open.
+- **Background priority** -- Mutagen yields CPU and disk while the Mac is busy, which can slow transfers. Settings shows whether the priority applied and why it failed. Helix retries a saved request after a daemon restart.
 - **Text size** -- Adjustable text size (System Default, Small, Medium, Large, Extra Large) in Settings
 
 ## Install

@@ -45,6 +45,12 @@ public enum HealthStatus: Sendable {
 @MainActor
 @Observable
 public final class SessionStore {
+    private enum DaemonControl {
+        case managed, starting, stopping, stopped
+    }
+
+    private typealias SessionLists = (sync: [SyncSession], forward: [ForwardSession])
+
     public private(set) var syncSessions: [SyncSession] = []
     public private(set) var forwardSessions: [ForwardSession] = []
     public private(set) var daemonRunning = false
@@ -74,22 +80,30 @@ public final class SessionStore {
     public private(set) var leftoverNotices: [String: String] = [:] {
         didSet { persist(leftoverNotices, forKey: Self.leftoverNoticesKey) }
     }
-    /// Whether the mutagen daemon runs at background priority, yielding CPU and disk to other work.
-    public private(set) var daemonBackgroundPriority: Bool
+    /// Whether background priority is confirmed for the running daemon.
+    public var daemonBackgroundPriority: Bool {
+        backgroundPriorityPID != nil && daemonPriorityError == nil
+    }
+    public private(set) var daemonBackgroundPriorityRequested: Bool
+    public private(set) var daemonPriorityError: String?
 
     private var provider: any SessionProvider
     private var pollingTask: Task<Void, Never>?
+    @ObservationIgnored private var daemonControl = DaemonControl.managed
+    @ObservationIgnored private var activeSessionLists: [UUID: Task<SessionLists, Error>] = [:]
     private let fileTransport: FileTransport
     private let defaults: UserDefaults
     private let now: () -> Date
     private var daemonProcess: any DaemonProcess
     @ObservationIgnored private var bulkPauseInFlight = false
+    @ObservationIgnored private var syncEditInFlight = false
     /// The end of the resolve or resume requested last on each session; the next one on that session waits for it.
     @ObservationIgnored private var lastTurn: [String: Task<Void, Never>] = [:]
     /// How many conflict resolves are running or waiting their turn, by session identifier.
     private var resolvesInFlight: [String: Int] = [:]
-    /// The daemon process background priority was last applied to; nil while it is not applied.
-    @ObservationIgnored private var backgroundPriorityPID: ProcessID?
+    /// The daemon process whose background priority Helix last set successfully.
+    private var backgroundPriorityPID: ProcessID?
+    @ObservationIgnored private var daemonPriorityInFlight = false
     private static let bulkPauseKey = "bulkPause"
     private static let sessionHoldsKey = "sessionHolds"
     private static let replacementsUnderWayKey = "replacementsUnderWay"
@@ -108,7 +122,7 @@ public final class SessionStore {
         self.defaults = defaults
         self.now = now
         self.daemonProcess = daemonProcess
-        daemonBackgroundPriority = defaults.bool(forKey: Self.daemonBackgroundPriorityKey)
+        daemonBackgroundPriorityRequested = defaults.bool(forKey: Self.daemonBackgroundPriorityKey)
         if let data = defaults.data(forKey: Self.bulkPauseKey) {
             do {
                 bulkPause = try JSONDecoder().decode(BulkPause.self, from: data)
@@ -195,10 +209,11 @@ public final class SessionStore {
         if hasDisconnected {
             return .error
         }
-        let hasConflicts = totalConflictCount > 0
+        let hasConflicts = running.contains { $0.conflicts?.isEmpty == false || ($0.excludedConflicts ?? 0) > 0 }
+        let hasProblems = running.contains { $0.alpha.hasProblems || $0.beta.hasProblems }
         let hasHalted = running.contains { $0.phase == .halted }
         let failsToConnect = running.contains { $0.phase == .connecting && !($0.lastError ?? "").isEmpty }
-        if hasConflicts || hasHalted || failsToConnect {
+        if hasConflicts || hasProblems || hasHalted || failsToConnect {
             return .warning
         }
         let hasActive = running.contains { $0.phase == .working || $0.phase == .connecting }
@@ -209,25 +224,34 @@ public final class SessionStore {
     }
 
     public func refresh() async {
-        guard await reloadSessions() else { return }
-        if let resumeAt = bulkPause?.resumeAt, now() >= resumeAt {
+        if await reloadSessions(), let resumeAt = bulkPause?.resumeAt, now() >= resumeAt {
             await resumeBulkPause()
         }
+        guard daemonControl == .managed else { return }
         await reapplyDaemonBackgroundPriority()
     }
 
-    /// Fetches the session lists. Returns false when they were not fetched: the daemon could not be reached,
-    /// or the task was cancelled.
+    /// Fetches the session lists while Helix is managing the daemon. Returns false when they were not fetched:
+    /// Helix has stopped the daemon, the daemon could not be reached, or the task was cancelled.
     @discardableResult
-    private func reloadSessions() async -> Bool {
-        do {
+    private func reloadSessions(force: Bool = false) async -> Bool {
+        guard daemonControl == .managed else { return false }
+
+        let id = UUID()
+        let request = Task<SessionLists, Error> { [provider] in
             async let syncs = provider.syncList()
             async let forwards = provider.forwardList()
-            let newSyncs = preserveConflicts(old: syncSessions, new: try await syncs)
-            let newForwards = try await forwards
-            if syncDigest(newSyncs) != syncDigest(syncSessions) { syncSessions = newSyncs }
-            if forwardDigest(newForwards) != forwardDigest(forwardSessions) { forwardSessions = newForwards }
-            forgetSessions(notListedIn: newSyncs)
+            return try await (syncs, forwards)
+        }
+        activeSessionLists[id] = request
+        defer { activeSessionLists.removeValue(forKey: id) }
+
+        do {
+            let lists = try await request.value
+            guard activeSessionLists[id] != nil else { return false }
+            if force || syncDigest(lists.sync) != syncDigest(syncSessions) { syncSessions = lists.sync }
+            if force || forwardDigest(lists.forward) != forwardDigest(forwardSessions) { forwardSessions = lists.forward }
+            forgetSessions(notListedIn: lists.sync)
             if !daemonRunning { daemonRunning = true }
             if lastError != nil { lastError = nil }
             return true
@@ -235,6 +259,7 @@ public final class SessionStore {
             // A cancelled fetch says nothing about the daemon.
             return false
         } catch {
+            guard activeSessionLists[id] != nil else { return false }
             if !daemonRunning || lastError != error.localizedDescription {
                 daemonRunning = false
                 lastError = error.localizedDescription
@@ -253,22 +278,7 @@ public final class SessionStore {
     }
 
     public func manualRefresh() async {
-        do {
-            async let syncs = provider.syncList()
-            async let forwards = provider.forwardList()
-            syncSessions = try await syncs
-            forwardSessions = try await forwards
-            forgetSessions(notListedIn: syncSessions)
-            if !daemonRunning { daemonRunning = true }
-            if lastError != nil { lastError = nil }
-        } catch is CancellationError {
-            // A cancelled fetch says nothing about the daemon.
-        } catch {
-            if !daemonRunning || lastError != error.localizedDescription {
-                daemonRunning = false
-                lastError = error.localizedDescription
-            }
-        }
+        await reloadSessions(force: true)
         refreshCount += 1
     }
 
@@ -276,7 +286,7 @@ public final class SessionStore {
 
     public func createSync(options: SyncCreateOptions, alpha: String, beta: String) async {
         let args = options.arguments(alpha: alpha, beta: beta)
-        await performAction { try await provider.syncCreate(arguments: args) }
+        await performAction { _ = try await provider.syncCreate(arguments: args) }
     }
 
     public func createForward(options: ForwardCreateOptions, source: String, destination: String) async {
@@ -284,45 +294,134 @@ public final class SessionStore {
         await performAction { try await provider.forwardCreate(arguments: args) }
     }
 
-    // MARK: - Sync Edit (Terminate + Recreate)
+    // MARK: - Sync Edit
 
+    @discardableResult
     public func recreateSync(
         _ session: SyncSession,
         options: SyncCreateOptions,
         alpha: String,
         beta: String
-    ) async {
+    ) async -> String? {
+        guard daemonControl == .managed else {
+            let message = "Start the Mutagen daemon before editing a session."
+            lastError = message
+            return message
+        }
         // Recreation mints a new identifier, which a running resolve and a hold both refer to by the old one.
-        let name = session.name ?? session.identifier
+        let sessionName = session.name ?? session.identifier
         if isResolving(session.identifier) {
-            lastError = "The session \"\(name)\" was not recreated: a conflict resolve is running on it."
-            return
+            let message = "The session \"\(sessionName)\" was not recreated: a conflict resolve is running on it."
+            lastError = message
+            return message
         }
         if let hold = sessionHolds[session.identifier] {
-            lastError = "The session \"\(name)\" was not recreated: it is kept paused after a conflict. Resume it first. \(hold)"
-            return
+            let message = "The session \"\(sessionName)\" was not recreated: it is kept paused after a conflict. Resume it first. \(hold)"
+            lastError = message
+            return message
         }
+        guard !syncEditInFlight else { return "Another sync edit is already in progress." }
+        // Mutagen parses numeric byte sizes as floating point before converting to an integer.
+        if let size = options.maxStagingFileSize, let bytes = UInt64(size),
+           UInt64(exactly: Double(bytes)) != bytes {
+            let message = "Mutagen cannot recreate the staging file limit of \(bytes) bytes exactly. The original session was kept."
+            lastError = message
+            return message
+        }
+        syncEditInFlight = true
+        defer { syncEditInFlight = false }
+
+        let provider = self.provider
+        let listed: [SyncSession]
         do {
-            try await provider.syncTerminate(session.identifier)
+            listed = try await provider.syncList()
         } catch {
-            lastError = "Terminate failed: \(error.localizedDescription). No changes were made."
-            return
+            return await finishSyncEdit("Could not check the original session: \(error.localizedDescription).")
         }
 
-        let args = options.arguments(alpha: alpha, beta: beta)
-        let identifiersBefore = Set(syncSessions.map(\.identifier))
-        do {
-            try await provider.syncCreate(arguments: args)
-            lastError = nil
-            await refresh()
-            // Recreation mints a new identifier, so whatever the caller had selected
-            // no longer resolves. Hand the replacement back to the list.
-            if let recreated = syncSessions.first(where: { !identifiersBefore.contains($0.identifier) }) {
-                pendingSessionSelection = recreated.identifier
-            }
-        } catch {
-            lastError = "Session terminated but recreation failed: \(error.localizedDescription). Use Create Session to recreate manually."
+        let original = session.identifier
+        guard let current = listed.first(where: { $0.identifier == original }) else {
+            return await finishSyncEdit("The original session \(original) is no longer listed by Mutagen.")
         }
+        if let name = options.name, listed.contains(where: { $0.identifier != original && $0.name == name }) {
+            return await finishSyncEdit("Another sync session already uses the name \"\(name)\". The original session was kept.")
+        }
+
+        var staged = options
+        staged.paused = true
+        let replacement: String
+        do {
+            replacement = try await provider.syncCreate(arguments: staged.arguments(alpha: alpha, beta: beta))
+        } catch {
+            return await finishSyncEdit("Could not prepare the edited session: \(error.localizedDescription). The original session was kept.")
+        }
+        guard !listed.contains(where: { $0.identifier == replacement }) else {
+            return await finishSyncEdit("Mutagen returned existing session identifier \(replacement). The original session was kept.")
+        }
+
+        if !current.paused {
+            do {
+                try await provider.syncPause(original)
+            } catch {
+                let recovery = await recoverSyncEdit(original: original, replacement: replacement, activationAttempted: false, provider: provider)
+                return await finishSyncEdit("Could not pause the original session: \(error.localizedDescription). \(recovery)")
+            }
+            do {
+                try await provider.syncResume(replacement)
+            } catch {
+                let recovery = await recoverSyncEdit(original: original, replacement: replacement, activationAttempted: true, provider: provider)
+                return await finishSyncEdit("Could not start the edited session: \(error.localizedDescription). \(recovery)")
+            }
+        }
+
+        do {
+            try await provider.syncTerminate(original)
+        } catch {
+            return await finishSyncEdit(
+                "The edited session \(replacement) is ready. Could not remove original session \(original): \(error.localizedDescription).",
+                replacement: replacement
+            )
+        }
+        return await finishSyncEdit(nil, replacement: replacement)
+    }
+
+    private func recoverSyncEdit(
+        original: String,
+        replacement: String,
+        activationAttempted: Bool,
+        provider: any SessionProvider
+    ) async -> String {
+        var messages: [String] = []
+        do {
+            try await provider.syncTerminate(replacement)
+        } catch {
+            messages.append("Could not remove edited session \(replacement): \(error.localizedDescription).")
+            if activationAttempted {
+                // Mutagen may start reconnecting even when Resume returns an error.
+                do {
+                    try await provider.syncPause(replacement)
+                } catch {
+                    messages.append("Could not confirm that \(replacement) stopped: \(error.localizedDescription). Check both sessions before resuming original session \(original).")
+                    return messages.joined(separator: " ")
+                }
+            }
+        }
+
+        do {
+            try await provider.syncResume(original)
+            messages.append("The original session was restored.")
+        } catch {
+            messages.append("Original session \(original) was kept. Could not resume it: \(error.localizedDescription).")
+        }
+        return messages.joined(separator: " ")
+    }
+
+    private func finishSyncEdit(_ message: String?, replacement: String? = nil) async -> String? {
+        if await reloadSessions(), let replacement, syncSessions.contains(where: { $0.identifier == replacement }) {
+            pendingSessionSelection = replacement
+        }
+        if let message { lastError = message }
+        return lastError
     }
 
     // MARK: - Ignore List
@@ -348,19 +447,20 @@ public final class SessionStore {
         defer { bulkPauseInFlight = false }
         guard await reloadSessions() else { return }
 
-        var paused: [String] = []
+        var paused = bulkPause?.sessionIdentifiers ?? []
+        let existingRecord = paused.isEmpty ? nil : BulkPause(sessionIdentifiers: paused, resumeAt: resumeAt)
+        if bulkPause != existingRecord { bulkPause = existingRecord }
+
         var failures: [String] = []
         for session in syncSessions where !session.paused {
             do {
                 try await provider.syncPause(session.identifier)
-                paused.append(session.identifier)
+                if !paused.contains(session.identifier) { paused.append(session.identifier) }
+                bulkPause = BulkPause(sessionIdentifiers: paused, resumeAt: resumeAt)
             } catch {
                 failures.append("Could not pause \(session.name ?? session.identifier): \(error.localizedDescription)")
             }
         }
-        let pausedEarlier = bulkPause?.sessionIdentifiers ?? []
-        let allPaused = pausedEarlier + paused.filter { !pausedEarlier.contains($0) }
-        bulkPause = allPaused.isEmpty ? nil : BulkPause(sessionIdentifiers: allPaused, resumeAt: resumeAt)
         await finishBulkAction(failures: failures)
     }
 
@@ -513,24 +613,43 @@ public final class SessionStore {
     // MARK: - Daemon
 
     public func startDaemon() async {
+        guard daemonControl == .managed || daemonControl == .stopped else { return }
+        let previousControl = daemonControl
+        daemonControl = .starting
         do {
             try await provider.daemonStart()
+            daemonControl = .managed
             daemonRunning = true
             lastError = nil
             await refresh()
         } catch {
+            daemonControl = previousControl
             lastError = error.localizedDescription
         }
     }
 
     public func stopDaemon() async {
+        guard daemonControl == .managed else { return }
+        daemonControl = .stopping
+
+        // List commands can autostart Mutagen. Discard their results and let the commands finish before Stop.
+        let requests = Array(activeSessionLists.values)
+        activeSessionLists.removeAll()
+        for request in requests {
+            _ = await request.result
+        }
+
         do {
             try await provider.daemonStop()
+            daemonControl = .stopped
             daemonRunning = false
             syncSessions = []
             forwardSessions = []
+            backgroundPriorityPID = nil
+            setDaemonPriorityError(daemonBackgroundPriorityRequested ? "Mutagen daemon not found." : nil)
             lastError = nil
         } catch {
+            daemonControl = .managed
             lastError = error.localizedDescription
         }
     }
@@ -557,47 +676,56 @@ public final class SessionStore {
 
     // MARK: - Daemon Priority
 
-    /// Saves the setting and applies it to the running daemon now.
+    /// Saves the setting and applies it to the running daemon when possible.
     public func setDaemonBackgroundPriority(_ enabled: Bool) async {
-        daemonBackgroundPriority = enabled
+        daemonBackgroundPriorityRequested = enabled
         defaults.set(enabled, forKey: Self.daemonBackgroundPriorityKey)
-        guard let pid = await runningDaemonPID() else { return }
-        // Two quick flips overlap across the pid lookup; apply the setting as it stands now.
-        await applyDaemonPriority(background: daemonBackgroundPriority, to: pid)
+        await reapplyDaemonBackgroundPriority()
     }
 
-    /// The priority belongs to the process, so a restarted daemon starts at normal priority
-    /// under a new pid; this applies background priority to it again.
+    /// Applies the requested priority to the current daemon and retries after a restart or failure.
     private func reapplyDaemonBackgroundPriority() async {
-        guard daemonBackgroundPriority else { return }
-        guard let pid = await runningDaemonPID(),
-              daemonBackgroundPriority,
-              pid != backgroundPriorityPID else { return }
-        await applyDaemonPriority(background: true, to: pid)
-    }
+        guard !daemonPriorityInFlight else { return }
+        guard daemonBackgroundPriorityRequested || backgroundPriorityPID != nil else {
+            setDaemonPriorityError(nil)
+            return
+        }
+        daemonPriorityInFlight = true
+        defer { daemonPriorityInFlight = false }
 
-    private func applyDaemonPriority(background: Bool, to pid: ProcessID) async {
+        let process = daemonProcess
+        let pid: ProcessID?
         do {
-            try await daemonProcess.setBackgroundPriority(background, pid: pid)
-            backgroundPriorityPID = background ? pid : nil
+            pid = try await process.pid()
         } catch {
-            let action = background ? "lower" : "restore"
-            lastError = "Could not \(action) the priority of the mutagen daemon (pid \(pid)): \(error.localizedDescription)"
+            setDaemonPriorityError("Could not find the Mutagen daemon: \(error.localizedDescription)")
+            return
+        }
+
+        let requested = daemonBackgroundPriorityRequested
+        if backgroundPriorityPID != pid { backgroundPriorityPID = nil }
+        guard let pid else {
+            setDaemonPriorityError(requested ? "Mutagen daemon not found." : nil)
+            return
+        }
+        if requested {
+            if backgroundPriorityPID == pid, daemonPriorityError == nil { return }
+        } else if backgroundPriorityPID == nil {
+            setDaemonPriorityError(nil)
+            return
+        }
+        do {
+            try await process.setBackgroundPriority(requested, pid: pid)
+            backgroundPriorityPID = requested ? pid : nil
+            setDaemonPriorityError(nil)
+        } catch {
+            let action = requested ? "lower" : "restore"
+            setDaemonPriorityError("Could not \(action) the priority of the Mutagen daemon (PID \(pid)): \(error.localizedDescription)")
         }
     }
 
-    /// The running daemon's pid; nil when no daemon runs or the lookup failed, which lastError reports.
-    private func runningDaemonPID() async -> ProcessID? {
-        do {
-            guard let pid = try await daemonProcess.pid() else {
-                backgroundPriorityPID = nil
-                return nil
-            }
-            return pid
-        } catch {
-            lastError = "Could not find the mutagen daemon: \(error.localizedDescription)"
-            return nil
-        }
+    private func setDaemonPriorityError(_ message: String?) {
+        if daemonPriorityError != message { daemonPriorityError = message }
     }
 
     public func fetchVersion() async {
@@ -1143,22 +1271,6 @@ public final class SessionStore {
 
     // MARK: - Private
 
-    /// Carries forward known conflicts when new poll data has nil conflicts (mid-scan).
-    /// Go protobuf omits empty repeated fields, so mid-scan JSON has `conflicts: null`.
-    private func preserveConflicts(old: [SyncSession], new: [SyncSession]) -> [SyncSession] {
-        let oldByID = Dictionary(uniqueKeysWithValues: old.map { ($0.identifier, $0) })
-        return new.map { session in
-            guard session.conflicts == nil,
-                  let previous = oldByID[session.identifier],
-                  previous.conflicts != nil else {
-                return session
-            }
-            var patched = session
-            patched.conflicts = previous.conflicts
-            return patched
-        }
-    }
-
     /// Hashes fields that affect the UI (identity, status, conflicts, connectivity,
     /// staging progress, last error). Excludes volatile counters like successfulCycles and endpoint
     /// scan statistics that change every mutagen scan cycle.
@@ -1169,12 +1281,18 @@ public final class SessionStore {
             hasher.combine(s.name)
             hasher.combine(s.status)
             hasher.combine(s.paused)
-            hasher.combine(s.mode)
-            hasher.combine(s.conflicts?.count ?? 0)
-            hasher.combine(s.alpha.connected)
-            hasher.combine(s.beta.connected)
-            hasher.combine(s.alpha.stagingProgress)
-            hasher.combine(s.beta.stagingProgress)
+            hasher.combine(s.configuration)
+            hasher.combine(s.conflicts ?? [])
+            hasher.combine(s.excludedConflicts)
+            for endpoint in [s.alpha, s.beta] {
+                hasher.combine(endpoint.connected)
+                hasher.combine(endpoint.configuration)
+                hasher.combine(endpoint.stagingProgress)
+                hasher.combine(endpoint.scanProblems)
+                hasher.combine(endpoint.excludedScanProblems)
+                hasher.combine(endpoint.transitionProblems)
+                hasher.combine(endpoint.excludedTransitionProblems)
+            }
             hasher.combine(s.lastError)
         }
         return hasher.finalize()
