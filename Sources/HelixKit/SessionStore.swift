@@ -78,7 +78,7 @@ public final class SessionStore {
     private var daemonProcess: any DaemonProcess
     @ObservationIgnored private var bulkPauseInFlight = false
     /// The resolve requested last on each session; the next one on that session waits for it to end.
-    @ObservationIgnored private var lastResolve: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var lastResolve: [String: Task<Set<String>, Never>] = [:]
     /// The daemon process background priority was last applied to; nil while it is not applied.
     @ObservationIgnored private var backgroundPriorityPID: ProcessID?
     private static let bulkPauseKey = "bulkPause"
@@ -579,22 +579,28 @@ public final class SessionStore {
         return (alpha: alphaInfo, beta: betaInfo)
     }
 
+    /// Makes the loser's side of a conflict match the winner's, with the session paused meanwhile.
+    /// - Returns: the conflict's root when it was left unresolved, and nothing when it was resolved.
+    @discardableResult
     public func resolveConflict(
         session: SyncSession,
         conflict: Conflict,
         winner: ConflictWinner
-    ) async {
-        await resolveInTurn(on: session) {
+    ) async -> Set<String> {
+        await resolveInTurn(on: session, roots: [conflict.root]) {
             await self.applyResolve(session: session, conflict: conflict, winner: winner)
         }
     }
 
+    /// Resolves several conflicts of one session under a single pause.
+    /// - Returns: the roots of the conflicts left unresolved.
+    @discardableResult
     public func resolveConflicts(
         session: SyncSession,
         conflicts: [Conflict],
         winner: ConflictWinner
-    ) async {
-        await resolveInTurn(on: session) {
+    ) async -> Set<String> {
+        await resolveInTurn(on: session, roots: Set(conflicts.map(\.root))) {
             await self.applyResolve(session: session, conflicts: conflicts, winner: winner)
         }
     }
@@ -602,32 +608,39 @@ public final class SessionStore {
     /// Runs `resolve` once every resolve requested earlier on the same session has ended, so that no resolve
     /// resumes the session while another is moving its files. Requests run in the order they were made.
     /// A session that is held when its turn comes is refused before anything is paused or run.
-    private func resolveInTurn(on session: SyncSession, _ resolve: @escaping @MainActor () async -> Void) async {
+    /// - Returns: the roots left unresolved: what `resolve` returns, or all of `roots` for a refusal.
+    private func resolveInTurn(
+        on session: SyncSession,
+        roots: Set<String>,
+        _ resolve: @escaping @MainActor () async -> Set<String>
+    ) async -> Set<String> {
         let identifier = session.identifier
         let earlier = lastResolve[identifier]
         let turn = Task { @MainActor in
-            await earlier?.value
+            _ = await earlier?.value
             if let hold = self.sessionHolds[identifier] {
                 ConsoleLog.shared.log("resolve refused: \"\(session.name ?? identifier)\" is held paused", level: .error)
                 self.lastError = hold
-                return
+                return roots
             }
-            await resolve()
+            return await resolve()
         }
         lastResolve[identifier] = turn
-        await turn.value
+        let unresolved = await turn.value
         if lastResolve[identifier] == turn { lastResolve[identifier] = nil }
+        return unresolved
     }
 
     private func applyResolve(
         session: SyncSession,
         conflict: Conflict,
         winner: ConflictWinner
-    ) async {
+    ) async -> Set<String> {
+        let unresolved: Set<String> = [conflict.root]
         guard !conflict.root.isEmpty else {
             ConsoleLog.shared.log("resolveConflict: refused the conflict at the sync root", level: .error)
             lastError = rootConflictRefusal(in: session)
-            return
+            return unresolved
         }
 
         ConsoleLog.shared.log("resolveConflict: \(winner) wins for root '\(conflict.root)'")
@@ -639,7 +652,7 @@ public final class SessionStore {
         } catch {
             ConsoleLog.shared.log("  pause FAILED: \(error.localizedDescription)", level: .error)
             lastError = "Failed to pause session: \(error.localizedDescription)"
-            return
+            return unresolved
         }
 
         let leftoverNotice: String?
@@ -656,18 +669,18 @@ public final class SessionStore {
                 ConsoleLog.shared.log("  \(notice)", level: .error)
                 sessionHolds[session.identifier] = notice
                 lastError = notice
-                return
+                return unresolved
             case .winnerMissing(let winnerURL):
                 ConsoleLog.shared.log("  winner file no longer exists at \(winnerURL.formatted)", level: .error)
                 lastError = "The file \"\(conflict.root)\" no longer exists at the source. It may have been renamed or deleted. Try refreshing sessions."
                 _ = try? await resumeUnlessHeld(session.identifier)
-                return
+                return unresolved
             }
         } catch {
             ConsoleLog.shared.log("  transport FAILED: \(error.localizedDescription)", level: .error)
             lastError = error.localizedDescription
             _ = try? await resumeUnlessHeld(session.identifier)
-            return
+            return unresolved
         }
 
         // Resume and flush to let mutagen re-scan with the resolved state.
@@ -676,7 +689,7 @@ public final class SessionStore {
         do {
             if case .heldBack(let message) = try await resumeUnlessHeld(session.identifier) {
                 lastError = message
-                return
+                return unresolved
             }
             ConsoleLog.shared.log("  resumed session")
             try await provider.syncFlush(session.identifier)
@@ -686,6 +699,7 @@ public final class SessionStore {
             ConsoleLog.shared.log("  flush FAILED: \(error.localizedDescription)", level: .error)
             lastError = ([error.localizedDescription] + [leftoverNotice].compactMap { $0 }).joined(separator: " ")
         }
+        return []
     }
 
     public func dismissLeftoverNotice(for identifier: String) {
@@ -700,8 +714,9 @@ public final class SessionStore {
         session: SyncSession,
         conflicts: [Conflict],
         winner: ConflictWinner
-    ) async {
-        guard !conflicts.isEmpty else { return }
+    ) async -> Set<String> {
+        var unresolved = Set(conflicts.map(\.root))
+        guard !conflicts.isEmpty else { return unresolved }
 
         ConsoleLog.shared.log("resolveConflicts: \(winner) wins for \(conflicts.count) conflicts")
 
@@ -712,7 +727,7 @@ public final class SessionStore {
             ConsoleLog.shared.log("  refused the conflict at the sync root", level: .error)
             guard !fileConflicts.isEmpty else {
                 lastError = "\(failed) of \(conflicts.count) conflicts could not be resolved. \(refusal)"
-                return
+                return unresolved
             }
         }
 
@@ -722,7 +737,7 @@ public final class SessionStore {
         } catch {
             ConsoleLog.shared.log("  pause FAILED: \(error.localizedDescription)", level: .error)
             lastError = "Failed to pause session: \(error.localizedDescription)"
-            return
+            return unresolved
         }
 
         var resolved = 0
@@ -732,9 +747,11 @@ public final class SessionStore {
                 switch try await applyWinner(winner, to: conflict, in: session) {
                 case .applied:
                     resolved += 1
+                    unresolved.remove(conflict.root)
                 case .appliedLeavingOriginal(let notice):
                     ConsoleLog.shared.log("  \(notice)", level: .error)
                     resolved += 1
+                    unresolved.remove(conflict.root)
                     addLeftoverNotice(notice, for: session.identifier)
                     notices.append(notice)
                 case .leftUnverified(let notice):
@@ -747,7 +764,7 @@ public final class SessionStore {
                     let message = ([notice] + notices).joined(separator: " ")
                     sessionHolds[session.identifier] = message
                     lastError = message
-                    return
+                    return unresolved
                 case .winnerMissing:
                     ConsoleLog.shared.log("  skipped '\(conflict.root)': winner file no longer exists", level: .error)
                     failed += 1
@@ -763,7 +780,7 @@ public final class SessionStore {
         do {
             if case .heldBack(let message) = try await resumeUnlessHeld(session.identifier) {
                 lastError = message
-                return
+                return unresolved
             }
             try await provider.syncFlush(session.identifier)
             if failed > 0 {
@@ -775,6 +792,7 @@ public final class SessionStore {
             ConsoleLog.shared.log("  flush FAILED: \(error.localizedDescription)", level: .error)
             lastError = ([error.localizedDescription] + notices).joined(separator: " ")
         }
+        return unresolved
     }
 
     /// What applying a winner did to the files of one conflict.

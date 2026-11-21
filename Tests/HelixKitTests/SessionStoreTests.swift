@@ -1459,6 +1459,30 @@ struct ConflictResolutionTests {
         #expect(store.sessionHolds == ["sync_1": holdMessage(root: "a.txt", destination: "/tmp/b/a.txt", token: token)])
     }
 
+    @Test("A resolve returns the roots it left unresolved: failed, not attempted, and refused ones")
+    @MainActor
+    func resolveReturnsUnresolvedRoots() async {
+        defer { removeDefaults() }
+        let c1 = Conflict(root: "a.txt", alphaChanges: [], betaChanges: [])
+        let c2 = Conflict(root: "b.txt", alphaChanges: [], betaChanges: [])
+        let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [c1, c2])
+        let failingToCopyB = FileTransport { executable, arguments in
+            if executable == "/bin/cp", arguments[1] == "/tmp/a/b.txt" { throw CLIError(exitCode: 1, stderr: "permission denied") }
+            return ""
+        }
+        let store = SessionStore(provider: RecordingProvider(syncSessions: [session]), fileTransport: failingToCopyB, defaults: defaults)
+
+        #expect(await store.resolveConflicts(session: session, conflicts: [c1, c2], winner: .alpha) == ["b.txt"])
+        #expect(await store.resolveConflict(session: session, conflict: c2, winner: .alpha) == ["b.txt"])
+        #expect(await store.resolveConflict(session: session, conflict: c1, winner: .alpha) == [])
+
+        let held = SessionStore(provider: RecordingProvider(syncSessions: [session]), fileTransport: transportLeavingDestinationUnverified(recordingTo: CommandRecorder()), defaults: defaults)
+
+        #expect(await held.resolveConflicts(session: session, conflicts: [c1, c2], winner: .alpha) == ["a.txt", "b.txt"])
+        #expect(await held.resolveConflict(session: session, conflict: c2, winner: .alpha) == ["b.txt"])
+        #expect(await held.resolveConflicts(session: session, conflicts: [c1, c2], winner: .alpha) == ["a.txt", "b.txt"])
+    }
+
     @Test("conflictFileInfo returns file metadata from both endpoints")
     @MainActor
     func fileInfo() async {
