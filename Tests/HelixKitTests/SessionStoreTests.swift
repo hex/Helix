@@ -596,6 +596,38 @@ struct BulkPauseTests {
         defaults.removePersistentDomain(forName: suiteName)
     }
 
+    @Test("Pause All owns the replacement before a failed original removal")
+    @MainActor
+    func pausedEditTransfersOwnershipBeforeTermination() async {
+        defer { removeDefaults() }
+        let deadline = Date(timeIntervalSince1970: 2_000_000_000)
+        let original = makeSyncSession(id: "sync_1", name: "project")
+        let paused = makeSyncSession(id: "sync_1", name: "project", paused: true)
+        let replacement = makeSyncSession(id: "sync_candidate", name: "project", paused: true)
+        let store = SessionStore(provider: RecordingProvider(syncSessions: [original]), defaults: defaults)
+        await store.pauseAllSync(until: deadline)
+        let gate = Gate()
+        let provider = RecordingProvider(
+            syncSessions: [paused], sessionsAfterCreate: [paused, replacement], failOn: "syncTerminate:sync_1",
+            beforeSyncTerminate: { await gate.pass() }
+        )
+        store.replaceProvider(provider)
+
+        let editing = Task {
+            await store.recreateSync(paused, options: SyncCreateOptions(from: paused), alpha: "/srv/project", beta: "/srv/mirror")
+        }
+        await gate.reached()
+        let recovery = RecordingProvider(syncSessions: [paused, replacement])
+        let relaunched = SessionStore(provider: recovery, defaults: defaults, now: { deadline })
+        let persisted = relaunched.bulkPause
+        await gate.open()
+        _ = await editing.value
+        await relaunched.refresh()
+
+        #expect(persisted == BulkPause(sessionIdentifiers: ["sync_candidate"], resumeAt: deadline))
+        #expect(recovery.calls == ["syncResume:sync_candidate"])
+    }
+
     @Test("Pause All pauses only running sessions and Resume restores exactly those")
     @MainActor
     func pauseAllThenResume() async {
@@ -1052,6 +1084,7 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
     private let failOn: String?
     private let beforeSyncPause: (@Sendable (String) async -> Void)?
     private let duringSyncCreate: (@Sendable () async -> Void)?
+    private let beforeSyncTerminate: (@Sendable () async -> Void)?
 
     /// - Parameter duringSyncCreate: runs inside each create, after the create is recorded and before it returns.
     init(
@@ -1060,7 +1093,8 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
         sessionsAfterCreate: [SyncSession]? = nil,
         failOn: String? = nil,
         beforeSyncPause: (@Sendable (String) async -> Void)? = nil,
-        duringSyncCreate: (@Sendable () async -> Void)? = nil
+        duringSyncCreate: (@Sendable () async -> Void)? = nil,
+        beforeSyncTerminate: (@Sendable () async -> Void)? = nil
     ) {
         self.syncSessions = syncSessions
         self.resolvedSyncSessions = resolvedSyncSessions
@@ -1068,6 +1102,7 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
         self.failOn = failOn
         self.beforeSyncPause = beforeSyncPause
         self.duringSyncCreate = duringSyncCreate
+        self.beforeSyncTerminate = beforeSyncTerminate
     }
 
     var calls: [String] {
@@ -1123,7 +1158,10 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
         lock.unlock()
     }
     func syncReset(_ identifier: String) async throws {}
-    func syncTerminate(_ identifier: String) async throws { try record("syncTerminate:\(identifier)") }
+    func syncTerminate(_ identifier: String) async throws {
+        await beforeSyncTerminate?()
+        try record("syncTerminate:\(identifier)")
+    }
     func forwardPause(_ identifier: String) async throws {}
     func forwardResume(_ identifier: String) async throws {}
     func forwardTerminate(_ identifier: String) async throws {}
@@ -1954,6 +1992,7 @@ struct ConflictResolutionTests {
 
         #expect(callsWhileEditIsMidway == [createPaused])
         #expect(recordWhileEditIsMidway == BulkPause(sessionIdentifiers: ["sync_1"], resumeAt: nil))
+        #expect(store.bulkPause == BulkPause(sessionIdentifiers: ["sync_replacement"], resumeAt: nil))
         #expect(provider.calls == [createPaused, "syncTerminate:sync_1"])
         #expect(editError == nil)
     }

@@ -98,6 +98,7 @@ public final class SessionStore {
     @ObservationIgnored private var bulkPauseInFlight = false
     /// The session `recreateSync` is replacing right now. No resolve or resume is started on it meanwhile.
     @ObservationIgnored private var sessionBeingEdited: String?
+    @ObservationIgnored private var replacementBeingEdited: String?
     /// The end of the resolve or resume requested last on each session; the next one on that session waits for it.
     @ObservationIgnored private var lastTurn: [String: Task<Void, Never>] = [:]
     /// How many conflict resolves are running or waiting their turn, by session identifier.
@@ -322,6 +323,7 @@ public final class SessionStore {
             return message
         }
         guard sessionBeingEdited == nil else { return "Another sync edit is already in progress." }
+        guard !bulkPauseInFlight else { return "Wait for Pause All or Resume to finish before editing a session." }
         // Mutagen parses numeric byte sizes as floating point before converting to an integer.
         if let size = options.maxStagingFileSize, let bytes = UInt64(size),
            UInt64(exactly: Double(bytes)) != bytes {
@@ -330,7 +332,10 @@ public final class SessionStore {
             return message
         }
         sessionBeingEdited = session.identifier
-        defer { sessionBeingEdited = nil }
+        defer {
+            sessionBeingEdited = nil
+            replacementBeingEdited = nil
+        }
 
         let provider = self.provider
         let listed: [SyncSession]
@@ -359,6 +364,8 @@ public final class SessionStore {
         guard !listed.contains(where: { $0.identifier == replacement }) else {
             return await finishSyncEdit("Mutagen returned existing session identifier \(replacement). The original session was kept.")
         }
+        replacementBeingEdited = replacement
+        updateBulkPause(replacing: original, with: replacement)
 
         if !current.paused {
             do {
@@ -408,6 +415,7 @@ public final class SessionStore {
             }
         }
 
+        updateBulkPause(replacing: replacement, with: original)
         do {
             switch try await resumeUnlessHeld(original) {
             case .resumed:
@@ -452,16 +460,20 @@ public final class SessionStore {
         defer { bulkPauseInFlight = false }
         guard await reloadSessions() else { return }
 
-        var paused = bulkPause?.sessionIdentifiers ?? []
-        let existingRecord = paused.isEmpty ? nil : BulkPause(sessionIdentifiers: paused, resumeAt: resumeAt)
-        if bulkPause != existingRecord { bulkPause = existingRecord }
+        if let record = bulkPause, record.resumeAt != resumeAt {
+            bulkPause = BulkPause(sessionIdentifiers: record.sessionIdentifiers, resumeAt: resumeAt)
+        }
 
         var failures: [String] = []
         for session in syncSessions where !session.paused {
+            let identifier = session.identifier
+            guard identifier != sessionBeingEdited, identifier != replacementBeingEdited else { continue }
             do {
-                try await provider.syncPause(session.identifier)
-                if !paused.contains(session.identifier) { paused.append(session.identifier) }
-                bulkPause = BulkPause(sessionIdentifiers: paused, resumeAt: resumeAt)
+                try await provider.syncPause(identifier)
+                let paused = bulkPause?.sessionIdentifiers ?? []
+                if !paused.contains(identifier) {
+                    bulkPause = BulkPause(sessionIdentifiers: paused + [identifier], resumeAt: resumeAt)
+                }
             } catch {
                 failures.append("Could not pause \(session.name ?? session.identifier): \(error.localizedDescription)")
             }
@@ -478,15 +490,16 @@ public final class SessionStore {
         defer { bulkPauseInFlight = false }
         guard await reloadSessions() else { return }
 
-        var unresumed: [String] = []
+        let listed = Dictionary(uniqueKeysWithValues: syncSessions.map { ($0.identifier, $0) })
         var failures: [String] = []
-        for session in syncSessions where session.paused && record.sessionIdentifiers.contains(session.identifier) {
-            // A session whose conflict resolve is still moving files stays in the record, so the next
-            // attempt resumes it if the resolve left it paused without holding it. So does a session that
-            // is being edited: a resume now could land on the original after the edit has paused it.
-            let identifier = session.identifier
-            if isResolving(identifier) || sessionBeingEdited == identifier {
-                unresumed.append(identifier)
+        for identifier in record.sessionIdentifiers {
+            guard bulkPause?.sessionIdentifiers.contains(identifier) == true else { continue }
+            // Leave sessions owned by an edit or a conflict resolve for the next bulk resume.
+            if isResolving(identifier) || sessionBeingEdited == identifier || replacementBeingEdited == identifier {
+                continue
+            }
+            guard let session = listed[identifier], session.paused else {
+                updateBulkPause(replacing: identifier)
                 continue
             }
             // The resume takes a turn, so a resolve requested while it is in flight pauses after it.
@@ -501,12 +514,18 @@ public final class SessionStore {
                 }
             }
             if let failure {
-                unresumed.append(identifier)
                 failures.append("Could not resume \(session.name ?? identifier): \(failure)")
+            } else {
+                updateBulkPause(replacing: identifier)
             }
         }
-        bulkPause = unresumed.isEmpty ? nil : BulkPause(sessionIdentifiers: unresumed, resumeAt: record.resumeAt)
         await finishBulkAction(failures: failures)
+    }
+
+    private func updateBulkPause(replacing identifier: String, with replacement: String? = nil) {
+        guard let record = bulkPause, record.sessionIdentifiers.contains(identifier) else { return }
+        let identifiers = record.sessionIdentifiers.compactMap { $0 == identifier ? replacement : $0 }
+        bulkPause = identifiers.isEmpty ? nil : BulkPause(sessionIdentifiers: identifiers, resumeAt: record.resumeAt)
     }
 
     /// How the store's own attempt to resume a session ended.
