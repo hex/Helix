@@ -131,7 +131,7 @@ private struct SyncSessionRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            StatusBadge(status: session.status, paused: session.paused, progress: session.transferProgress?.fraction)
+            StatusBadge(status: session.status, paused: session.paused)
                 .padding(.top, 5)
 
             VStack(alignment: .leading, spacing: 2) {
@@ -145,10 +145,6 @@ private struct SyncSessionRow: View {
                     .lineLimit(1)
 
                 HStack(spacing: 8) {
-                    if let fraction = session.transferProgress?.fraction {
-                        Text(fraction, format: .percent.precision(.fractionLength(0)))
-                            .monospacedDigit()
-                    }
                     if let cycles = session.successfulCycles, cycles > 0 {
                         Text("\(cycles) cycles")
                     }
@@ -162,6 +158,27 @@ private struct SyncSessionRow: View {
             }
 
             Spacer()
+
+            if let fraction = session.transferProgress?.fraction {
+                HStack(spacing: 8) {
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(Color.primary.opacity(0.1))
+                        Capsule()
+                            .fill(Color.blue)
+                            .frame(width: 64 * min(max(fraction, 0), 1))
+                    }
+                    .frame(width: 64, height: 4)
+                    .accessibilityHidden(true)
+
+                    Text(fraction, format: .percent.precision(.fractionLength(0)))
+                        .font(.caption)
+                        .monospacedDigit()
+                        .frame(minWidth: 30, alignment: .trailing)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxHeight: .infinity)
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
