@@ -7,6 +7,60 @@ public enum FileTransportError: Error {
     case malformedStatOutput(String)
 }
 
+/// A replacement that stopped: the step that failed, and each recovery step that failed after it.
+public struct ReplaceError: LocalizedError {
+    public enum Step: Sendable, Equatable {
+        case copySource
+        case checkDestination
+        case setOriginalAside
+        case moveCopyIntoPlace
+        case removeSetAsideOriginal
+        case removeCopy
+        case restoreOriginal
+    }
+
+    public struct StepFailure: Sendable {
+        public let step: Step
+        public let cause: any Error
+    }
+
+    public let source: String
+    public let destination: String
+    public let incoming: String
+    public let setAside: String
+    public let failure: StepFailure
+    public let recoveryFailures: [StepFailure]
+
+    public var errorDescription: String? {
+        let first = sentence(for: failure)
+        let recoveries = recoveryFailures.map { recoveryFailure -> String in
+            let text = sentence(for: recoveryFailure)
+            return "Then " + text.prefix(1).lowercased() + text.dropFirst()
+        }
+        return ([first] + recoveries).joined(separator: ". ")
+    }
+
+    private func sentence(for failure: StepFailure) -> String {
+        let cause = failure.cause.localizedDescription
+        switch failure.step {
+        case .copySource:
+            return "Could not copy \(source) to \(incoming): \(cause)"
+        case .checkDestination:
+            return "Could not check whether \(destination) exists: \(cause)"
+        case .setOriginalAside:
+            return "Could not move \(destination) aside to \(setAside): \(cause)"
+        case .moveCopyIntoPlace:
+            return "Could not move \(incoming) into place at \(destination): \(cause)"
+        case .removeSetAsideOriginal:
+            return "Replaced \(destination), but could not remove the original set aside at \(setAside): \(cause)"
+        case .removeCopy:
+            return "Could not remove the copy at \(incoming): \(cause)"
+        case .restoreOriginal:
+            return "Could not move the original back from \(setAside) to \(destination): \(cause)"
+        }
+    }
+}
+
 public struct FileInfo: Sendable {
     public let size: Int64
     public let modifiedAt: Date
@@ -81,6 +135,94 @@ public struct FileTransport: Sendable {
         default:
             // Cross-transport (ssh<->docker, docker<->docker): relay via temp file
             try await copyViaTemp(from: source, to: destination)
+        }
+    }
+
+    // MARK: - Replace
+
+    /// Replaces `destination` with a copy of `source` without a moment in which `destination` is missing.
+    /// The copy lands beside it as `<name>.helix-incoming-<uuid>`, an existing destination moves aside
+    /// to `<name>.helix-replaced-<uuid>`, the copy moves into place, and the set-aside original is removed.
+    /// A failed copy leaves `destination` untouched and a failed move into place moves the original back;
+    /// every failure, recovery failures included, is thrown as a `ReplaceError`.
+    public func replace(_ destination: EndpointURL, withCopyOf source: EndpointURL) async throws {
+        let token = UUID().uuidString
+        let incoming = destination.withPath(destination.path + ".helix-incoming-\(token)")
+        let setAside = destination.withPath(destination.path + ".helix-replaced-\(token)")
+
+        func failure(_ step: ReplaceError.Step, _ cause: any Error, recoveryFailures: [ReplaceError.StepFailure] = []) -> ReplaceError {
+            ReplaceError(
+                source: source.formatted, destination: destination.formatted,
+                incoming: incoming.formatted, setAside: setAside.formatted,
+                failure: ReplaceError.StepFailure(step: step, cause: cause), recoveryFailures: recoveryFailures
+            )
+        }
+        func recover(_ step: ReplaceError.Step, _ action: () async throws -> Void) async -> [ReplaceError.StepFailure] {
+            do {
+                try await action()
+                return []
+            } catch {
+                return [ReplaceError.StepFailure(step: step, cause: error)]
+            }
+        }
+        func removeCopy() async -> [ReplaceError.StepFailure] {
+            await recover(.removeCopy) { try await remove(endpoint: incoming) }
+        }
+
+        do {
+            try await copy(from: source, to: incoming)
+        } catch {
+            throw failure(.copySource, error, recoveryFailures: await removeCopy())
+        }
+        let destinationExists: Bool
+        do {
+            // A dangling symlink fails `test -e` yet still holds the name, and mv cannot rename a directory over it.
+            if try await pathExists(endpoint: destination) {
+                destinationExists = true
+            } else {
+                destinationExists = try await isSymlink(endpoint: destination)
+            }
+        } catch {
+            throw failure(.checkDestination, error, recoveryFailures: await removeCopy())
+        }
+        if destinationExists {
+            do {
+                try await move(destination, toPath: setAside.path)
+            } catch {
+                throw failure(.setOriginalAside, error, recoveryFailures: await removeCopy())
+            }
+        }
+        do {
+            try await move(incoming, toPath: destination.path)
+        } catch {
+            var recoveryFailures: [ReplaceError.StepFailure] = []
+            if destinationExists {
+                recoveryFailures += await recover(.restoreOriginal) { try await move(setAside, toPath: destination.path) }
+            }
+            recoveryFailures += await removeCopy()
+            throw failure(.moveCopyIntoPlace, error, recoveryFailures: recoveryFailures)
+        }
+        if destinationExists {
+            do {
+                try await remove(endpoint: setAside)
+            } catch {
+                throw failure(.removeSetAsideOriginal, error)
+            }
+        }
+    }
+
+    /// Renames a path on its own host; source and target always share the endpoint's machine.
+    private func move(_ item: EndpointURL, toPath newPath: String) async throws {
+        switch item {
+        case .local(let path):
+            _ = try await execute("/bin/mv", [path, newPath])
+        case .ssh(let user, let host, let port, let path):
+            var args: [String] = []
+            if let port { args += ["-p", "\(port)"] }
+            args += [sshTarget(user: user, host: host), "mv \(Self.shellWord(path)) \(Self.shellWord(newPath))"]
+            _ = try await execute("/usr/bin/ssh", args)
+        case .docker(let container, let path):
+            _ = try await execute("/usr/bin/docker", ["exec", container, "mv", path, newPath])
         }
     }
 
@@ -313,5 +455,25 @@ public struct FileTransport: Sendable {
             throw FileTransportError.malformedStatOutput(trimmed)
         }
         return FileInfo(size: size, modifiedAt: Date(timeIntervalSince1970: mtime), isSymlink: false, symlinkTarget: nil)
+    }
+}
+
+private extension EndpointURL {
+    var path: String {
+        switch self {
+        case .local(let path), .ssh(_, _, _, let path), .docker(_, let path):
+            return path
+        }
+    }
+
+    func withPath(_ newPath: String) -> EndpointURL {
+        switch self {
+        case .local:
+            return .local(path: newPath)
+        case .ssh(let user, let host, let port, _):
+            return .ssh(user: user, host: host, port: port, path: newPath)
+        case .docker(let container, _):
+            return .docker(container: container, path: newPath)
+        }
     }
 }

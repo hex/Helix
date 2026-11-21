@@ -394,6 +394,94 @@ struct FileTransportShellWordTests {
     }
 }
 
+@Suite("FileTransport replace")
+struct FileTransportReplaceTests {
+
+    private let source = EndpointURL.local(path: "/tmp/a/file.txt")
+    private let destination = EndpointURL.ssh(user: "deploy", host: "server", port: nil, path: "/opt/app/file.txt")
+
+    /// The per-call token in the sibling names, read from the copy that replace issues first.
+    private func token(in commands: [RecordedCommand]) throws -> String {
+        let copyTarget = try #require(commands.first?.arguments.last)
+        let marker = "deploy@server:/opt/app/file.txt.helix-incoming-"
+        try #require(copyTarget.hasPrefix(marker))
+        return String(copyTarget.dropFirst(marker.count))
+    }
+
+    @Test("replacing local to ssh copies beside the destination before anything touches it")
+    func copiesBesideBeforeTouchingDestination() async throws {
+        let recorder = CommandRecorder()
+        let transport = FileTransport(execute: recorder.execute)
+
+        try await transport.replace(destination, withCopyOf: source)
+
+        let token = try token(in: recorder.commands)
+        let incoming = "/opt/app/file.txt.helix-incoming-\(token)"
+        let setAside = "/opt/app/file.txt.helix-replaced-\(token)"
+        #expect(recorder.commands.map(\.executable) == ["/usr/bin/scp", "/usr/bin/ssh", "/usr/bin/ssh", "/usr/bin/ssh", "/usr/bin/ssh"])
+        #expect(recorder.commands.map(\.arguments) == [
+            ["-r", "/tmp/a/file.txt", "deploy@server:\(incoming)"],
+            ["deploy@server", "test -e '/opt/app/file.txt'"],
+            ["deploy@server", "mv '/opt/app/file.txt' '\(setAside)'"],
+            ["deploy@server", "mv '\(incoming)' '/opt/app/file.txt'"],
+            ["deploy@server", "rm -rf '\(setAside)'"],
+        ])
+    }
+
+    @Test("a failed copy removes the partial copy, leaves the destination alone, and throws")
+    func failedCopyLeavesDestinationAlone() async throws {
+        let recorder = CommandRecorder()
+        let transport = FileTransport { executable, arguments in
+            let output = try await recorder.execute(executable, arguments)
+            if executable == "/usr/bin/scp" {
+                throw CLIError(exitCode: 1, stderr: "lost connection")
+            }
+            return output
+        }
+
+        let error = try await #require(throws: (any Error).self) {
+            try await transport.replace(destination, withCopyOf: source)
+        }
+
+        let token = try token(in: recorder.commands)
+        let incoming = "/opt/app/file.txt.helix-incoming-\(token)"
+        #expect(error.localizedDescription == "Could not copy /tmp/a/file.txt to deploy@server:\(incoming): lost connection")
+        #expect(recorder.commands.map(\.arguments) == [
+            ["-r", "/tmp/a/file.txt", "deploy@server:\(incoming)"],
+            ["deploy@server", "rm -rf '\(incoming)'"],
+        ])
+    }
+
+    @Test("a failed move into place moves the original back and throws")
+    func failedMoveIntoPlaceRestoresOriginal() async throws {
+        let recorder = CommandRecorder()
+        let transport = FileTransport { executable, arguments in
+            let output = try await recorder.execute(executable, arguments)
+            if arguments.last?.hasPrefix("mv '/opt/app/file.txt.helix-incoming-") == true {
+                throw CLIError(exitCode: 1, stderr: "permission denied")
+            }
+            return output
+        }
+
+        let error = try await #require(throws: (any Error).self) {
+            try await transport.replace(destination, withCopyOf: source)
+        }
+
+        let token = try token(in: recorder.commands)
+        let incoming = "/opt/app/file.txt.helix-incoming-\(token)"
+        let setAside = "/opt/app/file.txt.helix-replaced-\(token)"
+        #expect(error.localizedDescription == "Could not move deploy@server:\(incoming) into place at deploy@server:/opt/app/file.txt: permission denied")
+        #expect(recorder.commands.map(\.arguments) == [
+            ["-r", "/tmp/a/file.txt", "deploy@server:\(incoming)"],
+            ["deploy@server", "test -e '/opt/app/file.txt'"],
+            ["deploy@server", "mv '/opt/app/file.txt' '\(setAside)'"],
+            ["deploy@server", "mv '\(incoming)' '/opt/app/file.txt'"],
+            ["deploy@server", "mv '\(setAside)' '/opt/app/file.txt'"],
+            ["deploy@server", "rm -rf '\(incoming)'"],
+        ])
+    }
+}
+
 @Suite("FileTransport error propagation")
 struct FileTransportErrorTests {
 
