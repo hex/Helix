@@ -15,7 +15,9 @@ struct MenuBarPopover: View {
             header
             Divider()
 
-            if !store.daemonRunning {
+            if store.daemonStatus == .startedOutside {
+                externalDaemonNotice
+            } else if !store.daemonRunning {
                 daemonWarning
             } else if store.totalSessionCount == 0 {
                 emptyState
@@ -52,6 +54,15 @@ struct MenuBarPopover: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    private var externalDaemonNotice: some View {
+        VStack(spacing: 12) {
+            Text(store.daemonStatus.rawValue)
+                .font(.headline)
+            ExternalDaemonActions(store: store)
+        }
+        .padding()
     }
 
     private var daemonWarning: some View {

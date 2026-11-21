@@ -55,12 +55,12 @@ struct SettingsView: View {
             Section("Daemon") {
                 HStack {
                     Circle()
-                        .fill(daemonStatusColor)
+                        .fill(store.daemonStatus.indicatorColor)
                         .frame(width: 8, height: 8)
                     Text(store.daemonStatus.rawValue)
                     Spacer()
 
-                    if store.daemonRunning {
+                    if store.daemonStatus == .running {
                         Button("Stop") {
                             Task { await store.stopDaemon() }
                         }
@@ -71,7 +71,7 @@ struct SettingsView: View {
                                 await store.startDaemon()
                             }
                         }
-                    } else {
+                    } else if store.daemonStatus != .startedOutside {
                         Button("Start") {
                             Task {
                                 await store.startDaemon()
@@ -79,6 +79,10 @@ struct SettingsView: View {
                             }
                         }
                     }
+                }
+
+                if store.daemonStatus == .startedOutside {
+                    ExternalDaemonActions(store: store)
                 }
 
                 if let progress = store.daemonStopProgress {
@@ -138,15 +142,6 @@ struct SettingsView: View {
         .formStyle(.grouped)
     }
 
-    private var daemonStatusColor: Color {
-        switch store.daemonStatus {
-        case .running: .green
-        case .stopped: .red
-        case .startedOutside: .secondary
-        case .unknown: .orange
-        }
-    }
-
     // MARK: - Advanced Tab
 
     private var advancedTab: some View {
@@ -202,5 +197,28 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+}
+
+struct ExternalDaemonActions: View {
+    let store: SessionStore
+
+    var body: some View {
+        HStack {
+            Button("Manage Sessions") { Task { await store.manageExternalDaemon() } }
+            Button("Stop Again") { Task { await store.stopDaemon() } }
+        }
+        .buttonStyle(.borderless)
+    }
+}
+
+extension DaemonStatus {
+    var indicatorColor: Color {
+        switch self {
+        case .running: .green
+        case .stopped: .red
+        case .startedOutside: .secondary
+        case .unknown: .orange
+        }
     }
 }

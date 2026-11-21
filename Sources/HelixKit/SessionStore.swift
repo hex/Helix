@@ -57,7 +57,7 @@ public final class SessionStore {
     public private(set) var syncSessions: [SyncSession] = []
     public private(set) var forwardSessions: [ForwardSession] = []
     public private(set) var daemonStatus = DaemonStatus.stopped
-    public var daemonRunning: Bool { daemonStatus == .running }
+    public var daemonRunning: Bool { daemonStatus == .running || daemonStatus == .startedOutside }
     public private(set) var daemonStopProgress: String?
     public private(set) var daemonAutoStart = false
     public private(set) var mutagenVersion: String?
@@ -914,16 +914,20 @@ public final class SessionStore {
 
     // MARK: - Daemon
 
+    public func manageExternalDaemon() async {
+        guard daemonControl == .stopped, daemonStatus == .startedOutside else { return }
+        setManagedDaemonStatus(.running)
+        await refresh()
+        schedulePolling(refreshImmediately: false)
+    }
+
     public func startDaemon() async {
-        guard daemonControl == .managed || daemonControl == .stopped else { return }
+        guard daemonControl == .managed || (daemonControl == .stopped && daemonStatus != .startedOutside) else { return }
         let previousControl = daemonControl
         daemonControl = .starting
         do {
             try await provider.daemonStart()
-            defaults.removeObject(forKey: Self.daemonStoppedKey)
-            daemonControl = .managed
-            daemonStatus = .running
-            lastError = nil
+            setManagedDaemonStatus(.running)
             await refresh()
             schedulePolling(refreshImmediately: false)
         } catch {
@@ -938,7 +942,8 @@ public final class SessionStore {
             lastError = "Mutagen is already stopping."
             return false
         }
-        guard daemonControl == .managed else { return false }
+        let wasStopped = daemonControl == .stopped
+        guard daemonControl == .managed || (wasStopped && daemonStatus == .startedOutside) else { return false }
 
         if let operation = operationBlockingDaemonStop {
             lastError = "Wait for the \(operation) to finish before stopping the Mutagen daemon."
@@ -965,12 +970,13 @@ public final class SessionStore {
             let stopError = "Could not stop Mutagen: \(error.localizedDescription)"
             do {
                 if try await daemonProcess.pid() != nil {
-                    resumeManagingDaemon(status: .running, error: stopError)
+                    restoreAfterFailedStop(wasStopped: wasStopped, status: .running, error: stopError)
                     return false
                 }
             } catch {
-                resumeManagingDaemon(
-                    status: .unknown, error: "\(stopError). Could not verify its status: \(error.localizedDescription)"
+                restoreAfterFailedStop(
+                    wasStopped: wasStopped, status: .unknown,
+                    error: "\(stopError). Could not verify its status: \(error.localizedDescription)"
                 )
                 return false
             }
@@ -987,10 +993,19 @@ public final class SessionStore {
         return true
     }
 
-    private func resumeManagingDaemon(status: DaemonStatus, error: String) {
+    private func setManagedDaemonStatus(_ status: DaemonStatus) {
         defaults.removeObject(forKey: Self.daemonStoppedKey)
-        daemonStatus = status
         daemonControl = .managed
+        daemonStatus = status
+        lastError = nil
+    }
+
+    private func restoreAfterFailedStop(wasStopped: Bool, status: DaemonStatus, error: String) {
+        if wasStopped {
+            daemonControl = .stopped
+        } else {
+            setManagedDaemonStatus(status)
+        }
         lastError = error
         schedulePolling(refreshImmediately: false)
     }

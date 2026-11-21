@@ -173,7 +173,7 @@ struct MainWindow: View {
             .listStyle(.sidebar)
 
             Divider()
-            DaemonStatusView(running: store.daemonRunning)
+            DaemonStatusView(status: store.daemonStatus)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
         }
@@ -480,14 +480,14 @@ private struct ForwardListRow: View {
 // MARK: - Daemon Status
 
 private struct DaemonStatusView: View {
-    let running: Bool
+    let status: DaemonStatus
 
     var body: some View {
         HStack(spacing: 6) {
             Circle()
-                .fill(running ? .green : .red)
+                .fill(status.indicatorColor)
                 .frame(width: 6, height: 6)
-            Text("Daemon: \(running ? "Running" : "Stopped")")
+            Text(status == .startedOutside ? status.rawValue : "Daemon: \(status.rawValue)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
