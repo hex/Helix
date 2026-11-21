@@ -1,7 +1,8 @@
 // ABOUTME: Color-coded status indicator dot for session health display.
-// ABOUTME: Maps mutagen status strings to semantic colors.
+// ABOUTME: Maps mutagen status strings to semantic colors through SyncPhase.
 
 import SwiftUI
+import HelixKit
 
 struct StatusBadge: View {
     let status: String
@@ -22,24 +23,24 @@ struct StatusBadge: View {
     var color: Color {
         if paused { return .secondary }
 
-        switch status {
-        case "watching":
+        switch SyncPhase(mutagenStatus: status) {
+        case .watching:
             return .green
-        case "scanning", "staging", "transitioning", "saving":
+        case .working:
             return .blue
-        case "halted":
+        case .halted:
             return .orange
-        case "connecting":
+        case .connecting:
             return .yellow
-        case "disconnected":
+        case .disconnected:
             return .red
-        default:
+        case .unrecognized:
             return .secondary
         }
     }
 
     var label: String {
         if paused { return "Paused" }
-        return status.capitalized
+        return status.replacingOccurrences(of: "-", with: " ").capitalized
     }
 }

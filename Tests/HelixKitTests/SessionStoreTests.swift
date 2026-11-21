@@ -133,6 +133,26 @@ struct SessionStoreTests {
         #expect(store.overallHealth == .error)
     }
 
+    @Test("Health status is active while a session stages files")
+    @MainActor
+    func healthStaging() async {
+        let session = makeSyncSession(id: "sync_1", name: "busy", status: "staging-beta")
+        let store = SessionStore(provider: FakeProvider(syncSessions: [session]))
+        await store.refresh()
+
+        #expect(store.overallHealth == .active)
+    }
+
+    @Test("Health status is warning when a session halts on root deletion")
+    @MainActor
+    func healthHaltedOnRootDeletion() async {
+        let session = makeSyncSession(id: "sync_1", name: "halted", status: "halted-on-root-deletion")
+        let store = SessionStore(provider: FakeProvider(syncSessions: [session]))
+        await store.refresh()
+
+        #expect(store.overallHealth == .warning)
+    }
+
     @Test("Total session count includes both sync and forward")
     @MainActor
     func totalCount() async {
