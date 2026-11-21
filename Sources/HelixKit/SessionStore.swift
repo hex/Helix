@@ -707,7 +707,9 @@ public final class SessionStore {
             }
             return await resolve()
         }
-        resolvesInFlight[identifier] = resolvesInFlight[identifier] == 1 ? nil : resolvesInFlight[identifier].map { $0 - 1 }
+        // The entry exists: this call added one to it above, and only this line takes one away.
+        let remaining = resolvesInFlight[identifier]! - 1
+        resolvesInFlight[identifier] = remaining > 0 ? remaining : nil
         return unresolved
     }
 
