@@ -159,13 +159,10 @@ struct EndpointPicker: View {
         connectionStatus = .untested
         defer { isTesting = false }
 
-        var args = ["-o", "ConnectTimeout=5", "-o", "BatchMode=yes"]
-        if let p = Int(port) { args += ["-p", "\(p)"] }
-        let target = user.isEmpty ? host : "\(user)@\(host)"
-        args += [target, "echo", "ok"]
+        let ssh = SSHCommand.remoteShell(user: user.isEmpty ? nil : user, host: host, port: Int(port), command: "echo ok")
 
         do {
-            _ = try await runProcess(executablePath: "/usr/bin/ssh", arguments: args)
+            _ = try await runProcess(executablePath: ssh.executablePath, arguments: ssh.arguments)
             connectionStatus = .connected
         } catch {
             connectionStatus = .failed(error.localizedDescription)

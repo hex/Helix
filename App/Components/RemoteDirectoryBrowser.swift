@@ -162,11 +162,8 @@ struct RemoteDirectoryBrowser: View {
     // MARK: - SSH Helpers
 
     private func sshCommand(_ command: String) async throws -> String {
-        var args = ["-o", "ConnectTimeout=5", "-o", "BatchMode=yes"]
-        if let p = port { args += ["-p", "\(p)"] }
-        let target = user.map { "\($0)@\(host)" } ?? host
-        args += [target, command]
-        return try await runProcess(executablePath: "/usr/bin/ssh", arguments: args)
+        let ssh = SSHCommand.remoteShell(user: user, host: host, port: port, command: command)
+        return try await runProcess(executablePath: ssh.executablePath, arguments: ssh.arguments)
     }
 
     private func shellEscape(_ path: String) -> String {
