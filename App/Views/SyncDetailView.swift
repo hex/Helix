@@ -83,6 +83,57 @@ struct SyncDetailView: View {
 
     // MARK: - Header
 
+    private func transferSection(_ progress: TransferProgress) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let fraction = progress.fraction {
+                ProgressView(value: fraction)
+            } else {
+                ProgressView()
+                    .progressViewStyle(.linear)
+            }
+
+            Text(transferSummary(progress))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+
+            if let path = progress.currentPath {
+                HStack(spacing: 6) {
+                    Text(path)
+                        .font(.caption.monospaced())
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(path)
+                    Text(currentFileSize(progress))
+                        .font(.caption)
+                        .monospacedDigit()
+                        .layoutPriority(1)
+                }
+                .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func transferSummary(_ progress: TransferProgress) -> String {
+        var parts = ["\(progress.receivedFiles.formatted()) of \(progress.expectedFiles.formatted()) files"]
+        let received = Int64(progress.receivedBytes).formatted(.byteCount(style: .file))
+        if let expected = progress.expectedBytes {
+            parts.append("\(received) of \(Int64(expected).formatted(.byteCount(style: .file)))")
+        } else {
+            parts.append(received)
+        }
+        if let fraction = progress.fraction {
+            parts.append(fraction.formatted(.percent.precision(.fractionLength(0))))
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private func currentFileSize(_ progress: TransferProgress) -> String {
+        let received = Int64(progress.currentReceivedBytes).formatted(.byteCount(style: .file))
+        guard let expected = progress.currentExpectedBytes else { return received }
+        return "\(received) of \(Int64(expected).formatted(.byteCount(style: .file)))"
+    }
+
     private var headerSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -99,6 +150,10 @@ struct SyncDetailView: View {
                 Text(StatusBadge(status: session.status, paused: session.paused).label)
                     .font(.callout)
                     .foregroundStyle(.secondary)
+            }
+
+            if let progress = session.transferProgress {
+                transferSection(progress)
             }
 
             HStack(spacing: 16) {

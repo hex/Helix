@@ -145,6 +145,10 @@ private struct SyncSessionRow: View {
                     .lineLimit(1)
 
                 HStack(spacing: 8) {
+                    if let fraction = session.transferProgress?.fraction {
+                        Text(fraction, format: .percent.precision(.fractionLength(0)))
+                            .monospacedDigit()
+                    }
                     if let cycles = session.successfulCycles, cycles > 0 {
                         Text("\(cycles) cycles")
                     }

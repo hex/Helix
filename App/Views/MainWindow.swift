@@ -362,6 +362,13 @@ private struct SyncListRow: View {
 
             Spacer()
 
+            if let fraction = session.transferProgress?.fraction {
+                Text(fraction, format: .percent.precision(.fractionLength(0)))
+                    .font(.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(isSelected ? .white.opacity(0.7) : .secondary)
+            }
+
             if hasVisibleMismatch {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.caption2)
