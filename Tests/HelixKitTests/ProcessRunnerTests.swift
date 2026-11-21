@@ -81,16 +81,22 @@ struct ProcessDeadlineTests {
     func deadlineEndsRunningChild() async throws {
         let pidFile = fixturePIDFile()
         defer { try? FileManager.default.removeItem(at: pidFile) }
-        let duration = Duration.milliseconds(250)
+        let clock = Gate()
+        let runner = ProcessRunner { _ in await clock.pass() }
         let call = Task {
-            try await runBoundedShell(
-                "printf '%s\n' \"$$\" > \"$1\"; exec /bin/sleep 8",
-                pidFile: pidFile, duration: duration
+            try await runner.run(
+                executablePath: "/bin/sh",
+                arguments: ["-c", "printf '%s\n' \"$$\" > \"$1\"; exec /bin/sleep 8", "helix-test", pidFile.path],
+                deadline: .milliseconds(250)
             )
         }
-        defer { call.cancel() }
+        defer {
+            call.cancel()
+            Task { await clock.open() }
+        }
         let pid = try await processIdentifier(writtenTo: pidFile)
         defer { endFixture(pid) }
+        await clock.open()
 
         let failure = await deadlineFailure(of: call)
 
@@ -123,15 +129,32 @@ struct ProcessDeadlineTests {
     func inheritedPipeHasDeadline() async throws {
         let pidFile = fixturePIDFile()
         defer { try? FileManager.default.removeItem(at: pidFile) }
+        let parentFile = fixturePIDFile()
+        defer { try? FileManager.default.removeItem(at: parentFile) }
+        let clock = Gate()
+        let runner = ProcessRunner { _ in await clock.pass() }
         let call = Task {
-            try await runBoundedShell(
-                "/bin/sleep 8 & printf '%s\n' \"$!\" > \"$1\"",
-                pidFile: pidFile, duration: .milliseconds(250)
+            try await runner.run(
+                executablePath: "/bin/sh",
+                arguments: [
+                    "-c", "/bin/sleep 8 & printf '%s\n' \"$!\" > \"$1\"; printf '%s\n' \"$$\" > \"$2\"",
+                    "helix-test", pidFile.path, parentFile.path,
+                ],
+                deadline: .milliseconds(250)
             )
         }
-        defer { call.cancel() }
+        defer {
+            call.cancel()
+            Task { await clock.open() }
+        }
         let pid = try await processIdentifier(writtenTo: pidFile)
         defer { endFixture(pid) }
+        let parent = try await processIdentifier(writtenTo: parentFile)
+        for _ in 0..<100 where !fixtureIsGone(parent) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(fixtureIsGone(parent))
+        await clock.open()
 
         let failure = await deadlineFailure(of: call)
 
