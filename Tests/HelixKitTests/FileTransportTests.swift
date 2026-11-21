@@ -480,7 +480,7 @@ struct FileTransportReplaceTests {
         ])
     }
 
-    @Test("a failed move into place moves the original back and throws")
+    @Test("a failed move into place moves the original back, removes the unused copy, and throws")
     func failedMoveIntoPlaceRestoresOriginal() async throws {
         let recorder = CommandRecorder()
         let transport = FileTransport { executable, arguments in
@@ -503,7 +503,7 @@ struct FileTransportReplaceTests {
         let token = try token(in: recorder.commands)
         let incoming = "/opt/app/file.txt.helix-incoming-\(token)"
         let setAside = "/opt/app/file.txt.helix-replaced-\(token)"
-        #expect(error.localizedDescription == "Could not move deploy@server:\(incoming) into place at deploy@server:/opt/app/file.txt: permission denied. deploy@server:/opt/app/file.txt is unchanged, and the unused copy is still at deploy@server:\(incoming)")
+        #expect(error.localizedDescription == "Could not move deploy@server:\(incoming) into place at deploy@server:/opt/app/file.txt: permission denied. deploy@server:/opt/app/file.txt is unchanged")
         #expect(recorder.commands.map(\.arguments) == [
             ["-r", "/tmp/a/file.txt", "deploy@server:\(incoming)"],
             ["deploy@server", "test -e '/opt/app/file.txt'"],
@@ -515,6 +515,7 @@ struct FileTransportReplaceTests {
             ["deploy@server", "test -e '\(incoming)'"],
             ["deploy@server", "test -e '\(setAside)'"],
             ["deploy@server", "mv '\(setAside)' '/opt/app/file.txt'"],
+            ["deploy@server", "rm -rf '\(incoming)'"],
         ])
     }
 }

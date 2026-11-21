@@ -180,7 +180,7 @@ struct FileTransportReplaceDiskTests {
         }
     }
 
-    @Test("a move into place that fails puts the original back and keeps the unused copy")
+    @Test("a move into place that fails puts the original back and removes the unused copy")
     func moveIntoPlaceFails() async throws {
         try await withScratchDirectory { scratch in
             let (winner, loser) = try makeDirectoryConflict(in: scratch)
@@ -190,15 +190,12 @@ struct FileTransportReplaceDiskTests {
                 _ = try await transport.replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
             }
 
-            let siblings = try replaceSiblings(in: scratch)
-            try #require(siblings.count == 1)
-            let unusedCopy = scratch.appendingPathComponent(siblings[0])
-            #expect(siblings[0].hasPrefix("loser.helix-incoming-"))
+            #expect(try replaceSiblings(in: scratch) == [])
             #expect(error.aftermath == .destinationUnchanged)
-            #expect(error.localizedDescription == "Could not move \(unusedCopy.path) into place at \(loser.path): connection lost. \(loser.path) is unchanged, and the unused copy is still at \(unusedCopy.path)")
+            #expect(error.incoming.hasPrefix("\(loser.path).helix-incoming-"))
+            #expect(error.localizedDescription == "Could not move \(error.incoming) into place at \(loser.path): connection lost. \(loser.path) is unchanged")
             #expect(try FileManager.default.contentsOfDirectory(atPath: loser.path) == ["dropped.txt"])
             #expect(try text(at: loser.appendingPathComponent("dropped.txt")) == "loser")
-            #expect(try text(at: unusedCopy.appendingPathComponent("kept.txt")) == "winner")
         }
     }
 
@@ -268,7 +265,7 @@ struct FileTransportReplaceDiskTests {
         }
     }
 
-    @Test("a file's move over a file that fails leaves the original in place and keeps the unused copy")
+    @Test("a file's move over a file that fails leaves the original in place and removes the unused copy")
     func renameOverFileFails() async throws {
         try await withScratchDirectory { scratch in
             let winner = scratch.appendingPathComponent("winner.txt")
@@ -281,12 +278,38 @@ struct FileTransportReplaceDiskTests {
                 _ = try await transport.replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
             }
 
-            let siblings = try replaceSiblings(in: scratch)
-            try #require(siblings.count == 1)
-            #expect(siblings[0].hasPrefix("loser.txt.helix-incoming-"))
+            #expect(try replaceSiblings(in: scratch) == [])
             #expect(error.aftermath == .destinationUnchanged)
             #expect(try text(at: loser) == "loser")
-            #expect(try text(at: scratch.appendingPathComponent(siblings[0])) == "winner")
+            #expect(try text(at: winner) == "winner")
+        }
+    }
+
+    @Test("when the unused copy cannot be removed after a failed move, it stays on disk and the error names it")
+    func removingUnusedCopyFails() async throws {
+        try await withScratchDirectory { scratch in
+            let winner = scratch.appendingPathComponent("winner.txt")
+            let loser = scratch.appendingPathComponent("loser.txt")
+            try "winner".write(to: winner, atomically: false, encoding: .utf8)
+            try "loser".write(to: loser, atomically: false, encoding: .utf8)
+            let transport = FileTransport { executable, arguments in
+                if executable == "/bin/mv" { throw CLIError(exitCode: 255, stderr: "connection lost") }
+                if executable == "/bin/rm" { throw CLIError(exitCode: 1, stderr: "permission denied") }
+                return try await runProcess(executablePath: executable, arguments: arguments)
+            }
+
+            let error = try await #require(throws: ReplaceError.self) {
+                _ = try await transport.replace(.local(path: loser.path), withCopyOf: .local(path: winner.path))
+            }
+
+            let siblings = try replaceSiblings(in: scratch)
+            try #require(siblings.count == 1)
+            let unusedCopy = scratch.appendingPathComponent(siblings[0])
+            #expect(siblings[0].hasPrefix("loser.txt.helix-incoming-"))
+            #expect(error.aftermath == .destinationUnchanged)
+            #expect(error.localizedDescription == "Could not move \(unusedCopy.path) into place at \(loser.path): connection lost. Then could not remove the copy at \(unusedCopy.path): permission denied. \(loser.path) is unchanged, and the unused copy is still at \(unusedCopy.path)")
+            #expect(try text(at: loser) == "loser")
+            #expect(try text(at: unusedCopy) == "winner")
         }
     }
 

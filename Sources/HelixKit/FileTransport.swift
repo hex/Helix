@@ -49,13 +49,16 @@ public struct ReplaceError: LocalizedError {
         return ([first] + recoveries + [aftermathSentence].compactMap { $0 }).joined(separator: ". ")
     }
 
-    /// What the user finds on disk, for a failure that came after the copy was made and kept.
+    /// What the user finds on disk, for a failure that came after the copy was made.
     private var aftermathSentence: String? {
         switch (aftermath, failure.step) {
         case (.destinationUnverified, _):
             return "Nothing was deleted: look for the original at \(setAside) and for the replacement at \(incoming)"
         case (.destinationUnchanged, .setOriginalAside), (.destinationUnchanged, .moveCopyIntoPlace):
-            return "\(destination) is unchanged, and the unused copy is still at \(incoming)"
+            let copyRemains = recoveryFailures.contains { $0.step == .removeCopy }
+            return copyRemains
+                ? "\(destination) is unchanged, and the unused copy is still at \(incoming)"
+                : "\(destination) is unchanged"
         case (.destinationUnchanged, _):
             return nil
         }
@@ -174,8 +177,10 @@ public struct FileTransport: Sendable {
     /// first moves aside to `<name>.helix-replaced-<uuid>` and is removed once the copy is in place.
     ///
     /// A failure before anything at the destination is touched removes the copy and throws. From the first
-    /// move onward a failure deletes nothing: what is on disk decides whether the replacement happened, the
-    /// original is still or again in place, or neither can be shown, and the thrown `ReplaceError` says which.
+    /// move onward, what is on disk decides whether the replacement happened, the original is still or again
+    /// in place, or neither can be shown, and the thrown `ReplaceError` says which. Only an original shown to
+    /// be in place gets the unused copy removed, so that sync does not carry it to the other side; where
+    /// neither can be shown, nothing is deleted.
     /// A set-aside original that cannot be removed does not undo the replacement: it is returned in the outcome.
     public func replace(_ destination: EndpointURL, withCopyOf source: EndpointURL) async throws -> ReplaceOutcome {
         let token = UUID().uuidString
@@ -220,14 +225,14 @@ public struct FileTransport: Sendable {
                 return .replaced
             case (true, true, false, .setAsideThenRename), (true, true, false, .renameOverOriginal),
                  (false, true, false, .renameIntoFreeName):
-                throw failure(step, cause, aftermath: .destinationUnchanged)
+                throw failure(step, cause, aftermath: .destinationUnchanged, recoveryFailures: await removeCopy())
             case (false, true, true, .setAsideThenRename):
                 do {
                     try await move(setAside, toPath: destination.path)
                 } catch {
                     throw failure(step, cause, aftermath: .destinationUnverified, recoveryFailures: [ReplaceError.StepFailure(step: .restoreOriginal, cause: error)])
                 }
-                throw failure(step, cause, aftermath: .destinationUnchanged)
+                throw failure(step, cause, aftermath: .destinationUnchanged, recoveryFailures: await removeCopy())
             default:
                 throw failure(step, cause, aftermath: .destinationUnverified)
             }
