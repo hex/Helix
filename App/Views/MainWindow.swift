@@ -329,7 +329,7 @@ private struct SyncListRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            StatusBadge(status: session.status, paused: session.paused)
+            StatusBadge(status: session.status, paused: session.paused, progress: session.transferProgress?.fraction)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(session.name ?? String(session.identifier.prefix(12)))
@@ -357,12 +357,6 @@ private struct SyncListRow: View {
                                 .clipShape(Capsule())
                         }
                     }
-                }
-
-                if let fraction = session.transferProgress?.fraction {
-                    ProgressView(value: min(fraction, 1))
-                        .controlSize(.mini)
-                        .tint(isSelected ? .white : .accentColor)
                 }
             }
 

@@ -7,17 +7,35 @@ import HelixKit
 struct StatusBadge: View {
     let status: String
     let paused: Bool
+    /// Fraction of a transfer that is complete; drawn as a ring in place of the symbol.
+    let progress: Double?
 
-    init(status: String, paused: Bool = false) {
+    init(status: String, paused: Bool = false, progress: Double? = nil) {
         self.status = status
         self.paused = paused
+        self.progress = progress
     }
 
     var body: some View {
-        Image(systemName: symbol)
-            .font(.system(size: 11))
-            .foregroundStyle(color)
+        if let progress, !paused {
+            ZStack {
+                Circle()
+                    .stroke(color.opacity(0.25), lineWidth: 2)
+                Circle()
+                    .trim(from: 0, to: min(max(progress, 0), 1))
+                    .stroke(color, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+            }
+            .frame(width: 12, height: 12)
+            .accessibilityElement()
             .accessibilityLabel(label)
+            .accessibilityValue(progress.formatted(.percent.precision(.fractionLength(0))))
+        } else {
+            Image(systemName: symbol)
+                .font(.system(size: 11))
+                .foregroundStyle(color)
+                .accessibilityLabel(label)
+        }
     }
 
     var symbol: String {

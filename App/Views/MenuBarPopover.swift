@@ -131,7 +131,7 @@ private struct SyncSessionRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            StatusBadge(status: session.status, paused: session.paused)
+            StatusBadge(status: session.status, paused: session.paused, progress: session.transferProgress?.fraction)
                 .padding(.top, 5)
 
             VStack(alignment: .leading, spacing: 2) {
