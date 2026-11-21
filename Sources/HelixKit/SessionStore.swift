@@ -229,8 +229,13 @@ public final class SessionStore {
     /// - Parameter identifier: the session being renamed, whose own name is not a collision.
     public func syncSessionNames(excluding identifier: String? = nil) -> [String] {
         syncSessions
-            .filter { $0.identifier != identifier }
+            .filter { !isPartOfSyncEdit($0.identifier, editing: identifier) }
             .compactMap(\.name)
+    }
+
+    private func isPartOfSyncEdit(_ identifier: String, editing edited: String?) -> Bool {
+        guard let edited else { return false }
+        return identifier == edited || leftoverSyncOriginals[identifier] == edited
     }
 
     /// Names held by forward sessions. Forwards occupy a namespace of their own —
@@ -338,6 +343,11 @@ public final class SessionStore {
         }
     }
 
+    private func retargetLeftoverOriginals(from original: String, to replacement: String) {
+        let retargeted = leftoverSyncOriginals.mapValues { $0 == original ? replacement : $0 }
+        if retargeted != leftoverSyncOriginals { leftoverSyncOriginals = retargeted }
+    }
+
     public func manualRefresh() async {
         await reloadSessions(force: true)
         refreshCount += 1
@@ -414,6 +424,7 @@ public final class SessionStore {
         }
 
         let provider = self.provider
+        let existingEditPairs = leftoverSyncOriginals
         let listed: [SyncSession]
         do {
             listed = try await provider.syncList()
@@ -425,7 +436,12 @@ public final class SessionStore {
         guard let current = listed.first(where: { $0.identifier == original }) else {
             return await finishSyncEdit("The original session \(original) is no longer listed by Mutagen.")
         }
-        if let name = options.name, listed.contains(where: { $0.identifier != original && $0.name == name }) {
+        forgetMissingEditPairs(existingEditPairs, listed: listed)
+        if let replacement = leftoverSyncOriginals[original] {
+            let message = "Original session \(original) cannot be edited while its edited replacement \(replacement) is listed. Use Remove original instead."
+            return await finishSyncEdit(message)
+        }
+        if let name = options.name, listed.contains(where: { $0.name == name && !isPartOfSyncEdit($0.identifier, editing: original) }) {
             return await finishSyncEdit("Another sync session already uses the name \"\(name)\". The original session was kept.")
         }
 
@@ -471,6 +487,7 @@ public final class SessionStore {
             }
         }
 
+        retargetLeftoverOriginals(from: original, to: replacement)
         do {
             try await provider.syncTerminate(original)
         } catch {
@@ -699,6 +716,9 @@ public final class SessionStore {
             do {
                 if let replacement = self.leftoverSyncOriginals[identifier] {
                     let pair = try await self.checkEditPair(original: identifier, replacement: replacement)
+                    if let currentReplacement = self.leftoverSyncOriginals[identifier] {
+                        return self.leftoverResumeRefusal(original: identifier, replacement: currentReplacement)
+                    }
                     if pair.replacement != nil {
                         return self.leftoverResumeRefusal(original: identifier, replacement: replacement)
                     }

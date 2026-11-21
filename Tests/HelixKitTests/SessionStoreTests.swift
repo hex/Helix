@@ -857,6 +857,65 @@ struct LeftoverSyncOriginalTests {
         return store
     }
 
+    @Test("Editing a tracked original directs the user to Remove original")
+    @MainActor
+    func leftoverOriginalRefusesEdit() async throws {
+        let suite = "LeftoverEditTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = await editLeavingOriginal(defaults: defaults)
+        let replacement = makeSyncSession(id: replacementID, name: "project")
+        let provider = RecordingProvider(syncSessions: [pausedOriginal, replacement])
+        store.replaceProvider(provider)
+        var options = SyncCreateOptions(from: pausedOriginal)
+        options.name = "renamed-original"
+
+        let error = await store.recreateSync(
+            pausedOriginal, options: options, alpha: "/srv/project", beta: "/srv/mirror"
+        )
+
+        #expect(error == "Original session sync_original cannot be edited while its edited replacement \(replacementID) is listed. Use Remove original instead.")
+        #expect(provider.calls == [])
+    }
+
+    @Test("A replacement edit hands off protection before attempting to remove the previous replacement")
+    @MainActor
+    func replacementEditCarriesLeftoverPair() async throws {
+        let suite = "LeftoverEditTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = await editLeavingOriginal(defaults: defaults)
+        let previous = makeSyncSession(id: replacementID, name: "project")
+        let edited = makeSyncSession(id: "sync_" + String(repeating: "N", count: 43), name: "renamed")
+        let gate = Gate()
+        let provider = RecordingProvider(
+            syncSessions: [pausedOriginal, previous], sessionsAfterCreate: [pausedOriginal, edited],
+            beforeSyncTerminate: { await gate.pass() }
+        )
+        store.replaceProvider(provider)
+        #expect(store.syncSessionNames(excluding: previous.identifier) == [])
+        var options = SyncCreateOptions(from: previous)
+        options.name = "renamed"
+
+        let editing = Task {
+            await store.recreateSync(previous, options: options, alpha: "/srv/project", beta: "/srv/mirror")
+        }
+        await gate.reached()
+        let persisted = defaults.dictionary(forKey: "leftoverSyncOriginals") as? [String: String]
+        await gate.open()
+        let result = await editing.value
+
+        #expect(result == nil)
+        #expect(persisted == ["sync_original": edited.identifier])
+        #expect(store.leftoverSyncOriginals == ["sync_original": edited.identifier])
+
+        let relaunched = SessionStore(provider: provider, defaults: defaults)
+        let afterEdit = RecordingProvider(syncSessions: [pausedOriginal, edited])
+        relaunched.replaceProvider(afterEdit)
+        await relaunched.resumeSync(pausedOriginal.identifier)
+        #expect(afterEdit.calls == [])
+    }
+
     @Test("Keeps an original paused while its replacement is listed after relaunch")
     @MainActor
     func leftoverOriginalRefusesResumeAfterRelaunch() async throws {
