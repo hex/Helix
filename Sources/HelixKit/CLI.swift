@@ -21,10 +21,21 @@ public struct CLI: Sendable {
 
     let executablePath: String
     let baseArguments: [String]
+    private let execute: @Sendable (String, [String], Duration) async throws -> String
 
     public init(executablePath: String = CLI.defaultExecutablePath, baseArguments: [String] = []) {
+        self.init(executablePath: executablePath, baseArguments: baseArguments) { path, arguments, deadline in
+            try await runProcess(executablePath: path, arguments: arguments, deadline: deadline)
+        }
+    }
+
+    init(
+        executablePath: String, baseArguments: [String],
+        execute: @escaping @Sendable (String, [String], Duration) async throws -> String
+    ) {
         self.executablePath = executablePath
         self.baseArguments = baseArguments
+        self.execute = execute
     }
 
     public func syncList() async throws -> [SyncSession] {
@@ -129,6 +140,6 @@ public struct CLI: Sendable {
     }
 
     private func run(_ arguments: [String], deadline: Duration) async throws -> String {
-        try await runProcess(executablePath: executablePath, arguments: baseArguments + arguments, deadline: deadline)
+        try await execute(executablePath, baseArguments + arguments, deadline)
     }
 }

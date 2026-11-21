@@ -151,7 +151,11 @@ public struct FileTransport: Sendable {
     }
 
     public init(execute: @escaping @Sendable (String, [String]) async throws -> String) {
-        self.runCommand = { executable, arguments, _ in try await execute(executable, arguments) }
+        self.init { executable, arguments, _ in try await execute(executable, arguments) }
+    }
+
+    public init(execute: @escaping @Sendable (String, [String], Duration) async throws -> String) {
+        self.runCommand = execute
     }
 
     /// Runs a command and logs it and its outcome to the console.
