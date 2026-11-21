@@ -45,6 +45,7 @@ public enum HealthStatus: Sendable {
 public enum DaemonStatus: String, Sendable {
     case running = "Running"
     case stopped = "Stopped"
+    case startedOutside = "Mutagen was started outside Helix"
     case unknown = "Status unknown"
 }
 
@@ -99,6 +100,7 @@ public final class SessionStore {
     private let provider: ManagedSessionProvider
     private var pollingTask: Task<Void, Never>?
     @ObservationIgnored private var pollingInterval: TimeInterval?
+    @ObservationIgnored private var stoppedDaemonCheckInFlight = false
     private var daemonControl: ManagedSessionProvider.Control {
         get { provider.control }
         set { provider.control = newValue }
@@ -288,6 +290,10 @@ public final class SessionStore {
     }
 
     public func refresh() async {
+        if daemonControl == .stopped {
+            await checkStoppedDaemonStatus()
+            return
+        }
         if await reloadSessions(), let resumeAt = bulkPause?.resumeAt, now() >= resumeAt {
             await resumeBulkPause()
         }
@@ -372,8 +378,28 @@ public final class SessionStore {
     }
 
     public func manualRefresh() async {
-        await reloadSessions(force: true)
+        if daemonControl == .stopped {
+            await checkStoppedDaemonStatus()
+        } else {
+            await reloadSessions(force: true)
+        }
         refreshCount += 1
+    }
+
+    private func checkStoppedDaemonStatus() async {
+        guard !stoppedDaemonCheckInFlight else { return }
+        stoppedDaemonCheckInFlight = true
+        defer { stoppedDaemonCheckInFlight = false }
+        do {
+            let running = try await daemonProcess.pid() != nil
+            guard daemonControl == .stopped else { return }
+            daemonStatus = running ? .startedOutside : .stopped
+        } catch is CancellationError {
+            return
+        } catch {
+            guard daemonControl == .stopped else { return }
+            ConsoleLog.shared.log("Could not check the Mutagen process: \(error.localizedDescription)", level: .error)
+        }
     }
 
     // MARK: - Session Creation
@@ -899,7 +925,7 @@ public final class SessionStore {
             daemonStatus = .running
             lastError = nil
             await refresh()
-            schedulePollingIfManaged(refreshImmediately: false)
+            schedulePolling(refreshImmediately: false)
         } catch {
             daemonControl = previousControl
             lastError = error.localizedDescription
@@ -957,6 +983,7 @@ public final class SessionStore {
         backgroundPriorityPID = nil
         setDaemonPriorityError(daemonBackgroundPriorityRequested ? "Mutagen daemon not found." : nil)
         lastError = nil
+        schedulePolling(refreshImmediately: false)
         return true
     }
 
@@ -965,7 +992,7 @@ public final class SessionStore {
         daemonStatus = status
         daemonControl = .managed
         lastError = error
-        schedulePollingIfManaged(refreshImmediately: false)
+        schedulePolling(refreshImmediately: false)
     }
 
     private var operationBlockingDaemonStop: String? {
@@ -1636,7 +1663,7 @@ public final class SessionStore {
     public func startPolling(interval: TimeInterval = 5.0) {
         cancelPolling()
         pollingInterval = interval
-        schedulePollingIfManaged(refreshImmediately: true)
+        schedulePolling(refreshImmediately: true)
     }
 
     public func stopPolling() {
@@ -1649,8 +1676,9 @@ public final class SessionStore {
         pollingTask = nil
     }
 
-    private func schedulePollingIfManaged(refreshImmediately: Bool) {
-        guard daemonControl == .managed, pollingTask == nil, let interval = pollingInterval else { return }
+    private func schedulePolling(refreshImmediately: Bool) {
+        guard daemonControl == .managed || daemonControl == .stopped else { return }
+        guard pollingTask == nil, let interval = pollingInterval else { return }
         pollingTask = Task { [weak self] in
             if refreshImmediately { await self?.refresh() }
             while !Task.isCancelled {

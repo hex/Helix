@@ -142,6 +142,7 @@ struct SettingsView: View {
         switch store.daemonStatus {
         case .running: .green
         case .stopped: .red
+        case .startedOutside: .secondary
         case .unknown: .orange
         }
     }

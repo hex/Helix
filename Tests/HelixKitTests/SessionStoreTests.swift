@@ -474,7 +474,10 @@ struct SessionStoreTests {
         defer { defaults.removePersistentDomain(forName: suite) }
         let sync = makeSyncSession(id: "sync_1", name: "documents")
         let forward = makeForwardSession(id: "fwd_1", name: "preview")
-        let store = SessionStore(provider: FakeProvider(syncSessions: [sync], forwardSessions: [forward]), defaults: defaults)
+        let store = SessionStore(
+            provider: FakeProvider(syncSessions: [sync], forwardSessions: [forward]), defaults: defaults,
+            daemonProcess: RecordingDaemonProcess(pid: nil)
+        )
         await store.refresh()
         #expect(store.daemonRunning == true)
 
@@ -506,7 +509,8 @@ struct SessionStoreTests {
         #expect(firstProvider.calls == ["daemonStop"])
 
         let failing = RecordingProvider(failOn: "daemonStart", recordQueries: true)
-        let secondLaunch = SessionStore(provider: failing, defaults: defaults)
+        let daemon = RecordingDaemonProcess(pid: nil)
+        let secondLaunch = SessionStore(provider: failing, defaults: defaults, daemonProcess: daemon)
         secondLaunch.startPolling(interval: 3600)
         defer { secondLaunch.stopPolling() }
         await secondLaunch.refresh()
@@ -522,7 +526,7 @@ struct SessionStoreTests {
         #expect(failing.calls == ["daemonStart"])
 
         let ready = RecordingProvider(recordQueries: true)
-        let thirdLaunch = SessionStore(provider: ready, defaults: defaults)
+        let thirdLaunch = SessionStore(provider: ready, defaults: defaults, daemonProcess: daemon)
         await thirdLaunch.refresh()
         #expect(ready.calls == [])
         await thirdLaunch.startDaemon()
