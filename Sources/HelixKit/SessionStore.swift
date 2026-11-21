@@ -62,6 +62,12 @@ public final class SessionStore {
     public private(set) var sessionHolds: [String: String] = [:] {
         didSet { persist(sessionHolds, forKey: Self.sessionHoldsKey) }
     }
+    /// The replacement each session's conflict resolve is making right now, by session identifier, as the hold
+    /// message for the case that Helix quits before the replacement ends. An entry is saved before the first
+    /// command of its replacement and removed once the outcome is known; one found at launch becomes a hold.
+    @ObservationIgnored private var replacementsUnderWay: [String: String] = [:] {
+        didSet { persist(replacementsUnderWay, forKey: Self.replacementsUnderWayKey) }
+    }
     /// Set-aside originals that resolved conflicts left on disk for the user to delete, by session identifier.
     /// A notice does not stop its session from syncing; it stays until dismissed or until the session is gone.
     public private(set) var leftoverNotices: [String: String] = [:] {
@@ -85,6 +91,7 @@ public final class SessionStore {
     @ObservationIgnored private var backgroundPriorityPID: ProcessID?
     private static let bulkPauseKey = "bulkPause"
     private static let sessionHoldsKey = "sessionHolds"
+    private static let replacementsUnderWayKey = "replacementsUnderWay"
     private static let leftoverNoticesKey = "leftoverNotices"
     private static let daemonBackgroundPriorityKey = "daemonBackgroundPriority"
 
@@ -112,6 +119,18 @@ public final class SessionStore {
         }
         sessionHolds = savedMessages(forKey: Self.sessionHoldsKey, called: "sessions kept paused after a conflict")
         leftoverNotices = savedMessages(forKey: Self.leftoverNoticesKey, called: "originals left on disk after a conflict")
+        holdSessionsWhoseReplacementWasCutShort()
+    }
+
+    /// Turns each replacement that the last launch saved and never settled into a hold, unless its session
+    /// already has one. The hold is saved before the record goes, so quitting in between loses neither.
+    private func holdSessionsWhoseReplacementWasCutShort() {
+        guard defaults.object(forKey: Self.replacementsUnderWayKey) != nil else { return }
+        let cutShort = savedMessages(forKey: Self.replacementsUnderWayKey, called: "replacements Helix was making when it quit")
+        let holds = sessionHolds.merging(cutShort) { held, _ in held }
+        sessionHolds = holds
+        persist(holds, forKey: Self.sessionHoldsKey)
+        defaults.removeObject(forKey: Self.replacementsUnderWayKey)
     }
 
     /// Reads messages by session identifier saved under `key`. A value of another shape is reported and read as none.
@@ -728,7 +747,6 @@ public final class SessionStore {
                 leftoverNotice = notice
             case .leftUnverified(let notice):
                 ConsoleLog.shared.log("  \(notice)", level: .error)
-                sessionHolds[session.identifier] = notice
                 lastError = notice
                 return unresolved
             case .winnerMissing(let winnerURL):
@@ -862,7 +880,7 @@ public final class SessionStore {
         /// The loser's side matches the winner's; `notice` names the displaced original still on disk for the user to delete.
         case appliedLeavingOriginal(notice: String)
         /// The loser's side could not be shown to hold either its original or the winner's copy, so the session
-        /// must stay paused; `notice` names the paths that hold the data.
+        /// is held paused; `notice` is its hold message and names the paths that hold the data.
         case leftUnverified(notice: String)
         /// The winner's file is gone, so neither side was touched.
         case winnerMissing(EndpointURL)
@@ -870,7 +888,7 @@ public final class SessionStore {
 
     /// Makes the loser's side of one conflict match the winner's: removes it when the winner deleted the
     /// conflict root, and otherwise replaces it with a copy of the winner. Throws the transport's error
-    /// when the session is safe to resume; a replacement that is not comes back as `leftUnverified`.
+    /// when the session is safe to resume; a replacement that is not holds the session and comes back as `leftUnverified`.
     private func applyWinner(_ winner: ConflictWinner, to conflict: Conflict, in session: SyncSession) async throws -> ConflictFileOutcome {
         let alphaURL = appendingSubpath(to: session.alpha.endpointURL, subpath: conflict.root)
         let betaURL = appendingSubpath(to: session.beta.endpointURL, subpath: conflict.root)
@@ -897,8 +915,12 @@ public final class SessionStore {
             return .winnerMissing(winnerURL)
         }
         ConsoleLog.shared.log("  action: REPLACE \(loserURL.formatted) with a copy of \(winnerURL.formatted)")
+        let plan = ReplacePlan(replacing: loserURL, withCopyOf: winnerURL)
+        replacementsUnderWay[session.identifier] = "Helix quit while replacing \(plan.destination.formatted); check \(plan.incoming.formatted) and \(plan.setAside.formatted)"
         do {
-            switch try await fileTransport.replace(ReplacePlan(replacing: loserURL, withCopyOf: winnerURL)) {
+            let outcome = try await fileTransport.replace(plan)
+            replacementsUnderWay[session.identifier] = nil
+            switch outcome {
             case .replaced:
                 return .applied
             case .replacedLeavingOriginal(let path, let reason):
@@ -909,11 +931,14 @@ public final class SessionStore {
         } catch {
             switch error.aftermath {
             case .destinationUnchanged:
+                replacementsUnderWay[session.identifier] = nil
                 throw error
             case .destinationUnverified:
-                return .leftUnverified(
-                    notice: "\(error.localizedDescription). The session \"\(session.name ?? session.identifier)\" was left paused so that sync cannot overwrite or delete those paths. Put \"\(conflict.root)\" in order, then resume the session."
-                )
+                let notice = "\(error.localizedDescription). The session \"\(session.name ?? session.identifier)\" was left paused so that sync cannot overwrite or delete those paths. Put \"\(conflict.root)\" in order, then resume the session."
+                // The hold is saved before the record of the replacement goes, so quitting in between loses neither.
+                sessionHolds[session.identifier] = notice
+                replacementsUnderWay[session.identifier] = nil
+                return .leftUnverified(notice: notice)
             }
         }
     }

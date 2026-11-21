@@ -1651,6 +1651,73 @@ struct ConflictResolutionTests {
         #expect(provider.calls == ["syncPause:sync_1", "syncResume:sync_1", "syncFlush:sync_1"])
     }
 
+    @Test("While a replacement is under way, a store launched on the same defaults holds the session with the three paths and neither resumes nor resolves it")
+    @MainActor
+    func relaunchMidReplacementHoldsSession() async throws {
+        defer { removeDefaults() }
+        let conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
+        let running = makeSyncSession(id: "sync_1", name: "s1", conflicts: [conflict])
+        let paused = makeSyncSession(id: "sync_1", name: "s1", paused: true, conflicts: [conflict])
+        let cmdRecorder = CommandRecorder()
+        let gate = Gate()
+        // The copy beside the destination is the first command that changes the losing side.
+        let transport = FileTransport { executable, arguments in
+            let output = try await cmdRecorder.execute(executable, arguments)
+            if executable == "/bin/cp" { await gate.pass() }
+            return output
+        }
+        let firstLaunch = SessionStore(provider: RecordingProvider(syncSessions: [running]), fileTransport: transport, defaults: defaults)
+        await firstLaunch.pauseAllSync()
+
+        let resolve = Task { _ = await firstLaunch.resolveConflict(session: paused, conflict: conflict, winner: .alpha) }
+        await gate.reached()
+        let token = try replaceToken(copiedBeside: "/tmp/b/file.txt", in: cmdRecorder.commands)
+        let hold = "Helix quit while replacing /tmp/b/file.txt; check /tmp/b/file.txt.helix-incoming-\(token) and /tmp/b/file.txt.helix-replaced-\(token)"
+        let provider = RecordingProvider(syncSessions: [paused])
+        let nextRecorder = CommandRecorder()
+        let nextLaunch = SessionStore(provider: provider, fileTransport: FileTransport(execute: nextRecorder.execute), defaults: defaults)
+        let holdsAtLaunch = nextLaunch.sessionHolds
+        await nextLaunch.resumeBulkPause()
+        let unresolved = await nextLaunch.resolveConflict(session: paused, conflict: conflict, winner: .beta)
+        await gate.open()
+        await resolve.value
+
+        #expect(holdsAtLaunch == ["sync_1": hold])
+        #expect(provider.calls == [])
+        #expect(nextRecorder.commands.count == 0)
+        #expect(unresolved == ["file.txt"])
+        #expect(nextLaunch.lastError == hold)
+        #expect(nextLaunch.sessionHolds == ["sync_1": hold])
+    }
+
+    @Test("A replacement that completes, and one that fails with the destination unchanged, leave no hold for this launch or the next")
+    @MainActor
+    func settledReplacementLeavesNoHold() async {
+        defer { removeDefaults() }
+        let conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
+        let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [conflict])
+        let recorder = RecordingProvider(syncSessions: [session])
+        let completing = SessionStore(provider: recorder, fileTransport: FileTransport(execute: CommandRecorder().execute), defaults: defaults)
+
+        await completing.resolveConflict(session: session, conflict: conflict, winner: .alpha)
+
+        #expect(completing.sessionHolds == [:])
+        #expect(SessionStore(provider: recorder, defaults: defaults).sessionHolds == [:])
+        #expect(recorder.calls == ["syncPause:sync_1", "syncResume:sync_1", "syncFlush:sync_1"])
+
+        let failingCopy = FileTransport { executable, _ in
+            if executable == "/bin/cp" { throw CLIError(exitCode: 1, stderr: "permission denied") }
+            return ""
+        }
+        let unchanged = SessionStore(provider: recorder, fileTransport: failingCopy, defaults: defaults)
+
+        await unchanged.resolveConflict(session: session, conflict: conflict, winner: .alpha)
+
+        #expect(unchanged.sessionHolds == [:])
+        #expect(SessionStore(provider: recorder, defaults: defaults).sessionHolds == [:])
+        #expect(recorder.calls == ["syncPause:sync_1", "syncResume:sync_1", "syncFlush:sync_1", "syncPause:sync_1", "syncResume:sync_1"])
+    }
+
     @Test("A resolve returns the roots it left unresolved: failed, not attempted, and refused ones")
     @MainActor
     func resolveReturnsUnresolvedRoots() async {
