@@ -35,7 +35,7 @@ struct FakeProvider: SessionProvider {
     }
     func daemonRunning() async throws -> Bool { isDaemonRunning }
     func version() async throws -> String { mutagenVersion }
-    func syncCreate(arguments: [String]) async throws -> String { "sync_replacement" }
+    func syncCreate(arguments: [String]) async throws -> String { "sync_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG" }
     func forwardCreate(arguments: [String]) async throws {}
     func syncPause(_ identifier: String) async throws {}
     func syncResume(_ identifier: String) async throws {}
@@ -664,7 +664,7 @@ struct RecreateSessionTests {
         await store.recreateSync(session, options: options, alpha: "/tmp/a", beta: "/tmp/b")
 
         #expect(store.lastError == nil)
-        #expect(recorder.calls == [createEdited, "syncPause:sync_1", "syncResume:sync_replacement", "syncTerminate:sync_1"])
+        #expect(recorder.calls == [createEdited, "syncPause:sync_1", "syncResume:sync_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG", "syncTerminate:sync_1"])
     }
 
     @Test("Failure to remove the original leaves the edited session running")
@@ -678,8 +678,8 @@ struct RecreateSessionTests {
 
         await store.recreateSync(session, options: options, alpha: "/tmp/a", beta: "/tmp/b")
 
-        #expect(store.lastError == "The edited session sync_replacement is ready. Could not remove original session sync_1: simulated failure.")
-        #expect(recorder.calls == [createEdited, "syncPause:sync_1", "syncResume:sync_replacement", "syncTerminate:sync_1"])
+        #expect(store.lastError == "The edited session sync_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG is ready. Could not remove original session sync_1: simulated failure.")
+        #expect(recorder.calls == [createEdited, "syncPause:sync_1", "syncResume:sync_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG", "syncTerminate:sync_1"])
     }
 
     @Test("Adding an ignore rule prepares a paused replacement with both ignore paths")
@@ -694,7 +694,7 @@ struct RecreateSessionTests {
         #expect(store.lastError == nil)
         #expect(recorder.calls == [
             "syncCreate:sync create /tmp/a /tmp/b --name test --paused --mode two-way-safe --ignore *.log --ignore node_modules/symlink",
-            "syncPause:sync_1", "syncResume:sync_replacement", "syncTerminate:sync_1",
+            "syncPause:sync_1", "syncResume:sync_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG", "syncTerminate:sync_1",
         ])
     }
 
@@ -741,7 +741,7 @@ struct RecreateSessionTests {
     @MainActor
     func startFailureRestoresOriginal() async {
         let session = makeSyncSession(id: "sync_1", name: "test")
-        let recorder = RecordingProvider(syncSessions: [session], failOn: "syncResume:sync_replacement")
+        let recorder = RecordingProvider(syncSessions: [session], failOn: "syncResume:sync_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG")
         let store = SessionStore(provider: recorder)
         var options = SyncCreateOptions(from: session)
         options.mode = "one-way-safe"
@@ -750,8 +750,8 @@ struct RecreateSessionTests {
 
         #expect(store.lastError == "Could not start the edited session: simulated failure. The original session was restored.")
         #expect(recorder.calls == [
-            createEdited, "syncPause:sync_1", "syncResume:sync_replacement",
-            "syncTerminate:sync_replacement", "syncResume:sync_1",
+            createEdited, "syncPause:sync_1", "syncResume:sync_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG",
+            "syncTerminate:sync_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG", "syncResume:sync_1",
         ])
     }
 }
@@ -776,7 +776,7 @@ struct BulkPauseTests {
         let deadline = Date(timeIntervalSince1970: 2_000_000_000)
         let original = makeSyncSession(id: "sync_1", name: "project")
         let paused = makeSyncSession(id: "sync_1", name: "project", paused: true)
-        let replacement = makeSyncSession(id: "sync_candidate", name: "project", paused: true)
+        let replacement = makeSyncSession(id: "sync_C123456789abcdefghijklmnopqrstuvwxyzABCDEFG", name: "project", paused: true)
         let store = SessionStore(provider: RecordingProvider(syncSessions: [original]), defaults: defaults)
         await store.pauseAllSync(until: deadline)
         let gate = Gate()
@@ -797,8 +797,8 @@ struct BulkPauseTests {
         _ = await editing.value
         await relaunched.refresh()
 
-        #expect(persisted == BulkPause(sessionIdentifiers: ["sync_candidate"], resumeAt: deadline))
-        #expect(recovery.calls == ["syncResume:sync_candidate"])
+        #expect(persisted == BulkPause(sessionIdentifiers: ["sync_C123456789abcdefghijklmnopqrstuvwxyzABCDEFG"], resumeAt: deadline))
+        #expect(recovery.calls == ["syncResume:sync_C123456789abcdefghijklmnopqrstuvwxyzABCDEFG"])
     }
 
     @Test("Pause All pauses only running sessions and Resume restores exactly those")
@@ -1199,7 +1199,7 @@ final class MainActorRecordingProvider: SessionProvider {
     func version() async throws -> String { "0.18.1" }
     func syncCreate(arguments: [String]) async throws -> String {
         calls.append("syncCreate:\(arguments.joined(separator: " "))")
-        return "sync_replacement"
+        return "sync_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG"
     }
     func forwardCreate(arguments: [String]) async throws {}
     func syncPause(_ identifier: String) async throws { calls.append("syncPause:\(identifier)") }
@@ -1316,7 +1316,7 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
         try await duringSyncCreate?()
         return sessionsAfterCreate?.first(where: { candidate in
             !syncSessions.contains(where: { $0.identifier == candidate.identifier })
-        })?.identifier ?? "sync_replacement"
+        })?.identifier ?? "sync_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG"
     }
     func forwardCreate(arguments: [String]) async throws { try record("forwardCreate") }
     func syncPause(_ identifier: String) async throws {
@@ -2114,7 +2114,7 @@ struct ConflictResolutionTests {
         #expect(callsWhileEditIsMidway == [createPaused])
         #expect(!resolvingWhileEditIsMidway)
         #expect(cmdRecorder.commands.count == 0)
-        #expect(provider.calls == [createPaused, "syncPause:sync_1", "syncResume:sync_replacement", "syncTerminate:sync_1"])
+        #expect(provider.calls == [createPaused, "syncPause:sync_1", "syncResume:sync_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG", "syncTerminate:sync_1"])
         #expect(editError == nil)
     }
 
@@ -2165,7 +2165,7 @@ struct ConflictResolutionTests {
 
         #expect(callsWhileEditIsMidway == [createPaused])
         #expect(recordWhileEditIsMidway == BulkPause(sessionIdentifiers: ["sync_1"], resumeAt: nil))
-        #expect(store.bulkPause == BulkPause(sessionIdentifiers: ["sync_replacement"], resumeAt: nil))
+        #expect(store.bulkPause == BulkPause(sessionIdentifiers: ["sync_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG"], resumeAt: nil))
         #expect(provider.calls == [createPaused, "syncTerminate:sync_1"])
         #expect(editError == nil)
     }
@@ -3012,7 +3012,7 @@ struct RecreateSelectionTests {
     @MainActor
     func selectsRecreatedSession() async {
         let old = makeSyncSession(id: "sync_old", name: "test")
-        let new = makeSyncSession(id: "sync_new", name: "test")
+        let new = makeSyncSession(id: "sync_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG", name: "test")
         let recorder = RecordingProvider(syncSessions: [old], sessionsAfterCreate: [new])
         let store = SessionStore(provider: recorder)
         await store.refresh()
@@ -3021,7 +3021,7 @@ struct RecreateSelectionTests {
         opts.name = "test"
         await store.recreateSync(old, options: opts, alpha: "/tmp/a", beta: "/tmp/b")
 
-        #expect(store.pendingSessionSelection == "sync_new")
+        #expect(store.pendingSessionSelection == "sync_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG")
     }
 
     @Test("Leaves selection alone when untouched sessions are present")
@@ -3029,7 +3029,7 @@ struct RecreateSelectionTests {
     func ignoresPreexistingSessions() async {
         let other = makeSyncSession(id: "sync_other", name: "other")
         let old = makeSyncSession(id: "sync_old", name: "test")
-        let new = makeSyncSession(id: "sync_new", name: "test")
+        let new = makeSyncSession(id: "sync_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG", name: "test")
         let recorder = RecordingProvider(
             syncSessions: [other, old],
             sessionsAfterCreate: [other, new]
@@ -3041,7 +3041,7 @@ struct RecreateSelectionTests {
         opts.name = "test"
         await store.recreateSync(old, options: opts, alpha: "/tmp/a", beta: "/tmp/b")
 
-        #expect(store.pendingSessionSelection == "sync_new")
+        #expect(store.pendingSessionSelection == "sync_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG")
     }
 
     @Test("Sets no selection when recreate produced nothing new")
