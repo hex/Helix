@@ -625,6 +625,60 @@ struct BulkPauseTests {
         #expect(store.lastError == nil)
     }
 
+    @Test("A conflict resolve requested while Resume after Pause All is resuming its session pauses only after that resume has completed")
+    @MainActor
+    func resolveWaitsOutBulkResume() async {
+        defer { removeDefaults() }
+        let conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
+        let store = SessionStore(
+            provider: RecordingProvider(syncSessions: [makeSyncSession(id: "sync_1", name: "one", conflicts: [conflict])]),
+            fileTransport: FileTransport { _, _ in "" },
+            defaults: defaults
+        )
+        await store.pauseAllSync()
+        let paused = makeSyncSession(id: "sync_1", name: "one", paused: true, conflicts: [conflict])
+        let gate = Gate()
+        let provider = MainActorRecordingProvider(syncSessions: [paused], resumeGate: gate)
+        store.replaceProvider(provider)
+
+        let resume = Task { await store.resumeBulkPause() }
+        await gate.reached()
+        let resolve = Task { _ = await store.resolveConflict(session: paused, conflict: conflict, winner: .alpha) }
+        for _ in 0..<100 { await Task.yield() }
+        let callsWhileResumeIsInFlight = provider.calls
+        await gate.open()
+        await resume.value
+        await resolve.value
+
+        #expect(callsWhileResumeIsInFlight == [])
+        #expect(provider.calls == ["syncResume:sync_1", "syncPause:sync_1", "syncResume:sync_1", "syncFlush:sync_1"])
+        #expect(store.bulkPause == nil)
+        #expect(store.lastError == nil)
+    }
+
+    @Test("A conflict resolve requested while a resume by hand is in flight on its session pauses only after that resume has completed")
+    @MainActor
+    func resolveWaitsOutResumeByHand() async {
+        defer { removeDefaults() }
+        let conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
+        let paused = makeSyncSession(id: "sync_1", name: "one", paused: true, conflicts: [conflict])
+        let gate = Gate()
+        let provider = MainActorRecordingProvider(syncSessions: [paused], resumeGate: gate)
+        let store = SessionStore(provider: provider, fileTransport: FileTransport { _, _ in "" }, defaults: defaults)
+
+        let resume = Task { await store.resumeSync("sync_1") }
+        await gate.reached()
+        let resolve = Task { _ = await store.resolveConflict(session: paused, conflict: conflict, winner: .alpha) }
+        for _ in 0..<100 { await Task.yield() }
+        let callsWhileResumeIsInFlight = provider.calls
+        await gate.open()
+        await resume.value
+        await resolve.value
+
+        #expect(callsWhileResumeIsInFlight == [])
+        #expect(provider.calls == ["syncResume:sync_1", "syncPause:sync_1", "syncResume:sync_1", "syncFlush:sync_1"])
+    }
+
     @Test("Pause All during an active bulk pause keeps the first sessions and takes the newer deadline")
     @MainActor
     func secondPauseAllKeepsFirstSessions() async {
@@ -723,9 +777,12 @@ struct DaemonPriorityTests {
 final class MainActorRecordingProvider: SessionProvider {
     private(set) var calls: [String] = []
     private let syncSessions: [SyncSession]
+    private let resumeGate: Gate?
 
-    init(syncSessions: [SyncSession]) {
+    /// - Parameter resumeGate: holds the first resume open; that resume is recorded once it has passed.
+    init(syncSessions: [SyncSession], resumeGate: Gate? = nil) {
         self.syncSessions = syncSessions
+        self.resumeGate = resumeGate
     }
 
     func syncList() async throws -> [SyncSession] { syncSessions }
@@ -735,7 +792,10 @@ final class MainActorRecordingProvider: SessionProvider {
     func syncCreate(arguments: [String]) async throws { calls.append("syncCreate:\(arguments.joined(separator: " "))") }
     func forwardCreate(arguments: [String]) async throws {}
     func syncPause(_ identifier: String) async throws { calls.append("syncPause:\(identifier)") }
-    func syncResume(_ identifier: String) async throws { calls.append("syncResume:\(identifier)") }
+    func syncResume(_ identifier: String) async throws {
+        await resumeGate?.pass()
+        calls.append("syncResume:\(identifier)")
+    }
     func syncFlush(_ identifier: String) async throws { calls.append("syncFlush:\(identifier)") }
     func syncReset(_ identifier: String) async throws {}
     func syncTerminate(_ identifier: String) async throws { calls.append("syncTerminate:\(identifier)") }

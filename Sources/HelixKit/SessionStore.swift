@@ -77,8 +77,8 @@ public final class SessionStore {
     private let now: () -> Date
     private var daemonProcess: any DaemonProcess
     @ObservationIgnored private var bulkPauseInFlight = false
-    /// The resolve requested last on each session; the next one on that session waits for it to end.
-    @ObservationIgnored private var lastResolve: [String: Task<Set<String>, Never>] = [:]
+    /// The end of the resolve or resume requested last on each session; the next one on that session waits for it.
+    @ObservationIgnored private var lastTurn: [String: Task<Void, Never>] = [:]
     /// How many conflict resolves are running or waiting their turn, by session identifier.
     private var resolvesInFlight: [String: Int] = [:]
     /// The daemon process background priority was last applied to; nil while it is not applied.
@@ -347,18 +347,25 @@ public final class SessionStore {
         for session in syncSessions where session.paused && record.sessionIdentifiers.contains(session.identifier) {
             // A session whose conflict resolve is still moving files stays in the record, so the next
             // attempt resumes it if the resolve left it paused without holding it.
-            if lastResolve[session.identifier] != nil {
-                unresumed.append(session.identifier)
+            let identifier = session.identifier
+            if isResolving(identifier) {
+                unresumed.append(identifier)
                 continue
             }
-            do {
-                // A held session leaves the record without being resumed: its hold keeps it paused from here on.
-                switch try await resumeUnlessHeld(session.identifier) {
-                case .resumed, .heldBack: break
+            // The resume takes a turn, so a resolve requested while it is in flight pauses after it.
+            let failure: String? = await inTurn(on: identifier) {
+                do {
+                    // A held session leaves the record without being resumed: its hold keeps it paused from here on.
+                    switch try await self.resumeUnlessHeld(identifier) {
+                    case .resumed, .heldBack: return nil
+                    }
+                } catch {
+                    return error.localizedDescription
                 }
-            } catch {
-                unresumed.append(session.identifier)
-                failures.append("Could not resume \(session.name ?? session.identifier): \(error.localizedDescription)")
+            }
+            if let failure {
+                unresumed.append(identifier)
+                failures.append("Could not resume \(session.name ?? identifier): \(failure)")
             }
         }
         bulkPause = unresumed.isEmpty ? nil : BulkPause(sessionIdentifiers: unresumed, resumeAt: record.resumeAt)
@@ -428,13 +435,21 @@ public final class SessionStore {
             lastError = "The session \"\(displayName(of: identifier))\" was not resumed: a conflict resolve is running on it."
             return
         }
-        do {
-            try await provider.syncResume(identifier)
-        } catch {
-            lastError = error.localizedDescription
+        // The resume takes a turn, so a resolve requested while it is in flight pauses after it.
+        let failure: String? = await inTurn(on: identifier) {
+            do {
+                try await self.provider.syncResume(identifier)
+                // The hold ends inside the turn, before a resolve waiting behind this resume can set another.
+                self.sessionHolds[identifier] = nil
+                return nil
+            } catch {
+                return error.localizedDescription
+            }
+        }
+        if let failure {
+            lastError = failure
             return
         }
-        sessionHolds[identifier] = nil
         lastError = nil
         await refresh()
     }
@@ -637,8 +652,25 @@ public final class SessionStore {
         }
     }
 
-    /// Runs `resolve` once every resolve requested earlier on the same session has ended, so that no resolve
-    /// resumes the session while another is moving its files. Requests run in the order they were made.
+    /// Runs `work` once every resolve and resume requested earlier on the same session has ended, so that
+    /// none of them resumes the session while a resolve is moving its files. Requests run in the order they were made.
+    private func inTurn<Outcome: Sendable>(
+        on identifier: String,
+        _ work: @escaping @MainActor () async -> Outcome
+    ) async -> Outcome {
+        let earlier = lastTurn[identifier]
+        let turn = Task { @MainActor in
+            await earlier?.value
+            return await work()
+        }
+        let ended = Task { @MainActor in _ = await turn.value }
+        lastTurn[identifier] = ended
+        let outcome = await turn.value
+        if lastTurn[identifier] == ended { lastTurn[identifier] = nil }
+        return outcome
+    }
+
+    /// Runs `resolve` in the session's turn order.
     /// A session that is held when its turn comes is refused before anything is paused or run.
     /// - Returns: the roots left unresolved: what `resolve` returns, or all of `roots` for a refusal.
     private func resolveInTurn(
@@ -647,9 +679,8 @@ public final class SessionStore {
         _ resolve: @escaping @MainActor () async -> Set<String>
     ) async -> Set<String> {
         let identifier = session.identifier
-        let earlier = lastResolve[identifier]
-        let turn = Task { @MainActor in
-            _ = await earlier?.value
+        resolvesInFlight[identifier, default: 0] += 1
+        let unresolved = await inTurn(on: identifier) {
             if let hold = self.sessionHolds[identifier] {
                 ConsoleLog.shared.log("resolve refused: \"\(session.name ?? identifier)\" is held paused", level: .error)
                 self.lastError = hold
@@ -657,10 +688,6 @@ public final class SessionStore {
             }
             return await resolve()
         }
-        lastResolve[identifier] = turn
-        resolvesInFlight[identifier, default: 0] += 1
-        let unresolved = await turn.value
-        if lastResolve[identifier] == turn { lastResolve[identifier] = nil }
         resolvesInFlight[identifier] = resolvesInFlight[identifier] == 1 ? nil : resolvesInFlight[identifier].map { $0 - 1 }
         return unresolved
     }
