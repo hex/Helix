@@ -93,6 +93,10 @@ struct SettingsView: View {
                     }
                 }
 
+                Text("After Stop, Helix does not start Mutagen until you choose Start. Login items and other tools can still start Mutagen.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
                 Toggle("Run sync at background priority", isOn: Binding(
                     get: { store.daemonBackgroundPriority },
                     set: { enabled in Task { await store.setDaemonBackgroundPriority(enabled) } }
