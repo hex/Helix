@@ -218,8 +218,12 @@ struct ProcessRegistryTests {
         let pid = try await processIdentifier(writtenTo: pidFile)
         defer { endFixture(pid) }
 
-        let result = try await withTimeout(seconds: 2) { await registry.terminateAll(within: .zero) }
+        let budget: Duration = .milliseconds(30)
+        let began = ContinuousClock.now
+        let result = try await withTimeout(seconds: 2) { await registry.terminateAll(within: budget) }
+        let elapsed = began.duration(to: .now)
 
+        #expect(elapsed >= budget)
         #expect(result.interrupted == 1)
         #expect(result.unfinished == 1)
         await #expect(throws: CancellationError.self) {

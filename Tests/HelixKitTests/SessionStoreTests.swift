@@ -894,6 +894,10 @@ struct RecreateSessionTests {
         let saved = defaults.dictionary(forKey: "syncEditInProgress") as? [String: String]
         #expect(saved?["original"] == original.identifier)
         #expect(saved?["replacement"] == replacement.identifier)
+        let pair = [original.identifier: replacement.identifier]
+        await store.resumeSync(original.identifier)
+        #expect(store.leftoverSyncOriginals == pair)
+        #expect(store.lastError == "Original session \(original.identifier) cannot resume while its edited replacement \(replacement.identifier) is listed.")
         #expect(!provider.calls.contains("syncResume:sync_original"))
 
         let relaunched = SessionStore(provider: provider, defaults: defaults)
