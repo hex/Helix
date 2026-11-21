@@ -329,7 +329,7 @@ private struct SyncListRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            StatusBadge(status: session.status, paused: session.paused, progress: session.transferProgress?.fraction)
+            StatusBadge(status: session.status, paused: session.paused)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(session.name ?? String(session.identifier.prefix(12)))
@@ -363,9 +363,20 @@ private struct SyncListRow: View {
             Spacer()
 
             if let fraction = session.transferProgress?.fraction {
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(isSelected ? Color.white.opacity(0.3) : Color.primary.opacity(0.1))
+                    Capsule()
+                        .fill(isSelected ? Color.white : Color.blue)
+                        .frame(width: 64 * min(max(fraction, 0), 1))
+                }
+                .frame(width: 64, height: 4)
+                .accessibilityHidden(true)
+
                 Text(fraction, format: .percent.precision(.fractionLength(0)))
                     .font(.caption)
                     .monospacedDigit()
+                    .frame(minWidth: 30, alignment: .trailing)
                     .foregroundStyle(isSelected ? .white.opacity(0.7) : .secondary)
             }
 
