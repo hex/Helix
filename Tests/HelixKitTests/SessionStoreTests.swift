@@ -732,13 +732,13 @@ final class MainActorRecordingProvider: SessionProvider {
     func forwardList() async throws -> [ForwardSession] { [] }
     func daemonRunning() async throws -> Bool { true }
     func version() async throws -> String { "0.18.1" }
-    func syncCreate(arguments: [String]) async throws {}
+    func syncCreate(arguments: [String]) async throws { calls.append("syncCreate:\(arguments.joined(separator: " "))") }
     func forwardCreate(arguments: [String]) async throws {}
     func syncPause(_ identifier: String) async throws { calls.append("syncPause:\(identifier)") }
     func syncResume(_ identifier: String) async throws { calls.append("syncResume:\(identifier)") }
     func syncFlush(_ identifier: String) async throws { calls.append("syncFlush:\(identifier)") }
     func syncReset(_ identifier: String) async throws {}
-    func syncTerminate(_ identifier: String) async throws {}
+    func syncTerminate(_ identifier: String) async throws { calls.append("syncTerminate:\(identifier)") }
     func forwardPause(_ identifier: String) async throws {}
     func forwardResume(_ identifier: String) async throws {}
     func forwardTerminate(_ identifier: String) async throws {}
@@ -1524,6 +1524,66 @@ struct ConflictResolutionTests {
         #expect(provider.calls == ["syncPause:sync_1", "syncResume:sync_1", "syncFlush:sync_1"])
         #expect(resolvingWhileResolveIsMidway)
         #expect(!store.isResolving("sync_1"))
+    }
+
+    @Test("Recreating a held session, or adding to its ignore list, is refused with the hold before anything is terminated")
+    @MainActor
+    func recreateOfHeldSessionRefused() async throws {
+        defer { removeDefaults() }
+        let conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
+        let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [conflict])
+        let cmdRecorder = CommandRecorder()
+        let store = SessionStore(provider: RecordingProvider(syncSessions: [session]), fileTransport: transportLeavingDestinationUnverified(recordingTo: cmdRecorder), defaults: defaults)
+        await store.resolveConflict(session: session, conflict: conflict, winner: .alpha)
+        let token = try replaceToken(copiedBeside: "/tmp/b/file.txt", in: cmdRecorder.commands)
+        let hold = holdMessage(root: "file.txt", destination: "/tmp/b/file.txt", token: token)
+        let refusal = "The session \"s1\" was not recreated: it is kept paused after a conflict. Resume it first. \(hold)"
+        let provider = RecordingProvider(syncSessions: [session])
+        store.replaceProvider(provider)
+        await store.refresh()
+
+        await store.recreateSync(session, options: SyncCreateOptions(), alpha: "/tmp/a", beta: "/tmp/b")
+        let errorAfterRecreate = store.lastError
+        await store.refresh()
+        await store.addToIgnoreList(session: session, path: "file.txt")
+
+        #expect(provider.calls == [])
+        #expect(errorAfterRecreate == refusal)
+        #expect(store.lastError == refusal)
+        #expect(store.sessionHolds == ["sync_1": hold])
+    }
+
+    @Test("Recreating a session, or adding to its ignore list, while a conflict resolve runs on it is refused before anything is terminated")
+    @MainActor
+    func recreateDuringResolveRefused() async {
+        defer { removeDefaults() }
+        let conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
+        let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [conflict])
+        let provider = MainActorRecordingProvider(syncSessions: [session])
+        let gate = Gate()
+        let transport = FileTransport { _, _ in
+            await gate.pass()
+            return ""
+        }
+        let store = SessionStore(provider: provider, fileTransport: transport, defaults: defaults)
+        await store.refresh()
+        let refusal = "The session \"s1\" was not recreated: a conflict resolve is running on it."
+
+        let resolve = Task { _ = await store.resolveConflict(session: session, conflict: conflict, winner: .alpha) }
+        await gate.reached()
+        await store.recreateSync(session, options: SyncCreateOptions(), alpha: "/tmp/a", beta: "/tmp/b")
+        let errorAfterRecreate = store.lastError
+        await store.refresh()
+        await store.addToIgnoreList(session: session, path: "file.txt")
+        let errorAfterIgnore = store.lastError
+        let callsWhileResolveIsMidway = provider.calls
+        await gate.open()
+        await resolve.value
+
+        #expect(callsWhileResolveIsMidway == ["syncPause:sync_1"])
+        #expect(errorAfterRecreate == refusal)
+        #expect(errorAfterIgnore == refusal)
+        #expect(provider.calls == ["syncPause:sync_1", "syncResume:sync_1", "syncFlush:sync_1"])
     }
 
     @Test("A resolve returns the roots it left unresolved: failed, not attempted, and refused ones")

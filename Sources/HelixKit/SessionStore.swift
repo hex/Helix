@@ -262,6 +262,16 @@ public final class SessionStore {
         alpha: String,
         beta: String
     ) async {
+        // Recreation mints a new identifier, which a running resolve and a hold both refer to by the old one.
+        let name = session.name ?? session.identifier
+        if isResolving(session.identifier) {
+            lastError = "The session \"\(name)\" was not recreated: a conflict resolve is running on it."
+            return
+        }
+        if let hold = sessionHolds[session.identifier] {
+            lastError = "The session \"\(name)\" was not recreated: it is kept paused after a conflict. Resume it first. \(hold)"
+            return
+        }
         do {
             try await provider.syncTerminate(session.identifier)
         } catch {
