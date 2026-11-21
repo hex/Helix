@@ -1,5 +1,5 @@
 // ABOUTME: Tests for runProcess against real child processes.
-// ABOUTME: Checks that output larger than a pipe buffer comes back whole.
+// ABOUTME: Checks output capture, exit codes, and what cancelling a call does to its child.
 
 import Testing
 import Foundation
@@ -20,6 +20,76 @@ struct ProcessRunnerTests {
         #expect(output.utf8.count == 300000)
         #expect(output == String(repeating: "x", count: 300000))
     }
+
+    @Test("Throws the exit code and stderr text of a child that fails")
+    func failingChild() async throws {
+        let error = await #expect(throws: CLIError.self) {
+            try await withTimeout(seconds: 10) {
+                try await runProcess(executablePath: "/bin/sh", arguments: ["-c", "echo no such session >&2; exit 3"])
+            }
+        }
+
+        #expect(error?.exitCode == 3)
+        #expect(error?.stderr == "no such session")
+    }
+
+    @Test("Cancelling the task that awaits a running child ends the child and throws CancellationError")
+    func cancelledWhileChildRuns() async throws {
+        let pidFile = FileManager.default.temporaryDirectory.appendingPathComponent("helix-child-\(UUID().uuidString).pid")
+        defer { try? FileManager.default.removeItem(at: pidFile) }
+        let call = Task {
+            try await runProcess(
+                executablePath: "/bin/sh",
+                arguments: ["-c", "echo $$ > \"$0\"; exec /bin/sleep 30", pidFile.path]
+            )
+        }
+        defer { call.cancel() }
+        let child = try await processIdentifier(writtenTo: pidFile)
+        defer { kill(child, SIGKILL) }
+
+        call.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await withTimeout(seconds: 5) { try await call.value }
+        }
+
+        #expect(kill(child, 0) == -1)
+        #expect(errno == ESRCH)
+    }
+
+    @Test("A call cancelled because a concurrent call failed to launch leaves the launch error to the caller")
+    func siblingOfFailedCall() async throws {
+        let missing = "/nonexistent/helix-test-executable"
+        let calls = Task {
+            async let failing = runProcess(executablePath: missing, arguments: [])
+            // The child closes both streams at once, so the call is waiting for nothing but its exit when cancelled.
+            async let running = runProcess(executablePath: "/bin/sh", arguments: ["-c", "exec /bin/sleep 1 >&- 2>&-"])
+            _ = try await failing
+            _ = try await running
+        }
+
+        let error = await #expect(throws: CocoaError.self) {
+            try await withTimeout(seconds: 5) { try await calls.value }
+        }
+
+        #expect(error?.code == .fileNoSuchFile)
+    }
+}
+
+private struct NoProcessIdentifier: Error, CustomStringConvertible {
+    let file: URL
+    var description: String { "no process identifier was written to \(file.path) within 5 seconds" }
+}
+
+/// Waits for a child to write its process identifier to a file and returns it.
+private func processIdentifier(writtenTo file: URL) async throws -> pid_t {
+    for _ in 0..<100 {
+        if let text = try? String(contentsOf: file, encoding: .utf8),
+           let identifier = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            return identifier
+        }
+        try await Task.sleep(for: .milliseconds(50))
+    }
+    throw NoProcessIdentifier(file: file)
 }
 
 private struct TimedOut: Error, CustomStringConvertible {
