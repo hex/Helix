@@ -41,6 +41,7 @@ struct CreateSyncView: View {
 
     // Step 4: Review
     @State private var isCreating = false
+    @State private var creationError: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -251,11 +252,11 @@ struct CreateSyncView: View {
 
             Spacer()
 
-            if let error = store.lastError {
+            if let error = creationError {
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(.red)
-                    .lineLimit(1)
+                    .textSelection(.enabled)
             }
 
             if step > 0 {
@@ -360,13 +361,13 @@ struct CreateSyncView: View {
 
     private func createSession() async {
         isCreating = true
-        await store.createSync(
+        creationError = await store.createSync(
             options: options,
             alpha: alphaEndpoint.formatted,
             beta: betaEndpoint.formatted
         )
         isCreating = false
-        if store.lastError == nil {
+        if creationError == nil {
             dismiss()
         }
     }

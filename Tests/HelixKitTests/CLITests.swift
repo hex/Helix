@@ -23,6 +23,14 @@ struct CLITests {
         #expect(sessions[0].status == "watching")
     }
 
+    @Test("Reads the session identifier from a Mutagen create receipt", arguments: ["", "Connecting to beta...\r"])
+    func parsesSyncCreateReceipt(status: String) async throws {
+        let identifier = "sync_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG"
+        let cli = CLI(executablePath: "/usr/bin/printf", baseArguments: ["%s\n"])
+        let result = try await cli.syncCreate(arguments: [status + "Created session " + identifier])
+        #expect(result == identifier)
+    }
+
     @Test("forwardList parses JSON into ForwardSession array")
     func forwardList() async throws {
         let script = fixturePath("mock-mutagen.sh")

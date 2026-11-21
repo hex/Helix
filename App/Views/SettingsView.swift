@@ -66,14 +66,17 @@ struct SettingsView: View {
                         }
                         Button("Restart") {
                             Task {
-                                await store.stopDaemon()
+                                guard await store.stopDaemon() else { return }
                                 try? await Task.sleep(for: .seconds(1))
                                 await store.startDaemon()
                             }
                         }
                     } else {
                         Button("Start") {
-                            Task { await store.startDaemon() }
+                            Task {
+                                await store.startDaemon()
+                                if store.daemonRunning { await store.fetchVersion() }
+                            }
                         }
                     }
                 }

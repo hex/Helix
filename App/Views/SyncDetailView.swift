@@ -8,6 +8,7 @@ struct SyncDetailView: View {
     let session: SyncSession
     let store: SessionStore
     @State private var showTerminateConfirmation = false
+    @State private var showRemoveOriginalConfirmation = false
     @State private var showResetConfirmation = false
     @State private var showEditSheet = false
     @State private var actionInProgress: String?
@@ -69,6 +70,17 @@ struct SyncDetailView: View {
             }
         } message: {
             Text("This permanently removes the session. It cannot be undone.")
+        }
+        .confirmationDialog(
+            "Remove Original Session?",
+            isPresented: $showRemoveOriginalConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Remove original", role: .destructive) {
+                Task { await runAction("remove original") { await store.removeLeftoverSyncOriginal(session.identifier) } }
+            }
+        } message: {
+            Text("Permanently remove the original session. The edited session must still be running.")
         }
         .sheet(isPresented: $showEditSheet) {
             EditSyncConfigView(session: session, store: store)
@@ -186,6 +198,20 @@ struct SyncDetailView: View {
                     .controlSize(.small)
                 }
                 .padding(.top, 2)
+            }
+
+            if let replacement = store.leftoverSyncOriginals[session.identifier] {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("This original stays paused while the edited session \(replacement) is listed.")
+                        .foregroundStyle(.orange)
+                        .textSelection(.enabled)
+                    Button("Remove original") {
+                        showRemoveOriginalConfirmation = true
+                    }
+                    .controlSize(.small)
+                    .disabled(actionInProgress != nil)
+                }
+                .font(.callout)
             }
 
             if let progress = session.transferProgress {

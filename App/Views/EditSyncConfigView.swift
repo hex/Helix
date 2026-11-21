@@ -249,12 +249,12 @@ struct EditSyncConfigView: View {
         var opts = SyncCreateOptions(from: session)
         opts.name = sessionName.isEmpty ? nil : sessionName
         opts.labels = labels
-        opts.mode = syncMode
-        opts.ignorePaths = ignorePaths
+        if syncMode != (session.mode ?? "two-way-safe") { opts.mode = syncMode }
+        if ignoreInput != (session.ignore.paths ?? []).joined(separator: "\n") { opts.ignorePaths = ignorePaths }
         if ignoreVCS != (session.ignore.vcs ?? false) { opts.ignoreVCS = ignoreVCS }
-        if symlinkMode != "portable" { opts.symlinkMode = symlinkMode } else { opts.symlinkMode = nil }
-        if compression != "none" { opts.compression = compression } else { opts.compression = nil }
-        if watchMode != "portable" { opts.watchMode = watchMode } else { opts.watchMode = nil }
+        if symlinkMode != (session.symlink.mode ?? "portable") { opts.symlinkMode = symlinkMode }
+        if compression != (session.compression.algorithm ?? "none") { opts.compression = compression }
+        if watchMode != (session.watch.mode ?? "portable") { opts.watchMode = watchMode }
         if stageMode != (session.stageMode ?? "mutagen") { opts.stageMode = stageMode }
         return opts
     }

@@ -17,14 +17,14 @@
 ## Features
 
 - **Menu bar status** -- Live icon reflects overall session health at a glance (healthy, syncing or connecting, a warning for conflicts or a session that cannot connect, errors)
-- **Menu bar menu** -- Right-click the icon to open Helix, pause every running sync session, pause them for the minutes you enter, or quit; Resume restores only the sessions Pause All paused, and a timed pause resumes on its own, even after you quit and reopen Helix. Helix saves each completed pause before starting the next one.
+- **Menu bar menu** -- Right-click the icon to open Helix, pause every running sync session, pause them for the minutes you enter, or quit; Resume restores only the sessions Pause All paused, and a timed pause resumes on its own, even after you quit and reopen Helix. Helix saves each completed pause before starting the next one. When you edit a session paused by Pause All, the replacement inherits its pause and deadline.
 - **Session dashboard** -- Browse, search, and filter all sync and forward sessions in a three-column window
 - **Connection errors** -- When a session cannot connect, the detail view shows mutagen's own reason under the status line
 - **Sync diagnostics** -- See scan and transition errors by endpoint and path. The detail view shows how many problems and conflicts Mutagen omitted, and running sessions with problems show a warning in the status icon.
 - **Transfer progress** -- While a session stages files, the detail view shows a progress bar, files and bytes received, and the file mutagen is sending; the session list and menu bar show the same percentage as `mutagen sync list -l`
 - **Create sessions** -- Step-by-step wizard for sync sessions; streamlined form for port forwarding
 - **Session configuration** -- See settings that differ from Mutagen's defaults and overrides for Alpha and Beta.
-- **Edit sessions** -- Rename a session or change its sync mode, ignore rules, symlinks, compression, and watch settings. Helix prepares a paused replacement before removing the original. The replacement starts with fresh sync history. Editing preserves staging mode, hashing, limits, and how Mutagen handles version control directories.
+- **Edit sessions** -- Rename a session or change its sync mode, ignore rules, symlinks, compression, and watch settings. Helix prepares a paused replacement before removing the original. The replacement starts with fresh sync history. Helix carries over the existing settings for the session and both endpoints. If Mutagen cannot express an endpoint override, Helix names it and keeps the original. If Helix quits mid-edit, the main window identifies the sessions to inspect after relaunch. When a sync Create reports an uncertain outcome, check for the named session before retrying. If an edit leaves the original paused, open its details and choose Remove original. Helix checks that the replacement is still listed and unpaused first.
 - **Unique names** -- Rejects a name another session already holds, so `mutagen sync pause <name>` always resolves to one session
 - **Labels** -- Tag sessions with key=value pairs and filter the dashboard by them
 - **Connection testing** -- Check an SSH endpoint before creating a session, then browse the remote filesystem to pick a path
@@ -39,7 +39,7 @@
 - **Auto-update** -- Built-in Sparkle integration checks for updates from the menu bar
 - **Launch at login** -- Optional login item via SMAppService
 - **Configurable polling** -- Adjust refresh interval from 2 to 30 seconds
-- **Daemon controls** -- Stop in Settings suspends automatic and manual refreshes until you click Start. This applies while Helix is open.
+- **Daemon controls** -- Stop in Settings disables refreshes and session commands until Start. Finish any edit, bulk pause or resume, or conflict resolve before stopping. Helix remembers Stop across relaunches and updates. Click Start to resume polling and session commands.
 - **Background priority** -- Mutagen yields CPU and disk while the Mac is busy, which can slow transfers. Settings shows whether the priority applied and why it failed. Helix retries a saved request after a daemon restart.
 - **Text size** -- Adjustable text size (System Default, Small, Medium, Large, Extra Large) in Settings
 

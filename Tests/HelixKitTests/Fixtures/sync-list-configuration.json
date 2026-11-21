@@ -8,6 +8,7 @@
     "protocol": "local",
     "path": "/srv/project",
     "probeMode": "probe",
+    "scanMode": "full",
     "stageMode": "internal",
     "ignore": {},
     "symlink": {},
@@ -16,9 +17,14 @@
       "pollingInterval": 10
     },
     "permissions": {
-      "defaultFileMode": "0600"
+      "defaultFileMode": "0600",
+      "defaultDirectoryMode": "0700",
+      "defaultOwner": "localmirror",
+      "defaultGroup": "localmirrors"
     },
-    "compression": {},
+    "compression": {
+      "algorithm": "none"
+    },
     "connected": true,
     "scanned": true
   },
