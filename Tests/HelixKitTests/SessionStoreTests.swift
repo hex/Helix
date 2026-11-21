@@ -386,6 +386,83 @@ struct SessionStoreTests {
         #expect(store.lastError == nil)
     }
 
+    @Test("Stopped daemon refuses session mutations and reports the refusal")
+    @MainActor
+    func stoppedDaemonRefusesMutations() async throws {
+        let suite = "DaemonStopTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
+        let session = makeSyncSession(id: "sync_1", name: "project", conflicts: [conflict])
+        let provider = RecordingProvider(syncSessions: [session])
+        let transport = FileTransport { _, _ in throw CLIError(exitCode: 1, stderr: "transport must stay idle") }
+        let store = SessionStore(provider: provider, fileTransport: transport, defaults: defaults)
+        let refusal = "Start the Mutagen daemon before using session commands."
+        await store.refresh()
+        await store.stopDaemon()
+
+        await store.createSync(options: SyncCreateOptions(), alpha: "/srv/project", beta: "/srv/mirror")
+        #expect(store.lastError == refusal)
+        await store.pauseSync("sync_1")
+        await store.resumeSync("sync_1")
+        await store.flushSync("sync_1")
+        await store.resetSync("sync_1")
+        await store.terminateSync("sync_1")
+        await store.createForward(options: ForwardCreateOptions(), source: "tcp:localhost:8080", destination: "tcp:localhost:3000")
+        await store.pauseForward("fwd_1")
+        await store.resumeForward("fwd_1")
+        await store.terminateForward("fwd_1")
+        await store.pauseAllSync()
+        await store.resumeBulkPause()
+        let unresolved = await store.resolveConflict(session: session, conflict: conflict, winner: .alpha)
+
+        #expect(unresolved == ["file.txt"])
+        #expect(store.lastError == refusal)
+        #expect(provider.calls == ["daemonStop"])
+        #expect(store.daemonRunning == false)
+    }
+
+    @Test("Stop refuses to interrupt edits, bulk pause, and conflict resolution",
+          arguments: ["edit", "bulk pause", "conflict resolve"])
+    @MainActor
+    func stopRefusesBusyWork(_ operation: String) async throws {
+        let suite = "DaemonStopTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let gate = Gate()
+        let conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
+        let session = makeSyncSession(id: "sync_1", name: "project", conflicts: [conflict])
+        let provider = RecordingProvider(
+            syncSessions: [session], beforeSyncPause: { _ in await gate.pass() },
+            duringSyncCreate: { await gate.pass() }
+        )
+        let transport = FileTransport { _, _ in throw CLIError(exitCode: 1, stderr: "simulated transport failure") }
+        let store = SessionStore(provider: provider, fileTransport: transport, defaults: defaults)
+        await store.refresh()
+
+        let work = Task {
+            switch operation {
+            case "edit":
+                await store.recreateSync(session, options: SyncCreateOptions(from: session), alpha: "/srv/project", beta: "/srv/mirror")
+            case "bulk pause":
+                await store.pauseAllSync()
+            default:
+                await store.resolveConflict(session: session, conflict: conflict, winner: .alpha)
+            }
+        }
+        await gate.reached()
+        await store.stopDaemon()
+        let refusal = store.lastError
+        let daemonRunning = store.daemonRunning
+        let prematureStop = provider.calls.contains("daemonStop")
+        await gate.open()
+        await work.value
+
+        #expect(refusal == "Wait for the \(operation) to finish before stopping the Mutagen daemon.")
+        #expect(daemonRunning == true)
+        #expect(prematureStop == false)
+    }
+
     @Test("Stop suppresses refreshes until Start restores the daemon and session lists")
     @MainActor
     func refreshDoesNotUndoDaemonStop() async {
@@ -1145,7 +1222,7 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
             !syncSessions.contains(where: { $0.identifier == candidate.identifier })
         })?.identifier ?? "sync_replacement"
     }
-    func forwardCreate(arguments: [String]) async throws {}
+    func forwardCreate(arguments: [String]) async throws { try record("forwardCreate") }
     func syncPause(_ identifier: String) async throws {
         await beforeSyncPause?(identifier)
         try record("syncPause:\(identifier)")
@@ -1157,16 +1234,16 @@ final class RecordingProvider: SessionProvider, @unchecked Sendable {
         _flushed = true
         lock.unlock()
     }
-    func syncReset(_ identifier: String) async throws {}
+    func syncReset(_ identifier: String) async throws { try record("syncReset:\(identifier)") }
     func syncTerminate(_ identifier: String) async throws {
         await beforeSyncTerminate?()
         try record("syncTerminate:\(identifier)")
     }
-    func forwardPause(_ identifier: String) async throws {}
-    func forwardResume(_ identifier: String) async throws {}
-    func forwardTerminate(_ identifier: String) async throws {}
+    func forwardPause(_ identifier: String) async throws { try record("forwardPause:\(identifier)") }
+    func forwardResume(_ identifier: String) async throws { try record("forwardResume:\(identifier)") }
+    func forwardTerminate(_ identifier: String) async throws { try record("forwardTerminate:\(identifier)") }
     func daemonStart() async throws {}
-    func daemonStop() async throws {}
+    func daemonStop() async throws { try record("daemonStop") }
     func daemonRegister() async throws {}
     func daemonUnregister() async throws {}
 }

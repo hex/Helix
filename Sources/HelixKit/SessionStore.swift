@@ -45,10 +45,6 @@ public enum HealthStatus: Sendable {
 @MainActor
 @Observable
 public final class SessionStore {
-    private enum DaemonControl {
-        case managed, starting, stopping, stopped
-    }
-
     private typealias SessionLists = (sync: [SyncSession], forward: [ForwardSession])
 
     public private(set) var syncSessions: [SyncSession] = []
@@ -87,9 +83,12 @@ public final class SessionStore {
     public private(set) var daemonBackgroundPriorityRequested: Bool
     public private(set) var daemonPriorityError: String?
 
-    private var provider: any SessionProvider
+    private let provider: ManagedSessionProvider
     private var pollingTask: Task<Void, Never>?
-    @ObservationIgnored private var daemonControl = DaemonControl.managed
+    private var daemonControl: ManagedSessionProvider.Control {
+        get { provider.control }
+        set { provider.control = newValue }
+    }
     @ObservationIgnored private var activeSessionLists: [UUID: Task<SessionLists, Error>] = [:]
     private let fileTransport: FileTransport
     private let defaults: UserDefaults
@@ -119,7 +118,7 @@ public final class SessionStore {
         now: @escaping () -> Date = Date.init,
         daemonProcess: any DaemonProcess = MutagenDaemon(cliPath: CLI.defaultExecutablePath)
     ) {
-        self.provider = provider
+        self.provider = ManagedSessionProvider(provider)
         self.fileTransport = fileTransport
         self.defaults = defaults
         self.now = now
@@ -167,7 +166,7 @@ public final class SessionStore {
     }
 
     public func replaceProvider(_ provider: any SessionProvider) {
-        self.provider = provider
+        self.provider.replace(with: provider)
     }
 
     public func replaceDaemonProcess(_ daemonProcess: any DaemonProcess) {
@@ -286,14 +285,16 @@ public final class SessionStore {
 
     // MARK: - Session Creation
 
-    public func createSync(options: SyncCreateOptions, alpha: String, beta: String) async {
+    @discardableResult
+    public func createSync(options: SyncCreateOptions, alpha: String, beta: String) async -> String? {
         let args = options.arguments(alpha: alpha, beta: beta)
-        await performAction { _ = try await provider.syncCreate(arguments: args) }
+        return await performAction { _ = try await provider.syncCreate(arguments: args) }
     }
 
-    public func createForward(options: ForwardCreateOptions, source: String, destination: String) async {
+    @discardableResult
+    public func createForward(options: ForwardCreateOptions, source: String, destination: String) async -> String? {
         let args = options.arguments(source: source, destination: destination)
-        await performAction { try await provider.forwardCreate(arguments: args) }
+        return await performAction { try await provider.forwardCreate(arguments: args) }
     }
 
     // MARK: - Sync Edit
@@ -305,10 +306,9 @@ public final class SessionStore {
         alpha: String,
         beta: String
     ) async -> String? {
-        guard daemonControl == .managed else {
-            let message = "Start the Mutagen daemon before editing a session."
-            lastError = message
-            return message
+        if let unavailable = provider.unavailable {
+            lastError = unavailable.localizedDescription
+            return lastError
         }
         // Recreation mints a new identifier, which a running resolve and a hold both refer to by the old one.
         let sessionName = session.name ?? session.identifier
@@ -455,6 +455,10 @@ public final class SessionStore {
     /// Pauses every running sync session and records which ones it paused.
     /// - Parameter resumeAt: when `refresh()` resumes them on its own; nil waits for `resumeBulkPause()`.
     public func pauseAllSync(until resumeAt: Date? = nil) async {
+        if let unavailable = provider.unavailable {
+            lastError = unavailable.localizedDescription
+            return
+        }
         guard !bulkPauseInFlight else { return }
         bulkPauseInFlight = true
         defer { bulkPauseInFlight = false }
@@ -485,6 +489,10 @@ public final class SessionStore {
     /// to resume, that a conflict resolve is working on, or that is being edited stays in the record so the
     /// next attempt retries it.
     public func resumeBulkPause() async {
+        if let unavailable = provider.unavailable {
+            lastError = unavailable.localizedDescription
+            return
+        }
         guard let record = bulkPause, !bulkPauseInFlight else { return }
         bulkPauseInFlight = true
         defer { bulkPauseInFlight = false }
@@ -658,8 +666,14 @@ public final class SessionStore {
         }
     }
 
-    public func stopDaemon() async {
-        guard daemonControl == .managed else { return }
+    @discardableResult
+    public func stopDaemon() async -> Bool {
+        guard daemonControl == .managed else { return false }
+
+        if let operation = operationBlockingDaemonStop {
+            lastError = "Wait for the \(operation) to finish before stopping the Mutagen daemon."
+            return false
+        }
         daemonControl = .stopping
 
         // List commands can autostart Mutagen. Discard their results and let the commands finish before Stop.
@@ -678,10 +692,19 @@ public final class SessionStore {
             backgroundPriorityPID = nil
             setDaemonPriorityError(daemonBackgroundPriorityRequested ? "Mutagen daemon not found." : nil)
             lastError = nil
+            return true
         } catch {
             daemonControl = .managed
             lastError = error.localizedDescription
+            return false
         }
+    }
+
+    private var operationBlockingDaemonStop: String? {
+        if sessionBeingEdited != nil { return "edit" }
+        if bulkPauseInFlight { return "bulk pause" }
+        if !resolvesInFlight.isEmpty { return "conflict resolve" }
+        return nil
     }
 
     public func registerDaemon() async {
@@ -867,6 +890,10 @@ public final class SessionStore {
         roots: Set<String>,
         _ resolve: @escaping @MainActor () async -> Set<String>
     ) async -> Set<String> {
+        if let unavailable = provider.unavailable {
+            lastError = unavailable.localizedDescription
+            return roots
+        }
         let identifier = session.identifier
         if sessionBeingEdited == identifier {
             let message = "No conflict in the session \"\(session.name ?? identifier)\" was resolved: the session is being edited."
@@ -1347,7 +1374,8 @@ public final class SessionStore {
         return hasher.finalize()
     }
 
-    private func performAction(_ action: @Sendable () async throws -> Void) async {
+    @discardableResult
+    private func performAction(_ action: @Sendable () async throws -> Void) async -> String? {
         do {
             try await action()
             lastError = nil
@@ -1355,5 +1383,6 @@ public final class SessionStore {
         } catch {
             lastError = error.localizedDescription
         }
+        return lastError
     }
 }

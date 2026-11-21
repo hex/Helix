@@ -66,7 +66,7 @@ struct SettingsView: View {
                         }
                         Button("Restart") {
                             Task {
-                                await store.stopDaemon()
+                                guard await store.stopDaemon() else { return }
                                 try? await Task.sleep(for: .seconds(1))
                                 await store.startDaemon()
                             }

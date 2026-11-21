@@ -27,6 +27,7 @@ struct CreateForwardView: View {
     @State private var labels: [String: String] = [:]
     @State private var createPaused = false
     @State private var isCreating = false
+    @State private var creationError: String?
     @State private var labelsExpanded = true
 
     var body: some View {
@@ -193,11 +194,11 @@ struct CreateForwardView: View {
 
             Spacer()
 
-            if let error = store.lastError {
+            if let error = creationError {
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(.red)
-                    .lineLimit(1)
+                    .textSelection(.enabled)
             }
 
             Button("Create") {
@@ -258,13 +259,13 @@ struct CreateForwardView: View {
 
     private func createSession() async {
         isCreating = true
-        await store.createForward(
+        creationError = await store.createForward(
             options: options,
             source: sourceFormatted,
             destination: destFormatted
         )
         isCreating = false
-        if store.lastError == nil {
+        if creationError == nil {
             dismiss()
         }
     }
