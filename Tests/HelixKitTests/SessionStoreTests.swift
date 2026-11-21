@@ -681,6 +681,64 @@ struct DaemonPriorityTests {
 
 // MARK: - Helpers
 
+/// Records sync actions on the main actor, so a call the store makes is in `calls` before any
+/// other main-actor code runs.
+@MainActor
+final class MainActorRecordingProvider: SessionProvider {
+    private(set) var calls: [String] = []
+    private let syncSessions: [SyncSession]
+
+    init(syncSessions: [SyncSession]) {
+        self.syncSessions = syncSessions
+    }
+
+    func syncList() async throws -> [SyncSession] { syncSessions }
+    func forwardList() async throws -> [ForwardSession] { [] }
+    func daemonRunning() async throws -> Bool { true }
+    func version() async throws -> String { "0.18.1" }
+    func syncCreate(arguments: [String]) async throws {}
+    func forwardCreate(arguments: [String]) async throws {}
+    func syncPause(_ identifier: String) async throws { calls.append("syncPause:\(identifier)") }
+    func syncResume(_ identifier: String) async throws { calls.append("syncResume:\(identifier)") }
+    func syncFlush(_ identifier: String) async throws { calls.append("syncFlush:\(identifier)") }
+    func syncReset(_ identifier: String) async throws {}
+    func syncTerminate(_ identifier: String) async throws {}
+    func forwardPause(_ identifier: String) async throws {}
+    func forwardResume(_ identifier: String) async throws {}
+    func forwardTerminate(_ identifier: String) async throws {}
+    func daemonStart() async throws {}
+    func daemonStop() async throws {}
+    func daemonRegister() async throws {}
+    func daemonUnregister() async throws {}
+}
+
+/// Suspends the first caller of `pass()` until `open()`; `reached()` returns once that caller is waiting.
+actor Gate {
+    private var isOpen = false
+    private var hasCaller = false
+    private var waiting: CheckedContinuation<Void, Never>?
+    private var watcher: CheckedContinuation<Void, Never>?
+
+    func pass() async {
+        guard !isOpen, !hasCaller else { return }
+        hasCaller = true
+        watcher?.resume()
+        watcher = nil
+        await withCheckedContinuation { waiting = $0 }
+    }
+
+    func reached() async {
+        guard !hasCaller else { return }
+        await withCheckedContinuation { watcher = $0 }
+    }
+
+    func open() {
+        isOpen = true
+        waiting?.resume()
+        waiting = nil
+    }
+}
+
 final class RecordingProvider: SessionProvider, @unchecked Sendable {
     private var _calls: [String] = []
     private let lock = NSLock()
@@ -1319,6 +1377,86 @@ struct ConflictResolutionTests {
 
         #expect(store.leftoverNotices == [:])
         #expect(SessionStore(provider: recorder, defaults: defaults).leftoverNotices == [:])
+    }
+
+    @Test("Two resolves started together on one session run one after the other, in the order requested")
+    @MainActor
+    func resolvesOnOneSessionTakeTurns() async {
+        defer { removeDefaults() }
+        let c1 = Conflict(root: "a.txt", alphaChanges: [], betaChanges: [])
+        let c2 = Conflict(root: "b.txt", alphaChanges: [], betaChanges: [])
+        let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [c1, c2])
+        let provider = MainActorRecordingProvider(syncSessions: [session])
+        let cmdRecorder = CommandRecorder()
+        let gate = Gate()
+        let transport = FileTransport { executable, arguments in
+            await gate.pass()
+            return try await cmdRecorder.execute(executable, arguments)
+        }
+        let store = SessionStore(provider: provider, fileTransport: transport, defaults: defaults)
+
+        let first = Task { await store.resolveConflict(session: session, conflict: c1, winner: .alpha) }
+        let second = Task { await store.resolveConflict(session: session, conflict: c2, winner: .alpha) }
+        await gate.reached()
+        for _ in 0..<100 { await Task.yield() }
+        let callsWhileFirstIsMidway = provider.calls
+        await gate.open()
+        await first.value
+        await second.value
+
+        #expect(callsWhileFirstIsMidway == ["syncPause:sync_1"])
+        #expect(provider.calls == [
+            "syncPause:sync_1", "syncResume:sync_1", "syncFlush:sync_1",
+            "syncPause:sync_1", "syncResume:sync_1", "syncFlush:sync_1",
+        ])
+        let roots = cmdRecorder.commands.map { $0.arguments.contains { $0.contains("a.txt") } ? "a.txt" : "b.txt" }
+        #expect(roots == Array(repeating: "a.txt", count: 7) + Array(repeating: "b.txt", count: 7))
+    }
+
+    @Test("A resolve requested on a held session is refused with the hold message before any pause or file command")
+    @MainActor
+    func resolveOnHeldSessionRefused() async throws {
+        defer { removeDefaults() }
+        let c1 = Conflict(root: "a.txt", alphaChanges: [], betaChanges: [])
+        let c2 = Conflict(root: "b.txt", alphaChanges: [], betaChanges: [])
+        let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [c1, c2])
+        let firstRecorder = CommandRecorder()
+        let store = SessionStore(provider: RecordingProvider(syncSessions: [session]), fileTransport: transportLeavingDestinationUnverified(recordingTo: firstRecorder), defaults: defaults)
+        await store.resolveConflict(session: session, conflict: c1, winner: .alpha)
+        let token = try replaceToken(copiedBeside: "/tmp/b/a.txt", in: firstRecorder.commands)
+        await store.refresh()
+        let commandsBefore = firstRecorder.commands.count
+        let provider = RecordingProvider(syncSessions: [session])
+        store.replaceProvider(provider)
+
+        await store.resolveConflict(session: session, conflict: c2, winner: .alpha)
+        await store.resolveConflicts(session: session, conflicts: [c2], winner: .beta)
+
+        #expect(provider.calls == [])
+        #expect(firstRecorder.commands.count == commandsBefore)
+        #expect(store.lastError == holdMessage(root: "a.txt", destination: "/tmp/b/a.txt", token: token))
+    }
+
+    @Test("A resolve waiting behind one that ends unverified is refused when its turn comes")
+    @MainActor
+    func queuedResolveRefusedOnceHeld() async throws {
+        defer { removeDefaults() }
+        let c1 = Conflict(root: "a.txt", alphaChanges: [], betaChanges: [])
+        let c2 = Conflict(root: "b.txt", alphaChanges: [], betaChanges: [])
+        let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [c1, c2])
+        let provider = MainActorRecordingProvider(syncSessions: [session])
+        let cmdRecorder = CommandRecorder()
+        let store = SessionStore(provider: provider, fileTransport: transportLeavingDestinationUnverified(recordingTo: cmdRecorder), defaults: defaults)
+
+        let first = Task { await store.resolveConflict(session: session, conflict: c1, winner: .alpha) }
+        let second = Task { await store.resolveConflict(session: session, conflict: c2, winner: .alpha) }
+        await first.value
+        await second.value
+
+        let token = try replaceToken(copiedBeside: "/tmp/b/a.txt", in: cmdRecorder.commands)
+        #expect(provider.calls == ["syncPause:sync_1"])
+        #expect(cmdRecorder.commands.map(\.arguments).filter { $0.contains { $0.contains("b.txt") } } == [])
+        #expect(store.sessionHolds == ["sync_1": holdMessage(root: "a.txt", destination: "/tmp/b/a.txt", token: token)])
     }
 
     @Test("conflictFileInfo returns file metadata from both endpoints")

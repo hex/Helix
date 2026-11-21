@@ -77,6 +77,8 @@ public final class SessionStore {
     private let now: () -> Date
     private var daemonProcess: any DaemonProcess
     @ObservationIgnored private var bulkPauseInFlight = false
+    /// The resolve requested last on each session; the next one on that session waits for it to end.
+    @ObservationIgnored private var lastResolve: [String: Task<Void, Never>] = [:]
     /// The daemon process background priority was last applied to; nil while it is not applied.
     @ObservationIgnored private var backgroundPriorityPID: ProcessID?
     private static let bulkPauseKey = "bulkPause"
@@ -582,6 +584,46 @@ public final class SessionStore {
         conflict: Conflict,
         winner: ConflictWinner
     ) async {
+        await resolveInTurn(on: session) {
+            await self.applyResolve(session: session, conflict: conflict, winner: winner)
+        }
+    }
+
+    public func resolveConflicts(
+        session: SyncSession,
+        conflicts: [Conflict],
+        winner: ConflictWinner
+    ) async {
+        await resolveInTurn(on: session) {
+            await self.applyResolve(session: session, conflicts: conflicts, winner: winner)
+        }
+    }
+
+    /// Runs `resolve` once every resolve requested earlier on the same session has ended, so that no resolve
+    /// resumes the session while another is moving its files. Requests run in the order they were made.
+    /// A session that is held when its turn comes is refused before anything is paused or run.
+    private func resolveInTurn(on session: SyncSession, _ resolve: @escaping @MainActor () async -> Void) async {
+        let identifier = session.identifier
+        let earlier = lastResolve[identifier]
+        let turn = Task { @MainActor in
+            await earlier?.value
+            if let hold = self.sessionHolds[identifier] {
+                ConsoleLog.shared.log("resolve refused: \"\(session.name ?? identifier)\" is held paused", level: .error)
+                self.lastError = hold
+                return
+            }
+            await resolve()
+        }
+        lastResolve[identifier] = turn
+        await turn.value
+        if lastResolve[identifier] == turn { lastResolve[identifier] = nil }
+    }
+
+    private func applyResolve(
+        session: SyncSession,
+        conflict: Conflict,
+        winner: ConflictWinner
+    ) async {
         guard !conflict.root.isEmpty else {
             ConsoleLog.shared.log("resolveConflict: refused the conflict at the sync root", level: .error)
             lastError = rootConflictRefusal(in: session)
@@ -654,7 +696,7 @@ public final class SessionStore {
         leftoverNotices[identifier] = ([leftoverNotices[identifier], notice].compactMap { $0 }).joined(separator: " ")
     }
 
-    public func resolveConflicts(
+    private func applyResolve(
         session: SyncSession,
         conflicts: [Conflict],
         winner: ConflictWinner
