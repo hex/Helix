@@ -87,13 +87,11 @@ struct SyncEndpointPair: Equatable, Sendable {
     private let beta: Location
 
     init(_ session: SyncSession) {
-        alpha = Self.location(session.alpha)
-        beta = Self.location(session.beta)
+        self.init(alpha: Self.location(session.alpha), beta: Self.location(session.beta))
     }
 
     init(alpha: EndpointURL, beta: EndpointURL) {
-        self.alpha = Self.location(alpha)
-        self.beta = Self.location(beta)
+        self.init(alpha: Self.location(alpha), beta: Self.location(beta))
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
@@ -101,17 +99,9 @@ struct SyncEndpointPair: Equatable, Sendable {
             || (lhs.alpha == rhs.beta && lhs.beta == rhs.alpha)
     }
 
-    func matchesForCreation(_ other: Self) -> Bool {
-        canonicalCreationPair == other.canonicalCreationPair
-    }
-
     private init(alpha: Location, beta: Location) {
-        self.alpha = alpha
-        self.beta = beta
-    }
-
-    private var canonicalCreationPair: Self {
-        Self(alpha: Self.normalizingTemporaryPath(alpha), beta: Self.normalizingTemporaryPath(beta))
+        self.alpha = Self.normalizingTemporaryPath(alpha)
+        self.beta = Self.normalizingTemporaryPath(beta)
     }
 
     private static func normalizingTemporaryPath(_ location: Location) -> Location {

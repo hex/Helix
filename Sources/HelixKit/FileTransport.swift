@@ -1,6 +1,7 @@
 // ABOUTME: Copies files between local, SSH, and Docker endpoints for conflict resolution.
 // ABOUTME: Uses cp, scp, and docker-cp with an injectable executor for testability.
 
+import Darwin
 import Foundation
 
 public enum FileTransportError: Error {
@@ -97,7 +98,7 @@ public struct ReplaceError: LocalizedError {
         case .restoreOriginal:
             return "Could not move the original back from \(setAside) to \(destination): \(cause)"
         case .inspectDisk:
-            return "Could not check what the failed move left on disk: \(cause)"
+            return "Could not check what the move left on disk: \(cause)"
         }
     }
 }
@@ -232,11 +233,12 @@ public struct FileTransport: Sendable {
 
         func failure(
             _ step: ReplaceError.Step, _ cause: any Error,
-            aftermath: ReplaceError.Aftermath, recoveryFailures: [ReplaceError.StepFailure] = []
+            aftermath: ReplaceError.Aftermath, recoveryFailures: [ReplaceError.StepFailure] = [],
+            misplacedCopy: EndpointURL? = nil
         ) -> ReplaceError {
             ReplaceError(
                 source: source.formatted, destination: destination.formatted,
-                incoming: incoming.formatted, setAside: setAside.formatted, aftermath: aftermath,
+                incoming: (misplacedCopy ?? incoming).formatted, setAside: setAside.formatted, aftermath: aftermath,
                 failure: ReplaceError.StepFailure(step: step, cause: cause), recoveryFailures: recoveryFailures
             )
         }
@@ -319,6 +321,20 @@ public struct FileTransport: Sendable {
             return try await settle(.moveCopyIntoPlace, error, swap: swap)
         }
         guard swap == .setAsideThenRename else { return .replaced }
+        let copyName = (incoming.path as NSString).lastPathComponent
+        let nested = destination.withPath((destination.path as NSString).appendingPathComponent(copyName))
+        let copyWasNested: Bool
+        do {
+            copyWasNested = try await containsNestedCopy(at: nested)
+        } catch {
+            throw failure(.inspectDisk, error, aftermath: .destinationUnverified)
+        }
+        if copyWasNested {
+            throw failure(
+                .moveCopyIntoPlace, DirectoryAppeared(path: destination.formatted),
+                aftermath: .destinationUnverified, misplacedCopy: nested
+            )
+        }
         do {
             try await remove(endpoint: setAside)
         } catch {
@@ -338,6 +354,23 @@ public struct FileTransport: Sendable {
         case renameOverOriginal
         /// A directory is involved, which one rename cannot replace: the original moves aside first.
         case setAsideThenRename
+    }
+
+    private struct DirectoryAppeared: LocalizedError {
+        let path: String
+        var errorDescription: String? { "A directory appeared at \(path) during the move" }
+    }
+
+    private func containsNestedCopy(at endpoint: EndpointURL) async throws -> Bool {
+        if case .local(let path) = endpoint {
+            var info = Darwin.stat()
+            if lstat(path, &info) == 0 { return true }
+            let code = errno
+            if code == ENOENT || code == ENOTDIR { return false }
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: [NSFilePathErrorKey: path])
+        }
+        if try await pathExists(endpoint: endpoint) { return true }
+        return try await isSymlink(endpoint: endpoint)
     }
 
     /// Renames a path on its own host; source and target always share the endpoint's machine.

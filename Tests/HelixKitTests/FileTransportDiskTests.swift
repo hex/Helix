@@ -91,6 +91,55 @@ struct FileTransportReplaceDiskTests {
         }
     }
 
+    @Test("A directory appearing during replacement leaves both versions on disk", arguments: ["local", "ssh", "docker"])
+    func directoryCollisionKeepsOriginal(transportName: String) async throws {
+        try await withScratchDirectory { scratch in
+            let winner = scratch.appendingPathComponent("winner")
+            let destination = scratch.appendingPathComponent("destination")
+            let files = FileManager.default
+            try files.createDirectory(at: winner, withIntermediateDirectories: false)
+            try files.createDirectory(at: destination, withIntermediateDirectories: false)
+            try "winner".write(to: winner.appendingPathComponent("copy"), atomically: false, encoding: .utf8)
+            try "original".write(to: destination.appendingPathComponent("original"), atomically: false, encoding: .utf8)
+
+            let target: EndpointURL = switch transportName {
+            case "ssh": .ssh(user: "test", host: "example.test", port: nil, path: destination.path)
+            case "docker": .docker(container: "fixture", path: destination.path)
+            default: .local(path: destination.path)
+            }
+            let plan = ReplacePlan(replacing: target, withCopyOf: .local(path: winner.path))
+            let incoming = scratch.appendingPathComponent((plan.incoming.formatted as NSString).lastPathComponent).path
+            let setAside = scratch.appendingPathComponent((plan.setAside.formatted as NSString).lastPathComponent).path
+            let transport = FileTransport { executable, arguments in
+                // Dispatch remote commands on the scratch filesystem to reproduce the same on-disk race.
+                if executable == "/usr/bin/ssh" {
+                    let command = try #require(arguments.last)
+                    if command == "mv \(FileTransport.shellWord(incoming)) \(FileTransport.shellWord(destination.path))" {
+                        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false)
+                    }
+                    return try await runProcess(executablePath: "/bin/sh", arguments: ["-c", command])
+                }
+                if executable == "/usr/bin/scp" || (executable == "/usr/bin/docker" && arguments.first == "cp") {
+                    return try await runProcess(executablePath: "/bin/cp", arguments: ["-Rp", winner.path, incoming])
+                }
+                let command = executable == "/usr/bin/docker" ? "/bin/\(arguments[2])" : executable
+                let operands = executable == "/usr/bin/docker" ? Array(arguments.dropFirst(3)) : arguments
+                if command == "/bin/mv", operands == [incoming, destination.path] {
+                    try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false)
+                }
+                return try await runProcess(executablePath: command, arguments: operands)
+            }
+
+            let error = await #expect(throws: ReplaceError.self) { try await transport.replace(plan) }
+
+            let nested = destination.appendingPathComponent(URL(fileURLWithPath: incoming).lastPathComponent)
+            #expect(error?.failure.step == .moveCopyIntoPlace)
+            #expect(error?.aftermath == .destinationUnverified)
+            #expect(try text(at: nested.appendingPathComponent("copy")) == "winner")
+            #expect(try text(at: URL(fileURLWithPath: setAside).appendingPathComponent("original")) == "original")
+        }
+    }
+
     @Test("a file replaces a dangling symlink, leaving a regular file")
     func fileOverDanglingSymlink() async throws {
         try await withScratchDirectory { scratch in
@@ -358,6 +407,47 @@ struct FileTransportReplaceDiskTests {
 
 @Suite("Conflict interruptions on disk")
 struct ConflictInterruptionDiskTests {
+    @Test("Pause All includes a session paused by an in-progress conflict resolve", arguments: [false, true])
+    @MainActor
+    func pauseAllDuringConflictResolve(timed: Bool) async throws {
+        try await withScratchDirectory { scratch in
+            let fixture = try LocalConflictFixture(in: scratch)
+            let suite = "ConflictBulkPauseTests.\(UUID())"
+            let defaults = try #require(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let other = makeSyncSession(id: "other", name: "Other")
+            let commands = MutationCommands(sessions: [other, fixture.session])
+            let copying = Gate()
+            let transport = FileTransport { executable, arguments in
+                if executable == "/bin/cp" { await copying.pass() }
+                return try await runProcess(executablePath: executable, arguments: arguments)
+            }
+            let store = SessionStore(provider: commands.cli, fileTransport: transport, defaults: defaults)
+            let resolve = Task {
+                await store.resolveConflict(session: fixture.session, conflict: fixture.conflict, winner: .alpha)
+            }
+            await copying.reached()
+            #expect(await commands.sessions.map(\.paused) == [false, true])
+            let callCount = await commands.calls.count
+            let resumeAt = timed ? Date(timeIntervalSince1970: 2_000_000_000) : nil
+            let pause = Task { await store.pauseAllSync(until: resumeAt) }
+            let limit = ContinuousClock.now.advanced(by: .seconds(2))
+            while await commands.calls.count <= callCount, ContinuousClock.now < limit {
+                await Task.yield()
+            }
+            #expect(await commands.calls.count > callCount)
+            await copying.open()
+            #expect(await resolve.value.isEmpty)
+            await pause.value
+
+            #expect(await commands.sessions.map(\.paused) == [true, true])
+            #expect(store.bulkPause == BulkPause(sessionIdentifiers: [other.identifier, fixture.session.identifier], resumeAt: resumeAt))
+            #expect(try String(contentsOf: fixture.loser, encoding: .utf8) == "winner")
+            await store.resumeBulkPause()
+            #expect(await commands.sessions.map(\.paused) == [false, false])
+        }
+    }
+
     @Test("Conflict resolution restores only overlap that was already running", arguments: [false, true], [false, true])
     @MainActor
     func conflictRestoresPreviouslyRunningOverlap(bulk: Bool, peerAlreadyRunning: Bool) async throws {
