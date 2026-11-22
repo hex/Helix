@@ -411,7 +411,14 @@ struct FileTransportReplaceTests {
     @Test("replacing local to ssh copies beside the destination before anything touches it")
     func copiesBesideBeforeTouchingDestination() async throws {
         let recorder = CommandRecorder()
-        let transport = FileTransport(execute: recorder.execute)
+        let transport = FileTransport { executable, arguments in
+            let output = try await recorder.execute(executable, arguments)
+            if let command = arguments.last,
+               command.hasPrefix("test -e '/opt/app/file.txt/") || command.hasPrefix("test -L '/opt/app/file.txt/") {
+                throw CLIError(exitCode: 1, stderr: "")
+            }
+            return output
+        }
 
         let outcome = try await transport.replace(ReplacePlan(replacing: destination, withCopyOf: source))
 
@@ -419,13 +426,15 @@ struct FileTransportReplaceTests {
         let token = try token(in: recorder.commands)
         let incoming = "/opt/app/file.txt.helix-incoming-\(token)"
         let setAside = "/opt/app/file.txt.helix-replaced-\(token)"
-        #expect(recorder.commands.map(\.executable) == ["/usr/bin/scp", "/usr/bin/ssh", "/usr/bin/ssh", "/usr/bin/ssh", "/usr/bin/ssh", "/usr/bin/ssh"])
+        #expect(recorder.commands.map(\.executable) == ["/usr/bin/scp"] + Array(repeating: "/usr/bin/ssh", count: 7))
         #expect(recorder.commands.map(\.arguments) == [
             connectionOptions + ["-r", "/tmp/a/file.txt", "deploy@server:\(incoming)"],
             connectionOptions + ["deploy@server", "test -e '/opt/app/file.txt'"],
             connectionOptions + ["deploy@server", "test -d '/opt/app/file.txt'"],
             connectionOptions + ["deploy@server", "mv '/opt/app/file.txt' '\(setAside)'"],
             connectionOptions + ["deploy@server", "mv '\(incoming)' '/opt/app/file.txt'"],
+            connectionOptions + ["deploy@server", "test -e '/opt/app/file.txt/file.txt.helix-incoming-\(token)'"],
+            connectionOptions + ["deploy@server", "test -L '/opt/app/file.txt/file.txt.helix-incoming-\(token)'"],
             connectionOptions + ["deploy@server", "rm -rf '\(setAside)'"],
         ])
     }
@@ -973,8 +982,8 @@ struct FileTransportConnectionOptionsTests {
             Operation(name: "copy ssh to ssh", executables: [scp]) { try await $0.copy(from: remote, to: otherRemote) },
             Operation(name: "copy ssh to docker", executables: [scp, docker]) { try await $0.copy(from: remote, to: container) },
             Operation(name: "copy docker to ssh", executables: [docker, scp]) { try await $0.copy(from: container, to: remote) },
-            // Copies beside the destination, checks it, moves it aside, moves the copy in, removes the original.
-            Operation(name: "replace", executables: [scp, ssh, ssh, ssh, ssh, ssh]) {
+            // Checks placement before removing the set-aside original.
+            Operation(name: "replace", executables: [scp] + Array(repeating: ssh, count: 7)) {
                 _ = try await $0.replace(ReplacePlan(replacing: remote, withCopyOf: local))
             },
         ]
@@ -987,9 +996,15 @@ struct FileTransportConnectionOptionsTests {
     func everyRemoteCommandStartsWithConnectionOptions(remote: EndpointURL) async throws {
         let otherRemote = EndpointURL.ssh(user: "backup", host: "mirror", port: nil, path: "/srv/file.txt")
         for operation in Self.operations(remote: remote, otherRemote: otherRemote) {
-            // Every operation here parses at most the stat output.
             let recorder = CommandRecorder(output: "1024 1700000000")
-            let transport = FileTransport(execute: recorder.execute)
+            let transport = FileTransport { executable, arguments in
+                let output = try await recorder.execute(executable, arguments)
+                if let command = arguments.last, command.hasPrefix("test "),
+                   command.contains("/file.txt/file.txt.helix-incoming-") {
+                    throw CLIError(exitCode: 1, stderr: "")
+                }
+                return output
+            }
 
             try await operation.run(transport)
 
