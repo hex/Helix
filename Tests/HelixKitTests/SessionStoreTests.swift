@@ -1883,7 +1883,7 @@ struct ConflictResolutionTests {
 
     /// The per-call token in replace's sibling names, read from the copy that lands beside `destination`.
     private func replaceToken(copiedBeside destination: String, in commands: [RecordedCommand]) throws -> String {
-        let marker = destination + ".helix-incoming-"
+        let marker = (destination as NSString).deletingLastPathComponent + "/.helix-incoming-"
         let copyTarget = try #require(commands.first { $0.executable == "/bin/cp" }?.arguments.last)
         try #require(copyTarget.hasPrefix(marker))
         return String(copyTarget.dropFirst(marker.count))
@@ -1911,12 +1911,12 @@ struct ConflictResolutionTests {
         #expect(copyRecorder.commands.map(\.executable) == ["/bin/test", "/bin/cp", "/bin/test", "/bin/test", "/bin/mv", "/bin/mv", "/bin/rm"])
         #expect(copyRecorder.commands.map(\.arguments) == [
             ["-e", "/tmp/a/file.txt"],
-            ["-Rp", "/tmp/a/file.txt", "/tmp/b/file.txt.helix-incoming-\(token)"],
+            ["-Rp", "/tmp/a/file.txt", "/tmp/b/.helix-incoming-\(token)"],
             ["-e", "/tmp/b/file.txt"],
             ["-d", "/tmp/b/file.txt"],
-            ["/tmp/b/file.txt", "/tmp/b/file.txt.helix-replaced-\(token)"],
-            ["/tmp/b/file.txt.helix-incoming-\(token)", "/tmp/b/file.txt"],
-            ["-rf", "/tmp/b/file.txt.helix-replaced-\(token)"],
+            ["/tmp/b/file.txt", "/tmp/b/.helix-replaced-\(token)"],
+            ["/tmp/b/.helix-incoming-\(token)", "/tmp/b/file.txt"],
+            ["-rf", "/tmp/b/.helix-replaced-\(token)"],
         ])
         // Should have flushed
         let flushCalls = recorder.calls.filter { $0.hasPrefix("syncFlush") }
@@ -1944,12 +1944,12 @@ struct ConflictResolutionTests {
         // Beta (/tmp/b) -> Alpha (/tmp/a)
         #expect(copyRecorder.commands.map(\.arguments) == [
             ["-e", "/tmp/b/data.json"],
-            ["-Rp", "/tmp/b/data.json", "/tmp/a/data.json.helix-incoming-\(token)"],
+            ["-Rp", "/tmp/b/data.json", "/tmp/a/.helix-incoming-\(token)"],
             ["-e", "/tmp/a/data.json"],
             ["-d", "/tmp/a/data.json"],
-            ["/tmp/a/data.json", "/tmp/a/data.json.helix-replaced-\(token)"],
-            ["/tmp/a/data.json.helix-incoming-\(token)", "/tmp/a/data.json"],
-            ["-rf", "/tmp/a/data.json.helix-replaced-\(token)"],
+            ["/tmp/a/data.json", "/tmp/a/.helix-replaced-\(token)"],
+            ["/tmp/a/.helix-incoming-\(token)", "/tmp/a/data.json"],
+            ["-rf", "/tmp/a/.helix-replaced-\(token)"],
         ])
     }
 
@@ -2150,7 +2150,7 @@ struct ConflictResolutionTests {
 
         let token = try replaceToken(copiedBeside: "/tmp/b/file.txt", in: cmdRecorder.commands)
         #expect(recorder.calls == ["syncPause:sync_1", "syncResume:sync_1", "syncFlush:sync_1"])
-        #expect(store.lastError == "Resolved \"file.txt\", but left the original it replaced at /tmp/b/file.txt.helix-replaced-\(token): permission denied. Delete that path by hand.")
+        #expect(store.lastError == "Resolved \"file.txt\", but left the original it replaced at /tmp/b/.helix-replaced-\(token): permission denied. Delete that path by hand.")
     }
 
     @Test("Bulk resolve counts a leftover set-aside original as resolved and names it")
@@ -2164,7 +2164,9 @@ struct ConflictResolutionTests {
         let cmdRecorder = CommandRecorder()
         let transport = FileTransport { executable, arguments in
             let output = try await cmdRecorder.execute(executable, arguments)
-            if executable == "/bin/rm", arguments.last?.hasPrefix("/tmp/b/a.txt") == true {
+            if executable == "/bin/rm", let setAside = cmdRecorder.commands.first(where: {
+                $0.executable == "/bin/mv" && $0.arguments.first == "/tmp/b/a.txt"
+            })?.arguments.last, arguments.last == setAside {
                 throw CLIError(exitCode: 1, stderr: "permission denied")
             }
             return output
@@ -2176,7 +2178,7 @@ struct ConflictResolutionTests {
         let token = try replaceToken(copiedBeside: "/tmp/b/a.txt", in: cmdRecorder.commands)
         #expect(recorder.calls == ["syncPause:sync_1", "syncResume:sync_1", "syncFlush:sync_1"])
         #expect(cmdRecorder.commands.filter { $0.executable == "/bin/cp" }.count == 2)
-        #expect(store.lastError == "Resolved \"a.txt\", but left the original it replaced at /tmp/b/a.txt.helix-replaced-\(token): permission denied. Delete that path by hand.")
+        #expect(store.lastError == "Resolved \"a.txt\", but left the original it replaced at /tmp/b/.helix-replaced-\(token): permission denied. Delete that path by hand.")
     }
 
     /// A transport whose move into place fails while every check afterwards finds something at every path,
@@ -2205,7 +2207,7 @@ struct ConflictResolutionTests {
 
         let token = try replaceToken(copiedBeside: "/tmp/b/file.txt", in: cmdRecorder.commands)
         #expect(recorder.calls == ["syncPause:sync_1"])
-        #expect(store.lastError == "Could not move /tmp/b/file.txt.helix-incoming-\(token) into place at /tmp/b/file.txt: permission denied. Nothing was deleted: look for the original at /tmp/b/file.txt.helix-replaced-\(token) and for the replacement at /tmp/b/file.txt.helix-incoming-\(token). The session \"s1\" was left paused so that sync cannot overwrite or delete those paths. Put \"file.txt\" in order, then resume the session.")
+        #expect(store.lastError == "Could not move /tmp/b/.helix-incoming-\(token) into place at /tmp/b/file.txt: permission denied. Nothing was deleted: look for the original at /tmp/b/.helix-replaced-\(token) and for the replacement at /tmp/b/.helix-incoming-\(token). The session \"s1\" was left paused so that sync cannot overwrite or delete those paths. Put \"file.txt\" in order, then resume the session.")
     }
 
     @Test("Bulk resolve stops at a replacement that leaves the destination unverified and keeps the session paused")
@@ -2224,12 +2226,13 @@ struct ConflictResolutionTests {
         let token = try replaceToken(copiedBeside: "/tmp/b/a.txt", in: cmdRecorder.commands)
         #expect(recorder.calls == ["syncPause:sync_1"])
         #expect(cmdRecorder.commands.filter { $0.arguments.contains { $0.contains("b.txt") } }.isEmpty)
-        #expect(store.lastError == "Could not move /tmp/b/a.txt.helix-incoming-\(token) into place at /tmp/b/a.txt: permission denied. Nothing was deleted: look for the original at /tmp/b/a.txt.helix-replaced-\(token) and for the replacement at /tmp/b/a.txt.helix-incoming-\(token). The session \"s1\" was left paused so that sync cannot overwrite or delete those paths. Put \"a.txt\" in order, then resume the session. 1 of 2 conflicts was not attempted.")
+        #expect(store.lastError == "Could not move /tmp/b/.helix-incoming-\(token) into place at /tmp/b/a.txt: permission denied. Nothing was deleted: look for the original at /tmp/b/.helix-replaced-\(token) and for the replacement at /tmp/b/.helix-incoming-\(token). The session \"s1\" was left paused so that sync cannot overwrite or delete those paths. Put \"a.txt\" in order, then resume the session. 1 of 2 conflicts was not attempted.")
     }
 
     /// The hold message for a file conflict in session "s1" whose move into place at `destination` failed.
     private func holdMessage(root: String, destination: String, token: String) -> String {
-        "Could not move \(destination).helix-incoming-\(token) into place at \(destination): permission denied. Nothing was deleted: look for the original at \(destination).helix-replaced-\(token) and for the replacement at \(destination).helix-incoming-\(token). The session \"s1\" was left paused so that sync cannot overwrite or delete those paths. Put \"\(root)\" in order, then resume the session."
+        let parent = (destination as NSString).deletingLastPathComponent
+        return "Could not move \(parent)/.helix-incoming-\(token) into place at \(destination): permission denied. Nothing was deleted: look for the original at \(parent)/.helix-replaced-\(token) and for the replacement at \(parent)/.helix-incoming-\(token). The session \"s1\" was left paused so that sync cannot overwrite or delete those paths. Put \"\(root)\" in order, then resume the session."
     }
 
     @Test("A poll after an unverified replacement clears the passing error and keeps the hold with its message")
@@ -2348,7 +2351,7 @@ struct ConflictResolutionTests {
         let copies = cmdRecorder.commands.filter { $0.executable == "/bin/cp" }
         let tokenA = try replaceToken(copiedBeside: "/tmp/b/a.txt", in: [copies[0]])
         let tokenB = try replaceToken(copiedBeside: "/tmp/b/b.txt", in: [copies[1]])
-        let notices = ["sync_1": "Resolved \"a.txt\", but left the original it replaced at /tmp/b/a.txt.helix-replaced-\(tokenA): permission denied. Delete that path by hand. Resolved \"b.txt\", but left the original it replaced at /tmp/b/b.txt.helix-replaced-\(tokenB): permission denied. Delete that path by hand."]
+        let notices = ["sync_1": "Resolved \"a.txt\", but left the original it replaced at /tmp/b/.helix-replaced-\(tokenA): permission denied. Delete that path by hand. Resolved \"b.txt\", but left the original it replaced at /tmp/b/.helix-replaced-\(tokenB): permission denied. Delete that path by hand."]
         #expect(store.lastError == nil)
         #expect(store.leftoverNotices == notices)
         #expect(store.sessionHolds == [:])
@@ -2363,7 +2366,7 @@ struct ConflictResolutionTests {
 
     @Test("Two resolves started together on one session run one after the other, in the order requested")
     @MainActor
-    func resolvesOnOneSessionTakeTurns() async {
+    func resolvesOnOneSessionTakeTurns() async throws {
         defer { removeDefaults() }
         let c1 = Conflict(root: "a.txt", alphaChanges: [], betaChanges: [])
         let c2 = Conflict(root: "b.txt", alphaChanges: [], betaChanges: [])
@@ -2391,7 +2394,16 @@ struct ConflictResolutionTests {
             "syncPause:sync_1", "syncResume:sync_1", "syncFlush:sync_1",
             "syncPause:sync_1", "syncResume:sync_1", "syncFlush:sync_1",
         ])
-        let roots = cmdRecorder.commands.map { $0.arguments.contains { $0.contains("a.txt") } ? "a.txt" : "b.txt" }
+        let copies = cmdRecorder.commands.filter { $0.executable == "/bin/cp" }
+        let references = try ["a.txt", "b.txt"].map { root in
+            let copy = try #require(copies.first { $0.arguments.dropLast().last == "/tmp/a/\(root)" })
+            return (root, try replaceToken(copiedBeside: "/tmp/b/\(root)", in: [copy]))
+        }
+        let roots = cmdRecorder.commands.map { command in
+            references.first { root, token in
+                command.arguments.contains { $0.hasSuffix("/\(root)") || $0.hasSuffix(token) }
+            }?.0
+        }
         #expect(roots == Array(repeating: "a.txt", count: 7) + Array(repeating: "b.txt", count: 7))
     }
 
@@ -2644,7 +2656,7 @@ struct ConflictResolutionTests {
         let resolve = Task { _ = await firstLaunch.resolveConflict(session: paused, conflict: conflict, winner: .alpha) }
         await gate.reached()
         let token = try replaceToken(copiedBeside: "/tmp/b/file.txt", in: cmdRecorder.commands)
-        let hold = "Helix quit while replacing /tmp/b/file.txt; check /tmp/b/file.txt.helix-incoming-\(token) and /tmp/b/file.txt.helix-replaced-\(token)"
+        let hold = "Helix quit while replacing /tmp/b/file.txt; check /tmp/b/.helix-incoming-\(token) and /tmp/b/.helix-replaced-\(token)"
         let provider = RecordingProvider(syncSessions: [paused])
         let nextRecorder = CommandRecorder()
         let nextLaunch = SessionStore(provider: provider, fileTransport: FileTransport(execute: nextRecorder.execute), defaults: defaults)

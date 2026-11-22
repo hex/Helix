@@ -163,7 +163,10 @@ private final class Scenario {
     /// Paths under either root that a conflict replacement names as its incoming copy or set-aside original.
     func replacementLeftovers() throws -> [String] {
         let paths = try tree(alpha).keys.map { "alpha/\($0)" } + tree(beta).keys.map { "beta/\($0)" }
-        return paths.filter { $0.contains(".helix-incoming-") || $0.contains(".helix-replaced-") }.sorted()
+        return paths.filter { path in
+            let name = (path as NSString).lastPathComponent
+            return name.hasPrefix(".helix-incoming-") || name.hasPrefix(".helix-replaced-")
+        }.sorted()
     }
 
     /// Checks what a finished resolve leaves: no replacement leftovers, the session unpaused, no hold or notice.
