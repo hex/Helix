@@ -100,6 +100,28 @@ struct SyncEndpointPair: Equatable, Sendable {
             || (lhs.alpha == rhs.beta && lhs.beta == rhs.alpha)
     }
 
+    func matchesForCreation(_ other: Self) -> Bool {
+        canonicalCreationPair == other.canonicalCreationPair
+    }
+
+    private init(alpha: Location, beta: Location) {
+        self.alpha = alpha
+        self.beta = beta
+    }
+
+    private var canonicalCreationPair: Self {
+        Self(alpha: Self.normalizingTemporaryPath(alpha), beta: Self.normalizingTemporaryPath(beta))
+    }
+
+    private static func normalizingTemporaryPath(_ location: Location) -> Location {
+        let (transport, user, host, port, path) = location
+        // macOS exposes the same temporary directory at both paths, even for an uncreated child.
+        guard transport == "local", let path, path == "/private/tmp" || path.hasPrefix("/private/tmp/") else {
+            return location
+        }
+        return (transport, user, host, port, String(path.dropFirst("/private".count)))
+    }
+
     private static func location(_ endpoint: Endpoint) -> Location {
         (endpoint.protocol_, endpoint.user, endpoint.host, endpoint.port, endpoint.path)
     }

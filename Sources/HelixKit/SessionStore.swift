@@ -418,7 +418,7 @@ public final class SessionStore {
     public func duplicateSyncSessionNames(alpha: EndpointURL, beta: EndpointURL) async throws -> [String] {
         let endpoints = SyncEndpointPair(alpha: alpha, beta: beta)
         return try await provider.syncList()
-            .filter { SyncEndpointPair($0) == endpoints }
+            .filter { endpoints.matchesForCreation(SyncEndpointPair($0)) }
             .map { $0.name ?? $0.identifier }
             .sorted()
     }

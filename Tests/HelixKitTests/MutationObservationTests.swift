@@ -149,7 +149,8 @@ struct MutationObservationTests {
     func manualResumeOverrideAppliesOnce() async throws {
         let target = makeSyncSession(id: "target", name: "Target", paused: true)
         let peer = makeSyncSession(id: "peer", name: "Other")
-        let commands = MutationCommands(sessions: [target, peer])
+        let different = makeSyncSession(id: "different", name: "Different", paused: true)
+        let commands = MutationCommands(sessions: [target, peer, different])
         let fixture = try MutationStoreFixture(commands: commands)
         defer { fixture.cleanUp() }
         let hold = "Check the conflict files before resuming."
@@ -166,28 +167,55 @@ struct MutationObservationTests {
             return
         }
         #expect(overlap.localizedDescription == "Cannot resume \"Target\" while \"Other\" is running on the same endpoints.")
-        #expect(await commands.sessions.map(\.paused) == [true, false])
+        #expect(await commands.sessions.map(\.paused) == [true, false, true])
         #expect(store.sessionHolds == [target.identifier: hold])
 
+        guard case .overlap(let differentRefusal)? = await store.requestSyncResume(different.identifier, overriding: overlap) else {
+            Issue.record("The approval for Target must leave Different paused")
+            return
+        }
+        #expect(differentRefusal.message == "Cannot resume \"Different\" while \"Other\" is running on the same endpoints.")
+        #expect(await commands.sessions.map(\.paused) == [true, false, true])
+
         #expect(await store.requestSyncResume(target.identifier, confirmingHold: hold, overriding: overlap) == nil)
-        #expect(await commands.sessions.map(\.paused) == [false, false])
+        #expect(await commands.sessions.map(\.paused) == [false, false, true])
         #expect(store.sessionHolds.isEmpty)
 
         await store.pauseSync(target.identifier)
-        #expect(await store.requestSyncResume(target.identifier, overriding: overlap) != nil)
-        #expect(await commands.sessions.map(\.paused) == [true, false])
+        guard case .overlap(let freshApproval)? = await store.requestSyncResume(target.identifier, overriding: overlap) else {
+            Issue.record("A spent approval must produce another refusal")
+            return
+        }
+        #expect(freshApproval.message == overlap.message)
+        #expect(await commands.sessions.map(\.paused) == [true, false, true])
+
+        await store.pauseSync(peer.identifier)
+        let replacementPeer = makeSyncSession(id: "replacement-peer", name: "Replacement Peer")
+        await commands.addSession(replacementPeer)
+        guard case .overlap(let changedPeerRefusal)? = await store.requestSyncResume(target.identifier, overriding: freshApproval) else {
+            Issue.record("Approval for the first peer must leave Target paused beside the replacement peer")
+            return
+        }
+        #expect(changedPeerRefusal.message == "Cannot resume \"Target\" while \"Replacement Peer\" is running on the same endpoints.")
+        #expect(await commands.sessions.map(\.paused) == [true, true, true, false])
     }
 
-    @Test("New Sync finds an existing paused session with the same endpoints in reverse order")
-    func warnsAboutExistingSyncEndpoints() async throws {
-        let existing = makeSyncSession(id: "existing", name: "Existing", paused: true)
+    @Test("New Sync finds paused sessions through either temporary path spelling in reverse order", arguments: [false, true])
+    func warnsAboutExistingSyncEndpoints(listedWithPrivatePrefix: Bool) async throws {
+        let suffix = "helix-duplicate-warning-\(UUID())"
+        let alias = "/tmp/\(suffix)"
+        let resolved = "/private/tmp/\(suffix)"
+        let existing = makeSyncSession(
+            id: "existing", name: "Existing", paused: true,
+            alpha: makeEndpoint(path: listedWithPrivatePrefix ? resolved : alias)
+        )
         let other = makeSyncSession(id: "other", name: "Other", beta: makeEndpoint(path: "/tmp/other"))
         let commands = MutationCommands(sessions: [existing, other])
         let fixture = try MutationStoreFixture(commands: commands)
         defer { fixture.cleanUp() }
 
         let names = try await fixture.store.duplicateSyncSessionNames(
-            alpha: .local(path: "/tmp/b"), beta: .local(path: "/tmp/a")
+            alpha: .local(path: "/tmp/b"), beta: .local(path: listedWithPrivatePrefix ? alias : resolved)
         )
 
         #expect(names == ["Existing"])
@@ -209,6 +237,36 @@ struct MutationObservationTests {
         #expect(notice == nil)
         #expect(await commands.sessions.map(\.identifier) == [peer.identifier, MutationCommands.replacementID])
         #expect(await commands.sessions.map(\.paused) == [false, false])
+    }
+
+    @Test("An edit cannot restore a late overlap or carry approval to changed endpoints", arguments: [false, true])
+    func editKeepsOriginalWhenOverlapCannotBeRestored(changedEndpoints: Bool) async throws {
+        let original = makeSyncSession(id: "original", name: "Project")
+        let beta = makeEndpoint(path: changedEndpoints ? "/tmp/changed" : "/tmp/b")
+        let peer = makeSyncSession(id: "peer", name: "Other", paused: !changedEndpoints, beta: beta)
+        let previous = makeSyncSession(id: "previous", name: "Previous")
+        let commands = MutationCommands(
+            sessions: changedEndpoints ? [original, previous, peer] : [original, peer],
+            startingPeerOnPause: changedEndpoints ? nil : peer.identifier, replacementBeta: beta
+        )
+        let fixture = try MutationStoreFixture(commands: commands)
+        defer { fixture.cleanUp() }
+
+        await fixture.store.recreateSync(
+            original, options: SyncCreateOptions(from: original), alpha: "/tmp/a", beta: try #require(beta.path)
+        )
+
+        let sessions = await commands.sessions
+        let resumeCommands = await commands.calls.filter { $0.prefix(2) == ["sync", "resume"] }
+        if changedEndpoints {
+            #expect(sessions.map(\.identifier) == [original.identifier, previous.identifier, peer.identifier])
+            #expect(sessions.map(\.paused) == [false, false, false])
+            #expect(resumeCommands == [["sync", "resume", original.identifier]])
+        } else {
+            #expect(sessions.map(\.identifier) == [original.identifier, peer.identifier])
+            #expect(sessions.map(\.paused) == [true, false])
+            #expect(resumeCommands.isEmpty)
+        }
     }
 
     @Test("Resume protects the oldest original after the edit records disappear")
@@ -334,7 +392,7 @@ private struct UnreadableDaemonProcess: DaemonProcess {
     func setBackgroundPriority(_ enabled: Bool, pid: ProcessID) async throws {}
 }
 
-private actor MutationCommands {
+actor MutationCommands {
     enum Interruption: Equatable {
         case none, pauseSucceeded, pauseFailed, recoveryLeavesReplacementRunning
         case resumeConnectFailure(String), resumeDeadline(String)
@@ -344,13 +402,20 @@ private actor MutationCommands {
     static let replacementID = "sync_" + String(repeating: "R", count: 43)
     let interruption: Interruption
     private let stopGate: Gate?
+    private let startingPeerOnPause: String?
+    private let replacementBeta: Endpoint
     private(set) var calls: [[String]] = []
     private(set) var sessions: [SyncSession]
 
-    init(sessions: [SyncSession] = [], interruption: Interruption = .none, stopGate: Gate? = nil) {
+    init(
+        sessions: [SyncSession] = [], interruption: Interruption = .none, stopGate: Gate? = nil,
+        startingPeerOnPause: String? = nil, replacementBeta: Endpoint = makeEndpoint(path: "/tmp/b")
+    ) {
         self.sessions = sessions
         self.interruption = interruption
         self.stopGate = stopGate
+        self.startingPeerOnPause = startingPeerOnPause
+        self.replacementBeta = replacementBeta
     }
 
     nonisolated var cli: CLI {
@@ -369,11 +434,12 @@ private actor MutationCommands {
         case ["forward", "list"]:
             return "[]"
         case ["sync", "create"]:
-            sessions.append(makeSyncSession(id: Self.replacementID, name: "Edited Project", paused: true))
+            sessions.append(makeSyncSession(id: Self.replacementID, name: "Edited Project", paused: true, beta: replacementBeta))
             return "Created session \(Self.replacementID)"
         case ["sync", "pause"]:
             if identifier == Self.replacementID && interruption == .recoveryLeavesReplacementRunning { break }
             if interruption != .pauseFailed { setPaused(true, identifier: identifier) }
+            if let startingPeerOnPause { setPaused(false, identifier: startingPeerOnPause) }
             if interruption == .pauseSucceeded || interruption == .pauseFailed { throw timeout }
             if interruption == .pauseSaveFailure { throw CLIError(exitCode: 1, stderr: "unable to save session") }
         case ["sync", "resume"]:
@@ -385,6 +451,8 @@ private actor MutationCommands {
                 throw CLIError(exitCode: 1, stderr: "unable to connect to beta: connection refused")
             }
             if interruption == .resumeDeadline(identifier) { throw timeout }
+        case ["sync", "flush"]:
+            break
         case ["sync", "terminate"]:
             if identifier == Self.replacementID && interruption == .recoveryLeavesReplacementRunning {
                 setPaused(false, identifier: identifier)
