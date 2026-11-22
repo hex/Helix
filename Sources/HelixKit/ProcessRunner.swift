@@ -11,6 +11,7 @@ public enum CommandDeadline {
     public static let transfer: Duration = .seconds(900)
     public static let quitDrain: Duration = .seconds(3)
     static let terminationGrace: Duration = .milliseconds(250)
+    static let reapBudget: Duration = .milliseconds(100)
 }
 
 public struct ProcessDeadlineError: LocalizedError, Sendable {
@@ -52,11 +53,20 @@ public actor ProcessRunner {
     private var drainWaiters: [UUID: DrainWaiter] = [:]
     private var children: [ObjectIdentifier: RunningChild] = [:]
     private var isShuttingDown = false
+    private let sendSignal: @Sendable (pid_t, Int32) -> Void
     private let waitForDeadline: @Sendable (SuspendingClock.Instant) async throws -> Void
 
     init(waitForDeadline: @escaping @Sendable (SuspendingClock.Instant) async throws -> Void = {
         try await SuspendingClock().sleep(until: $0)
     }) {
+        self.init(sendSignal: { _ = kill($0, $1) }, waitForDeadline: waitForDeadline)
+    }
+
+    init(
+        sendSignal: @escaping @Sendable (pid_t, Int32) -> Void,
+        waitForDeadline: @escaping @Sendable (SuspendingClock.Instant) async throws -> Void
+    ) {
+        self.sendSignal = sendSignal
         self.waitForDeadline = waitForDeadline
     }
 
@@ -66,16 +76,12 @@ public actor ProcessRunner {
         guard !isShuttingDown else { throw CancellationError() }
 
         let child = RunningChild(
-            executablePath: executablePath, arguments: arguments, deadline: deadline, waitForDeadline: waitForDeadline
-        )
-        let identifier = ObjectIdentifier(child)
-        children[identifier] = child
-        defer {
-            children.removeValue(forKey: identifier)
-            if children.isEmpty {
-                for waiter in Array(drainWaiters.keys) { finishDrain(waiter) }
-            }
+            executablePath: executablePath, arguments: arguments, deadline: deadline,
+            waitForDeadline: waitForDeadline, sendSignal: sendSignal
+        ) { [weak self] identifier in
+            await self?.childFinished(identifier)
         }
+        children[ObjectIdentifier(child)] = child
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 child.launch(continuation)
@@ -124,6 +130,13 @@ public actor ProcessRunner {
         return size == 0 || info.kp_proc.p_stat == Int8(SZOMB)
     }
 
+    private func childFinished(_ identifier: ObjectIdentifier) {
+        children.removeValue(forKey: identifier)
+        if children.isEmpty {
+            for waiter in Array(drainWaiters.keys) { finishDrain(waiter) }
+        }
+    }
+
     private func finishDrain(_ id: UUID) {
         guard let waiter = drainWaiters.removeValue(forKey: id) else { return }
         waiter.timer.cancel()
@@ -138,6 +151,8 @@ private final class RunningChild: @unchecked Sendable {
     private let executablePath: String
     private let deadline: Duration
     private let waitForDeadline: @Sendable (SuspendingClock.Instant) async throws -> Void
+    private let sendSignal: @Sendable (pid_t, Int32) -> Void
+    private let didFinish: @Sendable (ObjectIdentifier) async -> Void
     private let stdoutPipe = Pipe()
     private let stderrPipe = Pipe()
 
@@ -155,11 +170,15 @@ private final class RunningChild: @unchecked Sendable {
 
     init(
         executablePath: String, arguments: [String], deadline: Duration,
-        waitForDeadline: @escaping @Sendable (SuspendingClock.Instant) async throws -> Void
+        waitForDeadline: @escaping @Sendable (SuspendingClock.Instant) async throws -> Void,
+        sendSignal: @escaping @Sendable (pid_t, Int32) -> Void,
+        didFinish: @escaping @Sendable (ObjectIdentifier) async -> Void
     ) {
         self.executablePath = executablePath
         self.deadline = deadline
         self.waitForDeadline = waitForDeadline
+        self.sendSignal = sendSignal
+        self.didFinish = didFinish
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = arguments
         process.standardOutput = stdoutPipe
@@ -241,14 +260,19 @@ private final class RunningChild: @unchecked Sendable {
             self.signal(SIGKILL)
             self.escalating = false
             self.finishIfReady()
+            if !self.finished {
+                self.queue.asyncAfter(deadline: .now() + CommandDeadline.reapBudget.timeInterval) {
+                    self.takeContinuation()?.resume(throwing: error)
+                }
+            }
         }
     }
 
     private func signal(_ signal: Int32) {
         if let processGroup {
-            kill(-processGroup, signal)
+            sendSignal(-processGroup, signal)
         } else if exitStatus == nil, process.isRunning {
-            kill(process.processIdentifier, signal)
+            sendSignal(process.processIdentifier, signal)
         }
     }
 
@@ -293,13 +317,21 @@ private final class RunningChild: @unchecked Sendable {
 
     private func complete(_ result: Result<String, Error>) {
         finished = true
-        deadlineTimer?.cancel()
-        deadlineTimer = nil
         process.terminationHandler = nil
         channels.removeAll()
+        let waiting = takeContinuation()
+        Task { [didFinish, identifier = ObjectIdentifier(self)] in
+            await didFinish(identifier)
+            waiting?.resume(with: result)
+        }
+    }
+
+    private func takeContinuation() -> CheckedContinuation<String, Error>? {
+        deadlineTimer?.cancel()
+        deadlineTimer = nil
         let waiting = continuation
         continuation = nil
-        waiting?.resume(with: result)
+        return waiting
     }
 }
 

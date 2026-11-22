@@ -111,6 +111,41 @@ struct ProcessDeadlineTests {
         #expect(fixtureIsGone(pid))
     }
 
+    @Test("A deadline returns while a child that cannot exit is still tracked")
+    func deadlineReturnsWhileChildIsAlive() async throws {
+        let pidFile = fixturePIDFile()
+        defer { try? FileManager.default.removeItem(at: pidFile) }
+        let clock = Gate()
+        let runner = ProcessRunner(sendSignal: { _, _ in }) { _ in await clock.pass() }
+        let call = Task {
+            try await runner.run(
+                executablePath: "/bin/sh",
+                arguments: ["-c", "printf '%s\n' \"$$\" > \"$1\"; exec /bin/sleep 8", "helix-test", pidFile.path],
+                deadline: .seconds(1)
+            )
+        }
+        defer {
+            call.cancel()
+            Task { await clock.open() }
+        }
+        let pid = try await processIdentifier(writtenTo: pidFile)
+        defer { endFixture(pid) }
+        await clock.open()
+
+        let failure = await deadlineFailure(of: call)
+
+        #expect(failure == "/bin/sh exceeded its deadline of 1.0 seconds.")
+        #expect(!fixtureIsGone(pid))
+        let waiting = await runner.terminateAll(within: .zero)
+        #expect(waiting.interrupted == 1)
+        #expect(waiting.unfinished == 1)
+
+        endFixture(pid)
+        let drained = await runner.terminateAll(within: .seconds(2))
+        #expect(drained.unfinished == 0)
+        #expect(fixtureIsGone(pid))
+    }
+
     @Test("Cancellation kills a child that ignores SIGTERM")
     func cancellationEscalatesToKill() async throws {
         let pidFile = fixturePIDFile()
