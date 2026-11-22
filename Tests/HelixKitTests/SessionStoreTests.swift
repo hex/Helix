@@ -884,33 +884,27 @@ struct RecreateSessionTests {
         let defaults = try #require(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let original = makeSyncSession(id: "sync_original", name: "project")
-        let replacement = makeSyncSession(id: "sync_" + String(repeating: "J", count: 43), name: "project", paused: true)
-        let (pausedOriginal, _) = stagedSyncEdit(original)
-        let provider = RecordingProvider(
-            syncSessions: [original], sessionsAfterCreate: [pausedOriginal, replacement],
-            beforeSyncResume: { identifier in
-                if identifier == replacement.identifier {
-                    if cancelled { throw CancellationError() }
-                    throw ProcessDeadlineError(executablePath: "/usr/bin/mutagen", deadline: .seconds(15))
-                }
-            }
+        let replacement = MutationCommands.replacementID
+        let commands = MutationCommands(
+            sessions: [original], interruption: .editRecoveryInterrupted(cancelled: cancelled),
+            replacementBeta: makeEndpoint(path: "/tmp/b", connected: false)
         )
-        let store = SessionStore(provider: provider, defaults: defaults)
-        await store.recreateSync(original, options: SyncCreateOptions(from: original), alpha: "/srv/project", beta: "/srv/mirror")
+        let store = SessionStore(provider: commands.cli, defaults: defaults)
+        await store.recreateSync(original, options: SyncCreateOptions(from: original), alpha: "/tmp/a", beta: "/tmp/b")
 
         let saved = defaults.dictionary(forKey: "syncEditInProgress") as? [String: String]
         #expect(saved?["original"] == original.identifier)
-        #expect(saved?["replacement"] == replacement.identifier)
-        let pair = [original.identifier: replacement.identifier]
+        #expect(saved?["replacement"] == replacement)
+        let pair = [original.identifier: replacement]
         await store.resumeSync(original.identifier)
         #expect(store.leftoverSyncOriginals == pair)
-        #expect(store.lastError == "Original session \(original.identifier) cannot resume while its edited replacement \(replacement.identifier) is listed.")
-        #expect(!provider.calls.contains("syncResume:sync_original"))
+        #expect(store.lastError == "Original session \(original.identifier) cannot resume while its edited replacement \(replacement) is listed.")
+        #expect(!(await commands.calls).contains(["sync", "resume", original.identifier]))
 
-        let relaunched = SessionStore(provider: provider, defaults: defaults)
+        let relaunched = SessionStore(provider: commands.cli, defaults: defaults)
         await relaunched.refresh()
-        #expect(relaunched.interruptedEditNotice?.contains(replacement.identifier) == true)
-        #expect(relaunched.leftoverSyncOriginals == [original.identifier: replacement.identifier])
+        #expect(relaunched.interruptedEditNotice?.contains(replacement) == true)
+        #expect(relaunched.leftoverSyncOriginals == pair)
     }
 
     @Test("A failed replacement start removes it before resuming the original")

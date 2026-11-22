@@ -572,16 +572,21 @@ public final class SessionStore {
                 return await finishSyncEdit("\(message) \(recovery.message)")
             }
             do {
-                try await provider.syncResume(replacement, context: .restoring(restoration))
-            } catch {
-                let message = "Could not start the edited session: \(error.localizedDescription)."
-                if error.isCommandInterruption {
-                    keepEditRecord = true
-                    return reportInterruptedEdit(message, original: original, replacement: replacement)
-                }
-                let recovery = await recoverSyncEdit(
-                    original: original, replacement: replacement, activationAttempted: true, restoration: restoration
+                try await provider.syncResume(
+                    replacement, context: .restoring(restoration), readback: .connectedEndpoints
                 )
+            } catch {
+                let message = if error.isCommandInterruption {
+                    "Could not confirm that both edited session endpoints were connected after Resume was interrupted. \(error.localizedDescription)"
+                } else {
+                    "Could not start the edited session: \(error.localizedDescription)."
+                }
+                // Recovery still needs to run if the caller that awaited Resume was cancelled.
+                let recovery = await Task { @MainActor in
+                    await recoverSyncEdit(
+                        original: original, replacement: replacement, activationAttempted: true, restoration: restoration
+                    )
+                }.value
                 keepEditRecord = !recovery.observedEnd
                 if keepEditRecord { return reportInterruptedEdit("\(message) \(recovery.message)", original: original, replacement: replacement) }
                 return await finishSyncEdit("\(message) \(recovery.message)")

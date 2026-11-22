@@ -41,13 +41,14 @@ struct SessionCommandsUnavailable: LocalizedError {
 }
 
 enum ObservedMutationState: Equatable {
-    case absent, paused, running, unknown
+    case absent, paused, running, unconnected, unknown
 
     var description: String {
         switch self {
         case .absent: "is no longer listed"
         case .paused: "is paused"
         case .running: "is still running"
+        case .unconnected: "does not show both endpoints connected"
         case .unknown: "could not be verified"
         }
     }
@@ -187,6 +188,10 @@ final class ManagedSessionProvider {
         case managed, starting, stopping, stopped
     }
 
+    enum ResumeReadback {
+        case unpaused, connectedEndpoints
+    }
+
     var control = Control.managed
     var unavailable: SessionCommandsUnavailable? {
         control == .managed ? nil : SessionCommandsUnavailable()
@@ -266,13 +271,19 @@ final class ManagedSessionProvider {
         await observeSyncState(identifier, on: underlying)
     }
 
-    private func observeSyncState(_ identifier: String, on provider: any SessionProvider) async -> ObservedMutationState {
+    private func observeSyncState(
+        _ identifier: String, on provider: any SessionProvider, readback: ResumeReadback = .unpaused
+    ) async -> ObservedMutationState {
         // A cancelled caller still needs an answer, and a list must respect the Stop fence.
         await Task { @MainActor in
             do {
                 let sessions = try await command { _ in try await provider.syncList() }
                 guard let session = sessions.first(where: { $0.identifier == identifier }) else { return .absent }
-                return session.paused ? .paused : .running
+                if session.paused { return .paused }
+                if readback == .connectedEndpoints, session.alpha.connected != true || session.beta.connected != true {
+                    return .unconnected
+                }
+                return .running
             } catch {
                 return .unknown
             }
@@ -295,7 +306,9 @@ final class ManagedSessionProvider {
         return snapshot
     }
 
-    func syncResume(_ identifier: String, context: SyncResumeContext = .ordinary) async throws {
+    func syncResume(
+        _ identifier: String, context: SyncResumeContext = .ordinary, readback: ResumeReadback = .unpaused
+    ) async throws {
         // Keep the list and the command together across concurrent resumes.
         if resuming { await withCheckedContinuation { waitingToResume.append($0) } }
         resuming = true
@@ -337,7 +350,7 @@ final class ManagedSessionProvider {
             try await confirmMutation(.running) {
                 try await provider.syncResume(identifier)
             } observe: {
-                await observeSyncState(identifier, on: provider)
+                await observeSyncState(identifier, on: provider, readback: readback)
             }
         }
     }
