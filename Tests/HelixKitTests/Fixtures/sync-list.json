@@ -6,8 +6,8 @@
         "creatingVersion": "0.18.1",
         "alpha": {
             "protocol": "ssh",
-            "user": "hex",
-            "host": "hex-macbookair.local",
+            "user": "alice",
+            "host": "sync.example.test",
             "path": "~/.claude-sessions",
             "ignore": {},
             "symlink": {},
@@ -22,7 +22,7 @@
         },
         "beta": {
             "protocol": "local",
-            "path": "/Users/alex.geana/.claude-sessions",
+            "path": "/Users/bob/.claude-sessions",
             "ignore": {},
             "symlink": {},
             "watch": {},

@@ -63,14 +63,14 @@ struct SyncCommandBuilderTests {
 
     @Test("SSH endpoint URL formatting")
     func sshEndpointURL() {
-        let url = EndpointURL.ssh(user: "hex", host: "example.com", port: nil, path: "~/project")
-        #expect(url.formatted == "hex@example.com:~/project")
+        let url = EndpointURL.ssh(user: "alice", host: "example.com", port: nil, path: "~/project")
+        #expect(url.formatted == "alice@example.com:~/project")
     }
 
     @Test("SSH endpoint URL with port")
     func sshEndpointURLWithPort() {
-        let url = EndpointURL.ssh(user: "hex", host: "example.com", port: 2222, path: "~/project")
-        #expect(url.formatted == "hex@example.com:2222:~/project")
+        let url = EndpointURL.ssh(user: "alice", host: "example.com", port: 2222, path: "~/project")
+        #expect(url.formatted == "alice@example.com:2222:~/project")
     }
 
     @Test("SSH endpoint URL without user")
@@ -216,7 +216,7 @@ struct SyncCreateOptionsFromSessionTests {
             creationTime: "2026-01-01T00:00:00Z", creatingVersion: "0.18.1",
             name: "roundtrip", labels: nil, paused: false, status: "watching", successfulCycles: 5,
             mode: "one-way-safe",
-            alpha: Endpoint(protocol_: "ssh", user: "hex", host: "server.com", port: nil, path: "~/proj",
+            alpha: Endpoint(protocol_: "ssh", user: "alice", host: "server.example.test", port: nil, path: "~/proj",
                             connected: true, scanned: true, directories: 10, files: 50, totalFileSize: 1000),
             beta: Endpoint(protocol_: "local", user: nil, host: nil, port: nil, path: "/tmp/b",
                            connected: true, scanned: true, directories: 10, files: 50, totalFileSize: 1000),
@@ -240,7 +240,7 @@ struct SyncCreateOptionsFromSessionTests {
         #expect(args.contains("ignore"))
         #expect(args.contains("--ignore"))
         #expect(args.contains("**/.git"))
-        #expect(args.contains("hex@server.com:~/proj"))
+        #expect(args.contains("alice@server.example.test:~/proj"))
         #expect(args.contains("/tmp/b"))
     }
 }

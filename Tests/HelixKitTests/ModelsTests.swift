@@ -153,8 +153,8 @@ struct SyncSessionTests {
         let session = try decoder.decode([SyncSession].self, from: data).first!
 
         #expect(session.alpha.protocol_ == "ssh")
-        #expect(session.alpha.user == "hex")
-        #expect(session.alpha.host == "hex-macbookair.local")
+        #expect(session.alpha.user == "alice")
+        #expect(session.alpha.host == "sync.example.test")
         #expect(session.alpha.path == "~/.claude-sessions")
         #expect(session.alpha.connected == true)
         #expect(session.alpha.scanned == true)
@@ -171,7 +171,7 @@ struct SyncSessionTests {
         #expect(session.beta.protocol_ == "local")
         #expect(session.beta.user == nil)
         #expect(session.beta.host == nil)
-        #expect(session.beta.path == "/Users/alex.geana/.claude-sessions")
+        #expect(session.beta.path == "/Users/bob/.claude-sessions")
         #expect(session.beta.connected == true)
     }
 
@@ -276,8 +276,8 @@ struct ForwardSessionTests {
         #expect(session.source.protocol_ == "local")
         #expect(session.source.connected == true)
         #expect(session.destination.protocol_ == "ssh")
-        #expect(session.destination.user == "hex")
-        #expect(session.destination.host == "hex-macbookair.local")
+        #expect(session.destination.user == "alice")
+        #expect(session.destination.host == "sync.example.test")
     }
 
     @Test("Decodes empty forward list")
@@ -303,44 +303,44 @@ struct EndpointURLTests {
     func localEndpoint() {
         let endpoint = Endpoint(
             protocol_: "local", user: nil, host: nil, port: nil,
-            path: "/Users/alex/.claude-sessions",
+            path: "/Users/bob/.claude-sessions",
             connected: true, scanned: true, directories: 10, files: 50, totalFileSize: 1000
         )
         let url = endpoint.endpointURL
-        #expect(url.formatted == "/Users/alex/.claude-sessions")
+        #expect(url.formatted == "/Users/bob/.claude-sessions")
     }
 
     @Test("SSH endpoint reconstructs user@host:path URL")
     func sshEndpoint() {
         let endpoint = Endpoint(
-            protocol_: "ssh", user: "hex", host: "hex-macbookair.local", port: nil,
+            protocol_: "ssh", user: "alice", host: "sync.example.test", port: nil,
             path: "~/.claude-sessions",
             connected: true, scanned: true, directories: 10, files: 50, totalFileSize: 1000
         )
         let url = endpoint.endpointURL
-        #expect(url.formatted == "hex@hex-macbookair.local:~/.claude-sessions")
+        #expect(url.formatted == "alice@sync.example.test:~/.claude-sessions")
     }
 
     @Test("SSH endpoint with port includes port in URL")
     func sshEndpointWithPort() {
         let endpoint = Endpoint(
-            protocol_: "ssh", user: "deploy", host: "server.com", port: 2222,
+            protocol_: "ssh", user: "deploy", host: "server.example.test", port: 2222,
             path: "/var/www",
             connected: true, scanned: true, directories: 5, files: 20, totalFileSize: 500
         )
         let url = endpoint.endpointURL
-        #expect(url.formatted == "deploy@server.com:2222:/var/www")
+        #expect(url.formatted == "deploy@server.example.test:2222:/var/www")
     }
 
     @Test("SSH endpoint without user omits user@")
     func sshEndpointNoUser() {
         let endpoint = Endpoint(
-            protocol_: "ssh", user: nil, host: "server.com", port: nil,
+            protocol_: "ssh", user: nil, host: "server.example.test", port: nil,
             path: "/data",
             connected: true, scanned: true, directories: 1, files: 1, totalFileSize: 100
         )
         let url = endpoint.endpointURL
-        #expect(url.formatted == "server.com:/data")
+        #expect(url.formatted == "server.example.test:/data")
     }
 
     @Test("Docker endpoint reconstructs docker:// URL")
@@ -379,7 +379,7 @@ struct EdgeCaseTests {
           "connected":true,"scanned":false,"directories":0,"files":0,"totalFileSize":0},
           "mode":"two-way-safe","ignore":{},"symlink":{},"watch":{},
           "permissions":{},"compression":{},
-          "paused":false,"status":"connecting"}]
+          "paused":false,"status":"connecting-beta"}]
         """
         let sessions = try decoder.decode([SyncSession].self, from: json.data(using: .utf8)!)
         #expect(sessions[0].name == nil)
@@ -417,7 +417,7 @@ struct EdgeCaseTests {
           "connected":true,"scanned":false,"directories":0,"files":0,"totalFileSize":0},
           "mode":"one-way-safe","ignore":{},"symlink":{},"watch":{},
           "permissions":{},"compression":{},
-          "paused":true,"status":"halted"}]
+          "paused":true,"status":"disconnected"}]
         """
         let sessions = try decoder.decode([SyncSession].self, from: json.data(using: .utf8)!)
         #expect(sessions[0].ignore.paths == nil)

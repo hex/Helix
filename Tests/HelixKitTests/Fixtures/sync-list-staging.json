@@ -22,7 +22,7 @@
     "beta": {
       "protocol": "ssh",
       "user": "alice",
-      "host": "example.local",
+      "host": "staging.example.test",
       "path": "~/project",
       "ignore": {},
       "symlink": {},

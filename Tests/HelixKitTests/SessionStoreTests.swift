@@ -2889,7 +2889,7 @@ struct GitRepoStatusTests {
                 throw CLIError(exitCode: 1, stderr: "")
             }
             if joined.contains("git config --get remote.origin.url") {
-                return "https://github.com/example/repo.git\n"
+                return "https://git.example.test/example/repo.git\n"
             }
             return ""
         }
@@ -3098,7 +3098,7 @@ struct FixGitMismatchTests {
 
             let joined = args.joined(separator: " ")
             if joined.contains("/tmp/a") && joined.contains("remote.origin.url") {
-                return "https://github.com/example/repo.git\n"
+                return "https://git.example.test/example/repo.git\n"
             }
             if joined.contains("/tmp/a") && joined.contains("branch --show-current") {
                 return "main\n"
@@ -3130,7 +3130,7 @@ struct FixGitMismatchTests {
         // git remote add on beta
         let remoteAdd = commands[3].arguments.joined(separator: " ")
         #expect(remoteAdd.contains("/tmp/b") && remoteAdd.contains("git remote add origin"))
-        #expect(remoteAdd.contains("https://github.com/example/repo.git"))
+        #expect(remoteAdd.contains("https://git.example.test/example/repo.git"))
 
         // git fetch on beta
         let fetch = commands[4].arguments.joined(separator: " ")
@@ -3151,7 +3151,7 @@ struct FixGitMismatchTests {
 
             let joined = args.joined(separator: " ")
             if joined.contains("/tmp/b") && joined.contains("remote.origin.url") {
-                return "git@github.com:example/repo.git\n"
+                return "git@git.example.test:example/repo.git\n"
             }
             if joined.contains("/tmp/b") && joined.contains("branch --show-current") {
                 return "develop\n"
@@ -3230,7 +3230,7 @@ struct FixGitMismatchTests {
         let transport = FileTransport { _, args in
             let joined = args.joined(separator: " ")
             if joined.contains("remote.origin.url") {
-                return "https://github.com/hex/Helix.git\n"
+                return "https://git.example.test/alice/project.git\n"
             }
             if joined.contains("branch --show-current") {
                 return "main\n"
@@ -3244,7 +3244,7 @@ struct FixGitMismatchTests {
             gitCheck: GitRepoCheck(status: .alphaOnly, subpath: "helix")
         )
 
-        #expect(info.remoteURL == "https://github.com/hex/Helix.git")
+        #expect(info.remoteURL == "https://git.example.test/alice/project.git")
         #expect(info.branch == "main")
     }
 
@@ -3283,7 +3283,7 @@ struct FixGitMismatchTests {
 
             let joined = args.joined(separator: " ")
             if joined.contains("/tmp/a/helix") && joined.contains("remote.origin.url") {
-                return "https://github.com/example/repo.git\n"
+                return "https://git.example.test/example/repo.git\n"
             }
             if joined.contains("/tmp/a/helix") && joined.contains("branch --show-current") {
                 return "main\n"
@@ -3325,7 +3325,7 @@ struct FixGitMismatchTests {
 
             let joined = args.joined(separator: " ")
             if joined.contains("remote.origin.url") {
-                return "https://github.com/example/repo.git\n"
+                return "https://git.example.test/example/repo.git\n"
             }
             if joined.contains("branch --show-current") {
                 return "main\n"
