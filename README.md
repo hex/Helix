@@ -8,7 +8,7 @@
     <img src="https://img.shields.io/badge/platform-macOS-blue?style=flat-square" alt="Platform">
     <img src="https://img.shields.io/badge/requirements-macOS%2014%2B-fa4e49?style=flat-square" alt="Requirements">
     <img src="https://img.shields.io/badge/swift-5.9-F05138?style=flat-square" alt="Swift">
-    <img src="https://img.shields.io/badge/version-2026.11.0-blue?style=flat-square" alt="Version">
+    <img src="https://img.shields.io/badge/version-2026.11.1-blue?style=flat-square" alt="Version">
     <a href="https://helix.hexul.com"><img src="https://img.shields.io/badge/website-helix.hexul.com-4A90D9?style=flat-square" alt="Website"></a>
 </p>
 
@@ -17,7 +17,7 @@
 ## Features
 
 - **Menu bar status** -- Live icon reflects overall session health at a glance (healthy, syncing or connecting, a warning for conflicts or a session that cannot connect, errors)
-- **Menu bar menu** -- Right-click the icon to open Helix, pause every running sync session, pause them for the minutes you enter, or quit; Resume restores only the sessions Pause All paused, and a timed pause resumes on its own, even after you quit and reopen Helix. Helix records each confirmed pause before starting the next one, even if Mutagen reports a save error. When you edit a session paused by Pause All, the replacement inherits its pause and deadline. Pause All waits for a conflict resolve to finish before pausing that session. It asks you to wait if an edit is running. Resume checks for running sessions on the same endpoints. Local paths under `/tmp` and `/private/tmp` count as the same folder. If a manual Resume finds a match, Helix names it and offers Resume Anyway. A timed pause leaves the session paused and shows the reason until you dismiss it or resume the session. Edits and conflict resolves can restore sessions that were already running together when the operation began.
+- **Menu bar menu** -- Double-click the icon to open the main window. Right-click the icon to open Helix, pause every running sync session, pause them for the minutes you enter, or quit; Resume restores only the sessions Pause All paused, and a timed pause resumes on its own, even after you quit and reopen Helix. Helix records each confirmed pause before starting the next one, even if Mutagen reports a save error. When you edit a session paused by Pause All, the replacement inherits its pause and deadline. Pause All waits for a conflict resolve to finish before pausing that session. It asks you to wait if an edit is running. Resume checks for running sessions on the same endpoints. Local paths under `/tmp` and `/private/tmp` count as the same folder. If a manual Resume finds a match, Helix names it and offers Resume Anyway. A timed pause leaves the session paused and shows the reason until you dismiss it or resume the session. Edits and conflict resolves can restore sessions that were already running together when the operation began.
 - **Session dashboard** -- Browse, search, and filter all sync and forward sessions in a three-column window
 - **Connection errors** -- When a session cannot connect, the detail view shows mutagen's own reason under the status line
 - **Sync diagnostics** -- See scan and transition errors by endpoint and path. The detail view shows how many problems and conflicts Mutagen omitted, and running sessions with problems show a warning in the status icon.
