@@ -184,7 +184,15 @@ struct MainWindow: View {
 
     private var sessionList: some View {
         List {
-            if filteredSyncSessions.isEmpty && filteredForwardSessions.isEmpty {
+            if store.isMutagenStoppedByHelix {
+                ContentUnavailableView {
+                    Label("Mutagen Is Stopped", systemImage: "pause.circle")
+                } description: {
+                    Text("Choose Start in Settings to see your sessions.")
+                } actions: {
+                    SettingsLink { Text("Open Settings") }
+                }
+            } else if filteredSyncSessions.isEmpty && filteredForwardSessions.isEmpty {
                 ContentUnavailableView(
                     "No Sessions",
                     systemImage: "arrow.triangle.2.circlepath",

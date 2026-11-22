@@ -12,8 +12,8 @@
         },
         "destination": {
             "protocol": "ssh",
-            "user": "hex",
-            "host": "hex-macbookair.local",
+            "user": "alice",
+            "host": "sync.example.test",
             "connected": true
         },
         "sourceEndpoint": "tcp:localhost:8080",

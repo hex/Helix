@@ -496,10 +496,11 @@ public struct FileTransport: Sendable {
         "\(SSHCommand.login(user: user, host: host)):\(path)"
     }
 
-    /// Makes a path exactly one inert word for a POSIX shell.
+    /// Encodes one POSIX shell word with optional home expansion for endpoint paths.
     /// Single quotes stop every expansion; an embedded single quote is written as `'\''`.
     /// A leading `~/` becomes `"$HOME"/` followed by the single-quoted rest, so only `$HOME` expands.
-    static func shellWord(_ path: String) -> String {
+    static func shellWord(_ path: String, expandingHome: Bool = true) -> String {
+        guard expandingHome else { return singleQuoted(path) }
         if path == "~" {
             return "\"$HOME\""
         }

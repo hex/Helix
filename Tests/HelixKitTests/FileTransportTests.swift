@@ -35,13 +35,13 @@ struct FileTransportCopyTests {
 
         try await transport.copy(
             from: .local(path: "/tmp/a/file.txt"),
-            to: .ssh(user: "deploy", host: "server.com", port: nil, path: "/opt/file.txt")
+            to: .ssh(user: "deploy", host: "server.example.test", port: nil, path: "/opt/file.txt")
         )
 
         #expect(recorder.commands.count == 1)
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/scp")
-        #expect(cmd.arguments == connectionOptions + ["-r", "/tmp/a/file.txt", "deploy@server.com:/opt/file.txt"])
+        #expect(cmd.arguments == connectionOptions + ["-r", "/tmp/a/file.txt", "deploy@server.example.test:/opt/file.txt"])
     }
 
     @Test("ssh to local uses scp")
@@ -50,14 +50,14 @@ struct FileTransportCopyTests {
         let transport = FileTransport(execute: recorder.execute)
 
         try await transport.copy(
-            from: .ssh(user: nil, host: "server.com", port: nil, path: "/opt/file.txt"),
+            from: .ssh(user: nil, host: "server.example.test", port: nil, path: "/opt/file.txt"),
             to: .local(path: "/tmp/b/file.txt")
         )
 
         #expect(recorder.commands.count == 1)
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/scp")
-        #expect(cmd.arguments == connectionOptions + ["-r", "server.com:/opt/file.txt", "/tmp/b/file.txt"])
+        #expect(cmd.arguments == connectionOptions + ["-r", "server.example.test:/opt/file.txt", "/tmp/b/file.txt"])
     }
 
     @Test("ssh with port uses scp -P flag")
@@ -283,13 +283,13 @@ struct FileTransportRemoveTests {
         let transport = FileTransport(execute: recorder.execute)
 
         try await transport.remove(
-            endpoint: .ssh(user: "deploy", host: "server.com", port: nil, path: "/opt/dir")
+            endpoint: .ssh(user: "deploy", host: "server.example.test", port: nil, path: "/opt/dir")
         )
 
         #expect(recorder.commands.count == 1)
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/ssh")
-        #expect(cmd.arguments == connectionOptions + ["deploy@server.com", "rm -rf '/opt/dir'"])
+        #expect(cmd.arguments == connectionOptions + ["deploy@server.example.test", "rm -rf '/opt/dir'"])
     }
 
     @Test("remove ssh with port passes -p flag")
@@ -332,11 +332,11 @@ struct FileTransportTildeTests {
         let transport = FileTransport(execute: recorder.execute)
 
         try await transport.remove(
-            endpoint: .ssh(user: "hex", host: "server", port: nil, path: "~/.claude-sessions/teamcity/logs")
+            endpoint: .ssh(user: "alice", host: "server", port: nil, path: "~/.claude-sessions/teamcity/logs")
         )
 
         let cmd = recorder.commands[0]
-        #expect(cmd.arguments == connectionOptions + ["hex@server", "rm -rf \"$HOME\"/'.claude-sessions/teamcity/logs'"])
+        #expect(cmd.arguments == connectionOptions + ["alice@server", "rm -rf \"$HOME\"/'.claude-sessions/teamcity/logs'"])
     }
 
     @Test("directoryExists ssh with tilde uses $HOME")
@@ -345,11 +345,11 @@ struct FileTransportTildeTests {
         let transport = FileTransport(execute: recorder.execute)
 
         _ = try await transport.directoryExists(
-            endpoint: .ssh(user: "hex", host: "server", port: nil, path: "~/.claude-sessions/.git")
+            endpoint: .ssh(user: "alice", host: "server", port: nil, path: "~/.claude-sessions/.git")
         )
 
         let cmd = recorder.commands[0]
-        #expect(cmd.arguments == connectionOptions + ["hex@server", "test -d \"$HOME\"/'.claude-sessions/.git'"])
+        #expect(cmd.arguments == connectionOptions + ["alice@server", "test -d \"$HOME\"/'.claude-sessions/.git'"])
     }
 
     @Test("run ssh with tilde uses $HOME in cd")
@@ -358,12 +358,12 @@ struct FileTransportTildeTests {
         let transport = FileTransport(execute: recorder.execute)
 
         _ = try await transport.run(
-            on: .ssh(user: "hex", host: "server", port: nil, path: "~/.claude-sessions"),
+            on: .ssh(user: "alice", host: "server", port: nil, path: "~/.claude-sessions"),
             command: "git init"
         )
 
         let cmd = recorder.commands[0]
-        #expect(cmd.arguments == connectionOptions + ["hex@server", "cd \"$HOME\"/'.claude-sessions' && git init"])
+        #expect(cmd.arguments == connectionOptions + ["alice@server", "cd \"$HOME\"/'.claude-sessions' && git init"])
     }
 
     @Test("absolute paths still use single quotes")
@@ -582,13 +582,13 @@ struct FileTransportDirectoryExistsTests {
         let transport = FileTransport(execute: recorder.execute)
 
         let result = try await transport.directoryExists(
-            endpoint: .ssh(user: "deploy", host: "server.com", port: nil, path: "/opt/project/.git")
+            endpoint: .ssh(user: "deploy", host: "server.example.test", port: nil, path: "/opt/project/.git")
         )
 
         #expect(result == true)
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/ssh")
-        #expect(cmd.arguments == connectionOptions + ["deploy@server.com", "test -d '/opt/project/.git'"])
+        #expect(cmd.arguments == connectionOptions + ["deploy@server.example.test", "test -d '/opt/project/.git'"])
     }
 
     @Test("ssh with port includes -p flag")
@@ -665,13 +665,13 @@ struct FileTransportIsSymlinkTests {
         let transport = FileTransport(execute: recorder.execute)
 
         let result = try await transport.isSymlink(
-            endpoint: .ssh(user: "deploy", host: "server.com", port: nil, path: "/opt/link")
+            endpoint: .ssh(user: "deploy", host: "server.example.test", port: nil, path: "/opt/link")
         )
 
         #expect(result == true)
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/ssh")
-        #expect(cmd.arguments == connectionOptions + ["deploy@server.com", "test -L '/opt/link'"])
+        #expect(cmd.arguments == connectionOptions + ["deploy@server.example.test", "test -L '/opt/link'"])
     }
 
     @Test("ssh with port includes -p flag")
@@ -737,13 +737,13 @@ struct FileTransportReadLinkTests {
         let transport = FileTransport(execute: recorder.execute)
 
         let result = try await transport.readLink(
-            endpoint: .ssh(user: "deploy", host: "server.com", port: nil, path: "/opt/link")
+            endpoint: .ssh(user: "deploy", host: "server.example.test", port: nil, path: "/opt/link")
         )
 
         #expect(result == "/remote/target")
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/ssh")
-        #expect(cmd.arguments == connectionOptions + ["deploy@server.com", "readlink '/opt/link'"])
+        #expect(cmd.arguments == connectionOptions + ["deploy@server.example.test", "readlink '/opt/link'"])
     }
 
     @Test("ssh readLink with port includes -p flag")
@@ -781,11 +781,11 @@ struct FileTransportReadLinkTests {
         let transport = FileTransport(execute: recorder.execute)
 
         _ = try await transport.readLink(
-            endpoint: .ssh(user: "hex", host: "server", port: nil, path: "~/project/link")
+            endpoint: .ssh(user: "alice", host: "server", port: nil, path: "~/project/link")
         )
 
         let cmd = recorder.commands[0]
-        #expect(cmd.arguments == connectionOptions + ["hex@server", "readlink \"$HOME\"/'project/link'"])
+        #expect(cmd.arguments == connectionOptions + ["alice@server", "readlink \"$HOME\"/'project/link'"])
     }
 }
 
@@ -815,19 +815,19 @@ struct FileTransportRunTests {
         let transport = FileTransport(execute: recorder.execute)
 
         let result = try await transport.run(
-            on: .ssh(user: "deploy", host: "server.com", port: nil, path: "/opt/project"),
+            on: .ssh(user: "deploy", host: "server.example.test", port: nil, path: "/opt/project"),
             command: "git rev-parse --abbrev-ref HEAD"
         )
 
         #expect(result == "main")
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/ssh")
-        #expect(cmd.arguments == connectionOptions + ["deploy@server.com", "cd '/opt/project' && git rev-parse --abbrev-ref HEAD"])
+        #expect(cmd.arguments == connectionOptions + ["deploy@server.example.test", "cd '/opt/project' && git rev-parse --abbrev-ref HEAD"])
     }
 
     @Test("ssh run with port includes -p flag")
     func runSSHWithPort() async throws {
-        let recorder = CommandRecorder(output: "origin\thttps://github.com/example/repo.git")
+        let recorder = CommandRecorder(output: "origin\thttps://git.example.test/example/repo.git")
         let transport = FileTransport(execute: recorder.execute)
 
         _ = try await transport.run(
@@ -892,13 +892,13 @@ struct FileTransportReadFileTests {
         let transport = FileTransport(execute: recorder.execute)
 
         let result = try await transport.readFile(
-            endpoint: .ssh(user: "deploy", host: "server.com", port: nil, path: "/opt/file.txt")
+            endpoint: .ssh(user: "deploy", host: "server.example.test", port: nil, path: "/opt/file.txt")
         )
 
         #expect(result == "remote content")
         let cmd = recorder.commands[0]
         #expect(cmd.executable == "/usr/bin/ssh")
-        #expect(cmd.arguments == connectionOptions + ["deploy@server.com", "cat '/opt/file.txt'"])
+        #expect(cmd.arguments == connectionOptions + ["deploy@server.example.test", "cat '/opt/file.txt'"])
     }
 
     @Test("ssh readFile with port passes -p flag")
@@ -935,11 +935,11 @@ struct FileTransportReadFileTests {
         let transport = FileTransport(execute: recorder.execute)
 
         _ = try await transport.readFile(
-            endpoint: .ssh(user: "hex", host: "server", port: nil, path: "~/project/file.txt")
+            endpoint: .ssh(user: "alice", host: "server", port: nil, path: "~/project/file.txt")
         )
 
         let cmd = recorder.commands[0]
-        #expect(cmd.arguments == connectionOptions + ["hex@server", "cat \"$HOME\"/'project/file.txt'"])
+        #expect(cmd.arguments == connectionOptions + ["alice@server", "cat \"$HOME\"/'project/file.txt'"])
     }
 }
 

@@ -140,6 +140,24 @@ private struct SyncSessionRow: View {
     @State private var isHovered = false
 
     var body: some View {
+        SyncResumeConfirmation(identifier: session.identifier, store: store) { resume, isResuming in
+            row.contextMenu {
+                if session.paused {
+                    Button("Resume", action: resume)
+                        .disabled(isResuming || store.isResolving(session.identifier))
+                } else {
+                    Button("Pause") { Task { await store.pauseSync(session.identifier) } }
+                    Button("Flush") { Task { await store.flushSync(session.identifier) } }
+                }
+                Divider()
+                Button("Terminate", role: .destructive) {
+                    Task { await store.terminateSync(session.identifier) }
+                }
+            }
+        }
+    }
+
+    private var row: some View {
         HStack(alignment: .top, spacing: 8) {
             StatusBadge(status: session.status, paused: session.paused)
                 .padding(.top, 5)
@@ -195,19 +213,6 @@ private struct SyncSessionRow: View {
         .background(isHovered ? Color.primary.opacity(0.06) : Color.clear)
         .contentShape(Rectangle())
         .onHover { isHovered = $0 }
-        .contextMenu {
-            if session.paused {
-                Button("Resume") { Task { await store.resumeSync(session.identifier) } }
-                    .disabled(store.isResolving(session.identifier))
-            } else {
-                Button("Pause") { Task { await store.pauseSync(session.identifier) } }
-                Button("Flush") { Task { await store.flushSync(session.identifier) } }
-            }
-            Divider()
-            Button("Terminate", role: .destructive) {
-                Task { await store.terminateSync(session.identifier) }
-            }
-        }
     }
 
     private var endpointSummary: String {
