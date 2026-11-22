@@ -122,6 +122,24 @@ struct MutationObservationTests {
         #expect(fixture.store.lastError == "unable to save session")
     }
 
+    @Test("Pause All reports a save error and still records the pause that took effect")
+    func bulkPauseRecordsPauseSaveFailure() async throws {
+        let session = makeSyncSession(id: "project", name: "Project")
+        let commands = MutationCommands(sessions: [session], interruption: .pauseSaveFailure)
+        let fixture = try MutationStoreFixture(commands: commands)
+        defer { fixture.cleanUp() }
+        let deadline = Date(timeIntervalSince1970: 2_000_000_000)
+
+        await fixture.store.pauseAllSync(until: deadline)
+
+        #expect(fixture.store.lastError == "Could not pause Project: unable to save session")
+        #expect(await commands.sessions.first?.paused == true)
+        #expect(fixture.store.bulkPause == BulkPause(sessionIdentifiers: ["project"], resumeAt: deadline))
+        await fixture.store.resumeBulkPause()
+        #expect(await commands.sessions.first?.paused == false)
+        #expect(fixture.store.bulkPause == nil)
+    }
+
     @Test("Terminate reports an archive error even if the session left the list")
     func ordinaryTerminateFailureReportsError() async throws {
         let session = makeSyncSession(id: "project", name: "Project")

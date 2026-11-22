@@ -722,11 +722,18 @@ public final class SessionStore {
                         let listed = try await self.provider.syncList()
                         guard listed.contains(where: { $0.identifier == identifier && !$0.paused }) else { return nil }
                     }
-                    try await self.provider.syncPause(identifier)
+                    let pauseError: MutationNotConfirmed?
+                    do {
+                        try await self.provider.syncPause(identifier)
+                        pauseError = nil
+                    } catch let error as MutationNotConfirmed where error.observation == .paused {
+                        pauseError = error
+                    }
                     let paused = self.bulkPause?.sessionIdentifiers ?? []
                     if !paused.contains(identifier) {
                         self.bulkPause = BulkPause(sessionIdentifiers: paused + [identifier], resumeAt: resumeAt)
                     }
+                    if let pauseError { throw pauseError }
                     return nil
                 } catch {
                     return "Could not pause \(session.name ?? identifier): \(error.localizedDescription)"
