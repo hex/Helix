@@ -184,21 +184,26 @@ struct ProcessDeadlineTests {
     func deadlinePreservesBufferedOutputAfterExit() async throws {
         try await withTimeout(seconds: 5) {
             let child = Process()
-            let stdout = Pipe()
-            let openPipe = Pipe()
+            let stdout = try outputSocketPair()
+            let spare = try outputSocketPair()
             child.executableURL = URL(fileURLWithPath: "/usr/bin/printf")
             child.arguments = ["hello"]
-            child.standardOutput = stdout
+            child.standardOutput = stdout.writer
             try child.run()
             child.waitUntilExit()
+            try #require(shutdown(stdout.writer.fileDescriptor, SHUT_RDWR) == 0)
 
-            let pendingOutput = stdout.fileHandleForReading.fileDescriptor
-            let stillOpen = openPipe.fileHandleForReading.fileDescriptor
+            let pendingOutput = stdout.reader.fileDescriptor
+            let stillOpen = spare.reader.fileDescriptor
             #expect(!ProcessRunner.canDrainAfterExit(child, openPipes: [pendingOutput, stillOpen]))
 
-            try openPipe.fileHandleForWriting.close()
+            let retainedWriter = dup(spare.writer.fileDescriptor)
+            try #require(retainedWriter >= 0)
+            defer { close(retainedWriter) }
+            // Shutdown ends writes from every copy of the descriptor, including an inherited copy.
+            try #require(shutdown(spare.writer.fileDescriptor, SHUT_RDWR) == 0)
             #expect(ProcessRunner.canDrainAfterExit(child, openPipes: [pendingOutput, stillOpen]))
-            #expect(String(decoding: stdout.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self) == "hello")
+            #expect(String(decoding: stdout.reader.readDataToEndOfFile(), as: UTF8.self) == "hello")
         }
     }
 }
@@ -276,6 +281,15 @@ struct ProcessRegistryTests {
         #expect(stopped.interrupted == 0)
         #expect(stopped.unfinished == 0)
     }
+}
+
+private func outputSocketPair() throws -> (reader: FileHandle, writer: FileHandle) {
+    var descriptors: [Int32] = [-1, -1]
+    try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors) == 0)
+    return (
+        FileHandle(fileDescriptor: descriptors[0], closeOnDealloc: true),
+        FileHandle(fileDescriptor: descriptors[1], closeOnDealloc: true)
+    )
 }
 
 private func runBoundedShell(_ script: String, pidFile: URL, duration: Duration) async throws -> String {
