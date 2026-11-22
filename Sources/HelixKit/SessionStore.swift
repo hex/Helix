@@ -615,7 +615,7 @@ public final class SessionStore {
         } catch {
             messages.append("Could not remove edited session \(replacement): \(error.localizedDescription).")
             var observed = (error as? MutationNotConfirmed)?.observation ?? .unknown
-            if observed != .paused && !error.isCommandInterruption && activationAttempted {
+            if observed != .absent && observed != .paused && !error.isCommandInterruption && activationAttempted {
                 // Mutagen may start reconnecting even when Resume returns an error.
                 do {
                     try await provider.syncPause(replacement)
@@ -958,8 +958,14 @@ public final class SessionStore {
             schedulePolling(refreshImmediately: false)
         } catch {
             daemonControl = previousControl
-            let observed = (error as? MutationNotConfirmed)?.observation
-            daemonStatus = observed == .absent ? .stopped : .unknown
+            switch (error as? MutationNotConfirmed)?.observation {
+            case .absent:
+                daemonStatus = .stopped
+            case .running:
+                daemonStatus = previousControl == .stopped ? .startedOutside : .running
+            default:
+                daemonStatus = .unknown
+            }
             lastError = error.localizedDescription
         }
     }
@@ -991,21 +997,27 @@ public final class SessionStore {
 
         daemonStopProgress = "Stopping Mutagen."
         defaults.set(true, forKey: Self.daemonStoppedKey)
+        let failure: String?
         do {
             try await provider.daemonStop(observing: daemonProcess) {
                 daemonStopProgress = "Checking whether Mutagen is running."
             }
+            failure = nil
         } catch {
             let stopError = "Could not stop Mutagen: \(error.localizedDescription)"
-            if (error as? MutationNotConfirmed)?.observation == .running {
+            switch (error as? MutationNotConfirmed)?.observation {
+            case .absent:
+                failure = stopError
+            case .running:
                 restoreAfterFailedStop(wasStopped: wasStopped || isQuitting, error: stopError)
-            } else {
+                return false
+            default:
                 daemonControl = .stopped
                 daemonStatus = .unknown
                 lastError = "\(stopError) Mutagen's state is unknown."
                 schedulePolling(refreshImmediately: false)
+                return false
             }
-            return false
         }
 
         daemonControl = .stopped
@@ -1014,9 +1026,9 @@ public final class SessionStore {
         forwardSessions = []
         backgroundPriorityPID = nil
         setDaemonPriorityError(daemonBackgroundPriorityRequested ? "Mutagen daemon not found." : nil)
-        lastError = nil
+        lastError = failure
         schedulePolling(refreshImmediately: false)
-        return true
+        return failure == nil
     }
 
     private func setManagedDaemonStatus(_ status: DaemonStatus) {

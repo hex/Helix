@@ -555,17 +555,17 @@ struct SessionStoreTests {
 
         let stopped = await store.stopDaemon()
 
-        #expect(stopped == !daemonPresent)
+        #expect(!stopped)
+        #expect(store.lastError == "Could not stop Mutagen: simulated failure")
         #expect(store.daemonRunning == daemonPresent)
         #expect(defaults.bool(forKey: "daemonStoppedByHelix") == !daemonPresent)
         if daemonPresent {
-            #expect(store.lastError == "Could not stop Mutagen: simulated failure")
             await store.pauseSync(session.identifier)
             #expect(provider.calls == ["daemonStop", "syncPause:sync_1"])
         } else {
+            #expect(store.daemonStatus == .stopped)
             #expect(store.syncSessions == [])
-            // Restart starts once Stop has confirmed the daemon is gone.
-            if stopped { await store.startDaemon() }
+            await store.startDaemon()
             #expect(provider.calls == ["daemonStop", "daemonStart"])
             #expect(store.daemonRunning)
             #expect(!defaults.bool(forKey: "daemonStoppedByHelix"))
