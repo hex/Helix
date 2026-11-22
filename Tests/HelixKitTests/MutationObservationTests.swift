@@ -280,6 +280,23 @@ struct MutationObservationTests {
         #expect(await commands.sessions.map(\.identifier) == [existing.identifier, other.identifier])
     }
 
+    @Test("Resume refuses peers that use the other spelling of macOS temporary paths")
+    func resumeRefusesTemporaryAliases() async throws {
+        let target = makeSyncSession(id: "target", name: "Target", paused: true)
+        let peer = makeSyncSession(id: "peer", name: "Peer", alpha: makeEndpoint(path: "/private/tmp/a"))
+        let commands = MutationCommands(sessions: [target, peer])
+        let fixture = try MutationStoreFixture(commands: commands)
+        defer { fixture.cleanUp() }
+
+        let refusal = await fixture.store.requestSyncResume(target.identifier)
+
+        #expect(fixture.store.lastError == "Cannot resume \"Target\" while \"Peer\" is running on the same endpoints.")
+        #expect(await commands.sessions.map(\.paused) == [true, false])
+        guard case .overlap(let approval)? = refusal else { return }
+        #expect(await fixture.store.requestSyncResume(target.identifier, overriding: approval) == nil)
+        #expect(await commands.sessions.map(\.paused) == [false, false])
+    }
+
     @Test("An edit can restore overlap that existed before it paused the original")
     func editRestoresPreviouslyRunningOverlap() async throws {
         let original = makeSyncSession(id: "original", name: "Project")
