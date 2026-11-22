@@ -1736,7 +1736,7 @@ public final class SessionStore {
             commands.addRemote,
             "git fetch origin",
             commands.reset,
-        ].joined(separator: "\n")
+        ].joined(separator: " &&\n")
     }
 
     private static func gitSetupCommands(remoteURL: String, branch: String) -> (addRemote: String, reset: String) {
