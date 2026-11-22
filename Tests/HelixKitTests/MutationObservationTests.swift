@@ -7,6 +7,92 @@ import Testing
 
 @MainActor
 struct MutationObservationTests {
+    @Test("A connection error during edit activation restores the original even if the replacement became unpaused")
+    func ordinaryResumeFailureRecoversEdit() async throws {
+        let original = makeSyncSession(id: "original", name: "Project")
+        let commands = MutationCommands(
+            sessions: [original], interruption: .resumeConnectFailure(MutationCommands.replacementID)
+        )
+        let fixture = try MutationStoreFixture(commands: commands)
+        defer { fixture.cleanUp() }
+
+        let notice = await fixture.store.recreateSync(
+            original, options: SyncCreateOptions(from: original), alpha: "/tmp/a", beta: "user@unreachable.invalid:/tmp/b"
+        )
+
+        let sessions = await commands.sessions
+        #expect(sessions.map(\.identifier) == [original.identifier])
+        #expect(sessions.first?.paused == false)
+        #expect(notice == "Could not start the edited session: unable to connect to beta: connection refused. The original session was restored.")
+    }
+
+    @Test("Manual Resume clears a hold only when the command succeeds or its deadline is reconciled", arguments: [false, true])
+    func heldResumeUsesCommandOutcome(deadline: Bool) async throws {
+        let session = makeSyncSession(id: "held", name: "Held", paused: true)
+        let interruption: MutationCommands.Interruption = deadline
+            ? .resumeDeadline(session.identifier) : .resumeConnectFailure(session.identifier)
+        let commands = MutationCommands(sessions: [session], interruption: interruption)
+        let fixture = try MutationStoreFixture(commands: commands)
+        defer { fixture.cleanUp() }
+        let holds = [session.identifier: "Check the conflict files before resuming."]
+        fixture.defaults.set(holds, forKey: "sessionHolds")
+        let store = SessionStore(provider: commands.cli, defaults: fixture.defaults)
+
+        #expect(store.sessionHolds == holds)
+        await store.resumeSync(session.identifier)
+
+        #expect(await commands.sessions.first?.paused == false)
+        if deadline {
+            #expect(store.sessionHolds.isEmpty)
+            #expect(store.lastError == nil)
+        } else {
+            #expect(store.sessionHolds == holds)
+            #expect(store.lastError == "unable to connect to beta: connection refused")
+        }
+    }
+
+    @Test("Pause reports a save error even if the session became paused")
+    func ordinaryPauseFailureReportsError() async throws {
+        let session = makeSyncSession(id: "project", name: "Project")
+        let commands = MutationCommands(sessions: [session], interruption: .pauseSaveFailure)
+        let fixture = try MutationStoreFixture(commands: commands)
+        defer { fixture.cleanUp() }
+
+        await fixture.store.pauseSync(session.identifier)
+
+        #expect(await commands.sessions.first?.paused == true)
+        #expect(fixture.store.lastError == "unable to save session")
+    }
+
+    @Test("Terminate reports an archive error even if the session left the list")
+    func ordinaryTerminateFailureReportsError() async throws {
+        let session = makeSyncSession(id: "project", name: "Project")
+        let commands = MutationCommands(sessions: [session], interruption: .terminateArchiveFailure)
+        let fixture = try MutationStoreFixture(commands: commands)
+        defer { fixture.cleanUp() }
+
+        await fixture.store.terminateSync(session.identifier)
+
+        #expect(await commands.sessions.isEmpty)
+        #expect(fixture.store.lastError == "unable to remove archive from disk")
+    }
+
+    @Test("A failed Start leaves Helix stopped even if the process is present")
+    func ordinaryStartFailureKeepsStopFence() async throws {
+        let commands = MutationCommands(interruption: .daemonStartFailed)
+        let daemon = RecordingDaemonProcess(pid: 123)
+        let fixture = try MutationStoreFixture(commands: commands, daemon: daemon)
+        defer { fixture.cleanUp() }
+        fixture.defaults.set(true, forKey: "daemonStoppedByHelix")
+        let store = SessionStore(provider: commands.cli, defaults: fixture.defaults, daemonProcess: daemon)
+
+        await store.startDaemon()
+
+        #expect(store.daemonStatus == .startedOutside)
+        #expect(fixture.defaults.bool(forKey: "daemonStoppedByHelix"))
+        #expect(store.lastError == "unable to start daemon")
+    }
+
     @Test("Manual Resume protects shared paths without an edit record", arguments: [false, true])
     func manualResumeChecksBothEndpointOrders(reversed: Bool) async throws {
         let original = makeSyncSession(id: "original", name: "Original", paused: true)
@@ -170,8 +256,10 @@ private struct UnreadableDaemonProcess: DaemonProcess {
 }
 
 private actor MutationCommands {
-    enum Interruption {
+    enum Interruption: Equatable {
         case none, pauseSucceeded, pauseFailed, recoveryLeavesReplacementRunning
+        case resumeConnectFailure(String), resumeDeadline(String)
+        case pauseSaveFailure, terminateArchiveFailure, daemonStartFailed
     }
 
     static let replacementID = "sync_" + String(repeating: "R", count: 43)
@@ -208,17 +296,27 @@ private actor MutationCommands {
             if identifier == Self.replacementID && interruption == .recoveryLeavesReplacementRunning { break }
             if interruption != .pauseFailed { setPaused(true, identifier: identifier) }
             if interruption == .pauseSucceeded || interruption == .pauseFailed { throw timeout }
+            if interruption == .pauseSaveFailure { throw CLIError(exitCode: 1, stderr: "unable to save session") }
         case ["sync", "resume"]:
             if identifier == Self.replacementID && interruption == .recoveryLeavesReplacementRunning {
                 throw CLIError(exitCode: 1, stderr: "The exit receipt was lost.")
             }
             setPaused(false, identifier: identifier)
+            if interruption == .resumeConnectFailure(identifier) {
+                throw CLIError(exitCode: 1, stderr: "unable to connect to beta: connection refused")
+            }
+            if interruption == .resumeDeadline(identifier) { throw timeout }
         case ["sync", "terminate"]:
             if identifier == Self.replacementID && interruption == .recoveryLeavesReplacementRunning {
                 setPaused(false, identifier: identifier)
                 throw CLIError(exitCode: 1, stderr: "The session could not be removed.")
             }
             sessions.removeAll { $0.identifier == identifier }
+            if interruption == .terminateArchiveFailure {
+                throw CLIError(exitCode: 1, stderr: "unable to remove archive from disk")
+            }
+        case ["daemon", "start"] where interruption == .daemonStartFailed:
+            throw CLIError(exitCode: 1, stderr: "unable to start daemon")
         case ["daemon", "stop"]:
             await stopGate?.pass()
             throw timeout

@@ -164,7 +164,7 @@ final class ManagedSessionProvider {
             try await run()
         } catch {
             let observed = await observe()
-            guard observed == expected else {
+            guard error.isCommandInterruption, observed == expected else {
                 throw MutationNotConfirmed(cause: error, observation: observed)
             }
         }
