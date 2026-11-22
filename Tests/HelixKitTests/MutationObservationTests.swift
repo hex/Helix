@@ -7,6 +7,64 @@ import Testing
 
 @MainActor
 struct MutationObservationTests {
+    @Test("Recreate bypasses global defaults even when the original has no mode")
+    func recreatingUsesListedConfiguration() async throws {
+        let listing = #"""
+        {"identifier":"original","version":1,"creationTime":"2026-01-01T00:00:00Z","creatingVersion":"0.18.1",
+        "paused":true,"status":"disconnected","alpha":{"protocol":"local","path":"/tmp/a"},
+        "beta":{"protocol":"local","path":"/tmp/b"},"ignore":{"paths":["cache/"]},
+        "symlink":{},"watch":{},"permissions":{},"compression":{}}
+        """#
+        let original = try JSONDecoder().decode(SyncSession.self, from: Data(listing.utf8))
+        let commands = MutationCommands(sessions: [original])
+        let fixture = try MutationStoreFixture(commands: commands)
+        defer { fixture.cleanUp() }
+        var edited = SyncCreateOptions(from: original)
+        edited.name = "Renamed"
+
+        #expect(await fixture.store.recreateSync(original, options: edited, alpha: "/tmp/a", beta: "/tmp/b") == nil)
+        let createCommands = await commands.calls.filter { $0.prefix(2) == ["sync", "create"] }
+        #expect(createCommands == [
+            ["sync", "create", "/tmp/a", "/tmp/b", "--name", "Renamed", "--paused", "--ignore", "cache/", "--no-global-configuration"],
+        ])
+
+        let newCommands = MutationCommands(sessions: [])
+        let newFixture = try MutationStoreFixture(commands: newCommands)
+        defer { newFixture.cleanUp() }
+        #expect(await newFixture.store.createSync(options: SyncCreateOptions(), alpha: "/tmp/c", beta: "/tmp/d") == nil)
+        let newCreateCommands = await newCommands.calls.filter { $0.prefix(2) == ["sync", "create"] }
+        #expect(newCreateCommands == [["sync", "create", "/tmp/c", "/tmp/d"]])
+    }
+
+    @Test("Interrupted edit activation needs both endpoints connected", arguments: [true, false], [true, false, nil] as [Bool?])
+    func interruptedEditActivationNeedsConnectedEndpoints(alphaConnected: Bool, betaConnected: Bool?) async throws {
+        let original = makeSyncSession(id: "original", name: "Project")
+        let replacement = MutationCommands.replacementID
+        let commands = MutationCommands(
+            sessions: [original], interruption: .resumeDeadline(replacement),
+            replacementAlpha: makeEndpoint(path: "/tmp/a", connected: alphaConnected),
+            replacementBeta: makeEndpoint(path: "/tmp/b", connected: betaConnected)
+        )
+        let fixture = try MutationStoreFixture(commands: commands)
+        defer { fixture.cleanUp() }
+
+        let notice = await fixture.store.recreateSync(
+            original, options: SyncCreateOptions(from: original), alpha: "/tmp/a", beta: "/tmp/b"
+        )
+
+        let sessions = await commands.sessions
+        if alphaConnected, betaConnected == true {
+            #expect(notice == nil)
+            #expect(sessions.map(\.identifier) == [replacement])
+            #expect(sessions.map(\.paused) == [false])
+        } else {
+            #expect(sessions.map(\.identifier) == [original.identifier])
+            #expect(sessions.map(\.paused) == [false])
+            #expect(notice == "Could not confirm that both edited session endpoints were connected after Resume was interrupted. /test/mutagen exceeded its deadline of 900.0 seconds. The original session was restored.")
+            #expect(await commands.calls.filter { $0.prefix(2) == ["sync", "terminate"] } == [["sync", "terminate", replacement]])
+        }
+    }
+
     @Test("A connection error during edit activation restores the original even if the replacement became unpaused")
     func ordinaryResumeFailureRecoversEdit() async throws {
         let original = makeSyncSession(id: "original", name: "Project")
@@ -396,6 +454,7 @@ actor MutationCommands {
     enum Interruption: Equatable {
         case none, pauseSucceeded, pauseFailed, recoveryLeavesReplacementRunning
         case resumeConnectFailure(String), resumeDeadline(String)
+        case editRecoveryInterrupted(cancelled: Bool)
         case pauseSaveFailure, terminateArchiveFailure, daemonStartFailed
     }
 
@@ -403,18 +462,21 @@ actor MutationCommands {
     let interruption: Interruption
     private let stopGate: Gate?
     private let startingPeerOnPause: String?
+    private let replacementAlpha: Endpoint
     private let replacementBeta: Endpoint
     private(set) var calls: [[String]] = []
     private(set) var sessions: [SyncSession]
 
     init(
         sessions: [SyncSession] = [], interruption: Interruption = .none, stopGate: Gate? = nil,
-        startingPeerOnPause: String? = nil, replacementBeta: Endpoint = makeEndpoint(path: "/tmp/b")
+        startingPeerOnPause: String? = nil,
+        replacementAlpha: Endpoint = makeEndpoint(path: "/tmp/a"), replacementBeta: Endpoint = makeEndpoint(path: "/tmp/b")
     ) {
         self.sessions = sessions
         self.interruption = interruption
         self.stopGate = stopGate
         self.startingPeerOnPause = startingPeerOnPause
+        self.replacementAlpha = replacementAlpha
         self.replacementBeta = replacementBeta
     }
 
@@ -434,7 +496,9 @@ actor MutationCommands {
         case ["forward", "list"]:
             return "[]"
         case ["sync", "create"]:
-            sessions.append(makeSyncSession(id: Self.replacementID, name: "Edited Project", paused: true, beta: replacementBeta))
+            sessions.append(makeSyncSession(
+                id: Self.replacementID, name: "Edited Project", paused: true, alpha: replacementAlpha, beta: replacementBeta
+            ))
             return "Created session \(Self.replacementID)"
         case ["sync", "pause"]:
             if identifier == Self.replacementID && interruption == .recoveryLeavesReplacementRunning { break }
@@ -451,9 +515,14 @@ actor MutationCommands {
                 throw CLIError(exitCode: 1, stderr: "unable to connect to beta: connection refused")
             }
             if interruption == .resumeDeadline(identifier) { throw timeout }
+            if identifier == Self.replacementID, case .editRecoveryInterrupted(let cancelled) = interruption {
+                if cancelled { throw CancellationError() }
+                throw timeout
+            }
         case ["sync", "flush"]:
             break
         case ["sync", "terminate"]:
+            if identifier == Self.replacementID, case .editRecoveryInterrupted = interruption { throw CancellationError() }
             if identifier == Self.replacementID && interruption == .recoveryLeavesReplacementRunning {
                 setPaused(false, identifier: identifier)
                 throw CLIError(exitCode: 1, stderr: "The session could not be removed.")

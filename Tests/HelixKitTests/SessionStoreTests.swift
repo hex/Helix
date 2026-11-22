@@ -669,7 +669,7 @@ struct SessionStoreTests {
 
 @Suite("SessionStore recreateSync")
 struct RecreateSessionTests {
-    private let createEdited = "syncCreate:sync create /tmp/a /tmp/b --name test --paused --mode one-way-safe"
+    private let createEdited = "syncCreate:sync create /tmp/a /tmp/b --name test --paused --mode one-way-safe --no-global-configuration"
 
     @Test("Editing preserves session settings and overrides on both endpoints")
     @MainActor
@@ -698,7 +698,7 @@ struct RecreateSessionTests {
 
             await store.recreateSync(session, options: edited, alpha: "/srv/project", beta: "alice@example.com:/srv/mirror")
 
-            #expect(recorder.calls.first == "\(start) \(modes) \(options) \(vcsFlag) \(limits) \(sessionFlags) \(alpha) \(beta)")
+            #expect(recorder.calls.first == "\(start) \(modes) \(options) \(vcsFlag) \(limits) \(sessionFlags) \(alpha) \(beta) --no-global-configuration")
         }
     }
 
@@ -833,7 +833,7 @@ struct RecreateSessionTests {
 
         #expect(store.lastError == nil)
         #expect(recorder.calls == [
-            "syncCreate:sync create /tmp/a /tmp/b --name test --paused --mode two-way-safe --ignore *.log --ignore node_modules/symlink",
+            "syncCreate:sync create /tmp/a /tmp/b --name test --paused --mode two-way-safe --ignore *.log --ignore node_modules/symlink --no-global-configuration",
             "syncPause:sync_1", "syncResume:sync_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG", "syncTerminate:sync_1",
         ])
     }
@@ -884,33 +884,27 @@ struct RecreateSessionTests {
         let defaults = try #require(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let original = makeSyncSession(id: "sync_original", name: "project")
-        let replacement = makeSyncSession(id: "sync_" + String(repeating: "J", count: 43), name: "project", paused: true)
-        let (pausedOriginal, _) = stagedSyncEdit(original)
-        let provider = RecordingProvider(
-            syncSessions: [original], sessionsAfterCreate: [pausedOriginal, replacement],
-            beforeSyncResume: { identifier in
-                if identifier == replacement.identifier {
-                    if cancelled { throw CancellationError() }
-                    throw ProcessDeadlineError(executablePath: "/usr/bin/mutagen", deadline: .seconds(15))
-                }
-            }
+        let replacement = MutationCommands.replacementID
+        let commands = MutationCommands(
+            sessions: [original], interruption: .editRecoveryInterrupted(cancelled: cancelled),
+            replacementBeta: makeEndpoint(path: "/tmp/b", connected: false)
         )
-        let store = SessionStore(provider: provider, defaults: defaults)
-        await store.recreateSync(original, options: SyncCreateOptions(from: original), alpha: "/srv/project", beta: "/srv/mirror")
+        let store = SessionStore(provider: commands.cli, defaults: defaults)
+        await store.recreateSync(original, options: SyncCreateOptions(from: original), alpha: "/tmp/a", beta: "/tmp/b")
 
         let saved = defaults.dictionary(forKey: "syncEditInProgress") as? [String: String]
         #expect(saved?["original"] == original.identifier)
-        #expect(saved?["replacement"] == replacement.identifier)
-        let pair = [original.identifier: replacement.identifier]
+        #expect(saved?["replacement"] == replacement)
+        let pair = [original.identifier: replacement]
         await store.resumeSync(original.identifier)
         #expect(store.leftoverSyncOriginals == pair)
-        #expect(store.lastError == "Original session \(original.identifier) cannot resume while its edited replacement \(replacement.identifier) is listed.")
-        #expect(!provider.calls.contains("syncResume:sync_original"))
+        #expect(store.lastError == "Original session \(original.identifier) cannot resume while its edited replacement \(replacement) is listed.")
+        #expect(!(await commands.calls).contains(["sync", "resume", original.identifier]))
 
-        let relaunched = SessionStore(provider: provider, defaults: defaults)
+        let relaunched = SessionStore(provider: commands.cli, defaults: defaults)
         await relaunched.refresh()
-        #expect(relaunched.interruptedEditNotice?.contains(replacement.identifier) == true)
-        #expect(relaunched.leftoverSyncOriginals == [original.identifier: replacement.identifier])
+        #expect(relaunched.interruptedEditNotice?.contains(replacement) == true)
+        #expect(relaunched.leftoverSyncOriginals == pair)
     }
 
     @Test("A failed replacement start removes it before resuming the original")
@@ -1885,7 +1879,7 @@ struct ConflictResolutionTests {
         defaults.removePersistentDomain(forName: suiteName)
     }
 
-    private let createPaused = "syncCreate:sync create /tmp/a /tmp/b --paused"
+    private let createPaused = "syncCreate:sync create /tmp/a /tmp/b --paused --no-global-configuration"
 
     /// The per-call token in replace's sibling names, read from the copy that lands beside `destination`.
     private func replaceToken(copiedBeside destination: String, in commands: [RecordedCommand]) throws -> String {
