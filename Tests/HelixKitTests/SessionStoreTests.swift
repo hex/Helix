@@ -712,8 +712,9 @@ struct RecreateSessionTests {
         let replacement = makeSyncSession(id: "sync_" + String(repeating: "J", count: 43), name: "project", paused: true)
         let create = Gate()
         let pause = Gate()
+        let (pausedOriginal, _) = stagedSyncEdit(original)
         let provider = RecordingProvider(
-            syncSessions: [original], sessionsAfterCreate: [original, replacement],
+            syncSessions: [original], sessionsAfterCreate: [pausedOriginal, replacement],
             beforeSyncPause: { _ in await pause.pass() }, duringSyncCreate: { await create.pass() }
         )
         let store = SessionStore(provider: provider, defaults: defaults)
@@ -790,7 +791,8 @@ struct RecreateSessionTests {
     @MainActor
     func happyPath() async {
         let session = makeSyncSession(id: "sync_1", name: "test")
-        let recorder = RecordingProvider(syncSessions: [session])
+        let (paused, staged) = stagedSyncEdit(session)
+        let recorder = RecordingProvider(syncSessions: [session], sessionsAfterCreate: [paused, staged])
         let store = SessionStore(provider: recorder)
         var options = SyncCreateOptions(from: session)
         options.mode = "one-way-safe"
@@ -805,7 +807,10 @@ struct RecreateSessionTests {
     @MainActor
     func terminateFails() async {
         let session = makeSyncSession(id: "sync_1", name: "test")
-        let recorder = RecordingProvider(syncSessions: [session], failOn: "syncTerminate:sync_1")
+        let (paused, staged) = stagedSyncEdit(session)
+        let recorder = RecordingProvider(
+            syncSessions: [session], sessionsAfterCreate: [paused, staged], failOn: "syncTerminate:sync_1"
+        )
         let store = SessionStore(provider: recorder)
         var options = SyncCreateOptions(from: session)
         options.mode = "one-way-safe"
@@ -820,7 +825,8 @@ struct RecreateSessionTests {
     @MainActor
     func addToIgnoreList() async {
         let session = makeSyncSession(id: "sync_1", name: "test", ignorePaths: ["*.log"])
-        let recorder = RecordingProvider(syncSessions: [session])
+        let (paused, staged) = stagedSyncEdit(session)
+        let recorder = RecordingProvider(syncSessions: [session], sessionsAfterCreate: [paused, staged])
         let store = SessionStore(provider: recorder)
 
         await store.addToIgnoreList(session: session, path: "node_modules/symlink")
@@ -879,8 +885,9 @@ struct RecreateSessionTests {
         defer { defaults.removePersistentDomain(forName: suite) }
         let original = makeSyncSession(id: "sync_original", name: "project")
         let replacement = makeSyncSession(id: "sync_" + String(repeating: "J", count: 43), name: "project", paused: true)
+        let (pausedOriginal, _) = stagedSyncEdit(original)
         let provider = RecordingProvider(
-            syncSessions: [original], sessionsAfterCreate: [original, replacement],
+            syncSessions: [original], sessionsAfterCreate: [pausedOriginal, replacement],
             beforeSyncResume: { identifier in
                 if identifier == replacement.identifier {
                     if cancelled { throw CancellationError() }
@@ -910,7 +917,10 @@ struct RecreateSessionTests {
     @MainActor
     func startFailureRestoresOriginal() async {
         let session = makeSyncSession(id: "sync_1", name: "test")
-        let recorder = RecordingProvider(syncSessions: [session], failOn: "syncResume:sync_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG")
+        let (paused, staged) = stagedSyncEdit(session)
+        let recorder = RecordingProvider(
+            syncSessions: [session], sessionsAfterCreate: [paused, staged], failOn: "syncResume:\(staged.identifier)"
+        )
         let store = SessionStore(provider: recorder)
         var options = SyncCreateOptions(from: session)
         options.mode = "one-way-safe"
@@ -1130,9 +1140,13 @@ struct BulkPauseTests {
     func pauseAllRefusesDuringEdit() async {
         defer { removeDefaults() }
         let original = makeSyncSession(id: "sync_1", name: "project")
-        let other = makeSyncSession(id: "sync_2", name: "archive")
+        let other = makeSyncSession(id: "sync_2", name: "archive", alpha: makeEndpoint(path: "/tmp/archive"))
+        let (paused, staged) = stagedSyncEdit(original)
         let gate = Gate()
-        let provider = RecordingProvider(syncSessions: [original, other], duringSyncCreate: { await gate.pass() })
+        let provider = RecordingProvider(
+            syncSessions: [original, other], sessionsAfterCreate: [paused, other, staged],
+            duringSyncCreate: { await gate.pass() }
+        )
         let store = SessionStore(provider: provider, defaults: defaults)
         let editing = Task {
             await store.recreateSync(
@@ -1267,7 +1281,7 @@ struct BulkPauseTests {
         let gate = Gate()
         let first = makeSyncSession(id: "sync_1", name: "one")
         let alreadyPaused = makeSyncSession(id: "sync_2", name: "two", paused: true)
-        let last = makeSyncSession(id: "sync_3", name: "three")
+        let last = makeSyncSession(id: "sync_3", name: "three", alpha: makeEndpoint(path: "/tmp/three"))
         let provider = RecordingProvider(
             syncSessions: [first, alreadyPaused, last], failOn: "syncPause:sync_3"
         ) { identifier in
@@ -1772,6 +1786,18 @@ struct FailingProvider: SessionProvider {
     func daemonStop() async throws { throw CLIError(exitCode: 1, stderr: "failed") }
     func daemonRegister() async throws { throw CLIError(exitCode: 1, stderr: "failed") }
     func daemonUnregister() async throws { throw CLIError(exitCode: 1, stderr: "failed") }
+}
+
+private func stagedSyncEdit(_ original: SyncSession) -> (original: SyncSession, replacement: SyncSession) {
+    let paused = makeSyncSession(
+        id: original.identifier, name: original.name, paused: true, conflicts: original.conflicts,
+        alpha: original.alpha, beta: original.beta
+    )
+    let replacement = makeSyncSession(
+        id: "sync_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG", name: original.name, paused: true,
+        alpha: original.alpha, beta: original.beta
+    )
+    return (paused, replacement)
 }
 
 func makeSyncSession(
@@ -2495,8 +2521,11 @@ struct ConflictResolutionTests {
         let conflict = Conflict(root: "file.txt", alphaChanges: [], betaChanges: [])
         let other = Conflict(root: "other.txt", alphaChanges: [], betaChanges: [])
         let session = makeSyncSession(id: "sync_1", name: "s1", conflicts: [conflict, other])
+        let (paused, staged) = stagedSyncEdit(session)
         let gate = Gate()
-        let provider = RecordingProvider(syncSessions: [session], duringSyncCreate: { await gate.pass() })
+        let provider = RecordingProvider(
+            syncSessions: [session], sessionsAfterCreate: [paused, staged], duringSyncCreate: { await gate.pass() }
+        )
         let cmdRecorder = CommandRecorder()
         let store = SessionStore(provider: provider, fileTransport: FileTransport(execute: cmdRecorder.execute), defaults: defaults)
         await store.refresh()
@@ -3433,7 +3462,10 @@ struct RecreateSelectionTests {
     @Test("Leaves selection alone when untouched sessions are present")
     @MainActor
     func ignoresPreexistingSessions() async {
-        let other = makeSyncSession(id: "sync_other", name: "other")
+        let other = makeSyncSession(
+            id: "sync_other", name: "other",
+            alpha: makeEndpoint(path: "/tmp/other-a"), beta: makeEndpoint(path: "/tmp/other-b")
+        )
         let old = makeSyncSession(id: "sync_old", name: "test")
         let new = makeSyncSession(id: "sync_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG", name: "test")
         let recorder = RecordingProvider(

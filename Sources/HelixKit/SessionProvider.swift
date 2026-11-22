@@ -60,6 +60,33 @@ struct MutationNotConfirmed: LocalizedError {
     var errorDescription: String? { cause.localizedDescription }
 }
 
+private enum SyncResumeRefusal: LocalizedError {
+    case notListed(String)
+    case matchingSession(target: String, running: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .notListed(let identifier):
+            "Cannot resume session \(identifier) because Mutagen does not list it."
+        case .matchingSession(let target, let running):
+            "Cannot resume \"\(target)\" while \"\(running)\" is running on the same endpoints."
+        }
+    }
+}
+
+private extension Endpoint {
+    var location: (String, String?, String?, Int?, String?) {
+        (protocol_, user, host, port, path)
+    }
+}
+
+private extension SyncSession {
+    func sharesEndpoints(with other: SyncSession) -> Bool {
+        (alpha.location == other.alpha.location && beta.location == other.beta.location)
+            || (alpha.location == other.beta.location && beta.location == other.alpha.location)
+    }
+}
+
 /// Wraps every provider operation that can start Mutagen implicitly. The underlying provider
 /// is available only here, so commands added to SessionProvider have to go through this boundary.
 @MainActor
@@ -76,6 +103,8 @@ final class ManagedSessionProvider {
     private var underlying: any SessionProvider
     private var pendingCommands = 0
     private var commandsDrained: CheckedContinuation<Void, Never>?
+    private var resuming = false
+    private var waitingToResume: [CheckedContinuation<Void, Never>] = []
 
     var hasPendingCommands: Bool { pendingCommands > 0 }
 
@@ -142,10 +171,14 @@ final class ManagedSessionProvider {
     }
 
     func observeSyncState(_ identifier: String) async -> ObservedMutationState {
+        await observeSyncState(identifier, on: underlying)
+    }
+
+    private func observeSyncState(_ identifier: String, on provider: any SessionProvider) async -> ObservedMutationState {
         // A cancelled caller still needs an answer, and a list must respect the Stop fence.
         await Task { @MainActor in
             do {
-                let sessions = try await syncList()
+                let sessions = try await command { _ in try await provider.syncList() }
                 guard let session = sessions.first(where: { $0.identifier == identifier }) else { return .absent }
                 return session.paused ? .paused : .running
             } catch {
@@ -159,17 +192,45 @@ final class ManagedSessionProvider {
             try await confirmMutation(.paused) {
                 try await provider.syncPause(identifier)
             } observe: {
-                await observeSyncState(identifier)
+                await observeSyncState(identifier, on: provider)
             }
         }
     }
 
     func syncResume(_ identifier: String) async throws {
+        // Keep the list and the command together across concurrent resumes.
+        if resuming { await withCheckedContinuation { waitingToResume.append($0) } }
+        resuming = true
+        defer {
+            if waitingToResume.isEmpty {
+                resuming = false
+            } else {
+                waitingToResume.removeFirst().resume()
+            }
+        }
+
+        try Task.checkCancellation()
         try await command { provider in
+            let listed = try await provider.syncList()
+            guard let target = listed.first(where: { $0.identifier == identifier }) else {
+                throw SyncResumeRefusal.notListed(identifier)
+            }
+            if let running = listed.first(where: {
+                $0.identifier != identifier && !$0.paused && target.sharesEndpoints(with: $0)
+            }) {
+                let targetName = target.name ?? identifier
+                let runningName = running.name ?? running.identifier
+                throw SyncResumeRefusal.matchingSession(
+                    target: targetName, running: runningName == targetName ? "\(runningName) (\(running.identifier))" : runningName
+                )
+            }
+
+            if let unavailable { throw unavailable }
+            try Task.checkCancellation()
             try await confirmMutation(.running) {
                 try await provider.syncResume(identifier)
             } observe: {
-                await observeSyncState(identifier)
+                await observeSyncState(identifier, on: provider)
             }
         }
     }
@@ -187,7 +248,7 @@ final class ManagedSessionProvider {
             try await confirmMutation(.absent) {
                 try await provider.syncTerminate(identifier)
             } observe: {
-                await observeSyncState(identifier)
+                await observeSyncState(identifier, on: provider)
             }
         }
     }

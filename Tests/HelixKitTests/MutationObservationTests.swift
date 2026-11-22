@@ -7,6 +7,66 @@ import Testing
 
 @MainActor
 struct MutationObservationTests {
+    @Test("Manual Resume protects shared paths without an edit record", arguments: [false, true])
+    func manualResumeChecksBothEndpointOrders(reversed: Bool) async throws {
+        let original = makeSyncSession(id: "original", name: "Original", paused: true)
+        let replacement = makeSyncSession(
+            id: "replacement", name: "Replacement",
+            alpha: reversed ? original.beta : original.alpha, beta: reversed ? original.alpha : original.beta
+        )
+        let commands = MutationCommands(sessions: [original])
+        let fixture = try MutationStoreFixture(commands: commands)
+        defer { fixture.cleanUp() }
+
+        await fixture.store.refresh()
+        #expect(fixture.store.syncSessions.map(\.identifier) == [original.identifier])
+        #expect(fixture.store.leftoverSyncOriginals.isEmpty)
+        await commands.addSession(replacement)
+        await fixture.store.resumeSync(original.identifier)
+
+        #expect(await commands.sessions.map(\.paused) == [true, false])
+        #expect(fixture.store.lastError == "Cannot resume \"Original\" while \"Replacement\" is running on the same endpoints.")
+    }
+
+    @Test("A timed Pause All resume leaves the replacement paused while the original runs")
+    func timedResumeChecksSharedEndpoints() async throws {
+        let original = makeSyncSession(id: "original", name: "Original")
+        let replacement = makeSyncSession(id: "replacement", name: "Replacement", paused: true)
+        let commands = MutationCommands(sessions: [original, replacement])
+        let fixture = try MutationStoreFixture(commands: commands)
+        defer { fixture.cleanUp() }
+        let pause = BulkPause(sessionIdentifiers: [replacement.identifier], resumeAt: .distantPast)
+        fixture.defaults.set(try JSONEncoder().encode(pause), forKey: "bulkPause")
+        let store = SessionStore(provider: commands.cli, defaults: fixture.defaults)
+
+        await store.refresh()
+
+        #expect(await commands.sessions.map(\.paused) == [false, true])
+        #expect(store.bulkPause == pause)
+        #expect(store.lastError?.contains("while \"Original\" is running on the same endpoints") == true)
+    }
+
+    @Test("Resume protects the oldest original after the edit records disappear")
+    func resumeChecksPathsAfterEditChainDisappears() async throws {
+        let oldest = makeSyncSession(id: "O0", name: "Oldest", paused: true)
+        let previous = makeSyncSession(id: "P", name: "Previous")
+        let newest = makeSyncSession(id: "R", name: "Newest", paused: true)
+        let commands = MutationCommands(sessions: [oldest, previous, newest])
+        let fixture = try MutationStoreFixture(commands: commands)
+        defer { fixture.cleanUp() }
+        let pairs = [oldest.identifier: newest.identifier, previous.identifier: newest.identifier]
+        fixture.defaults.set(pairs, forKey: "leftoverSyncOriginals")
+        let store = SessionStore(provider: commands.cli, defaults: fixture.defaults)
+
+        #expect(store.leftoverSyncOriginals == pairs)
+        await store.terminateSync(newest.identifier)
+        #expect(store.leftoverSyncOriginals.isEmpty)
+        await store.resumeSync(oldest.identifier)
+
+        #expect(await commands.sessions.map(\.paused) == [true, false])
+        #expect(store.lastError == "Cannot resume \"Oldest\" while \"Previous\" is running on the same endpoints.")
+    }
+
     @Test("An interrupted edit proceeds only if the original is observed paused", arguments: [true, false])
     func interruptedOriginalPause(pausesOriginal: Bool) async throws {
         let original = makeSyncSession(id: "original", name: "Project")
@@ -166,6 +226,10 @@ private actor MutationCommands {
             throw CLIError(exitCode: 1, stderr: "Unexpected test command \(arguments)")
         }
         return ""
+    }
+
+    func addSession(_ session: SyncSession) {
+        sessions.append(session)
     }
 
     private func setPaused(_ paused: Bool, identifier: String) {
