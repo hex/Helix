@@ -3049,6 +3049,44 @@ struct GitRepoStatusTests {
 
 @Suite("SessionStore fixGitMismatch")
 struct FixGitMismatchTests {
+    @Test("Git setup passes repository values as single quoted arguments")
+    @MainActor
+    func shellMetacharactersInGitSetup() async {
+        let session = makeSyncSession(id: "sync_1", name: "test")
+        let log = CallLog()
+        let transport = FileTransport { executable, arguments in
+            log.record(executable: executable, arguments: arguments)
+            switch arguments {
+            case ["-c", "cd '/tmp/a' && git config --get remote.origin.url"]:
+                return "ssh://alice@example.test/repo'$( )\n"
+            case ["-c", "cd '/tmp/a' && git branch --show-current"]:
+                return "topic';part\n"
+            default:
+                return ""
+            }
+        }
+        let store = SessionStore(provider: FakeProvider(), fileTransport: transport)
+
+        #expect(await store.fixGitMismatch(session: session, gitCheck: GitRepoCheck(status: .alphaOnly)))
+        #expect(log.entries.map(\.arguments) == [
+            ["-c", "cd '/tmp/a' && git config --get remote.origin.url"],
+            ["-c", "cd '/tmp/a' && git branch --show-current"],
+            ["-c", "cd '/tmp/b' && git init"],
+            ["-c", #"cd '/tmp/b' && git remote add origin -- 'ssh://alice@example.test/repo'\''$( )'"#],
+            ["-c", "cd '/tmp/b' && git fetch origin"],
+            ["-c", #"cd '/tmp/b' && git reset --mixed 'origin/topic'\'';part'"#],
+        ])
+        let instructions = SessionStore.gitSetupInstructions(
+            path: "/tmp/b'", remoteURL: "ssh://alice@example.test/repo'$( )", branch: "topic';part"
+        )
+        #expect(instructions == #"""
+        cd '/tmp/b'\'''
+        git init
+        git remote add origin -- 'ssh://alice@example.test/repo'\''$( )'
+        git fetch origin
+        git reset --mixed 'origin/topic'\'';part'
+        """#)
+    }
 
     @Test("Reads remote and branch from alpha, runs git commands on beta")
     @MainActor

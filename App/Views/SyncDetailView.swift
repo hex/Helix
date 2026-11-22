@@ -417,13 +417,9 @@ struct SyncDetailView: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
 
-                    let commands = """
-                    cd \(missingPath)
-                    git init
-                    git remote add origin \(sourceRemoteURL ?? "<remote-url>")
-                    git fetch origin
-                    git reset --mixed origin/\(sourceBranch ?? "<branch>")
-                    """
+                    let commands = SessionStore.gitSetupInstructions(
+                        path: missingPath, remoteURL: sourceRemoteURL, branch: sourceBranch
+                    )
 
                     Text(commands)
                         .font(.caption)

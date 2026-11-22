@@ -1695,6 +1695,23 @@ public final class SessionStore {
         )
     }
 
+    public static func gitSetupInstructions(path: String, remoteURL: String?, branch: String?) -> String {
+        let commands = gitSetupCommands(remoteURL: remoteURL ?? "<remote-url>", branch: branch ?? "<branch>")
+        return [
+            "cd \(FileTransport.shellWord(path))",
+            "git init",
+            commands.addRemote,
+            "git fetch origin",
+            commands.reset,
+        ].joined(separator: "\n")
+    }
+
+    private static func gitSetupCommands(remoteURL: String, branch: String) -> (addRemote: String, reset: String) {
+        let url = FileTransport.shellWord(remoteURL, expandingHome: false)
+        let ref = FileTransport.shellWord("origin/\(branch)", expandingHome: false)
+        return ("git remote add origin -- \(url)", "git reset --mixed \(ref)")
+    }
+
     public func fixGitMismatch(session: SyncSession, gitCheck: GitRepoCheck) async -> Bool {
         guard gitCheck.status == .alphaOnly || gitCheck.status == .betaOnly else { return false }
 
@@ -1723,10 +1740,11 @@ public final class SessionStore {
         }
 
         do {
+            let commands = Self.gitSetupCommands(remoteURL: remoteURL, branch: branch)
             _ = try await fileTransport.run(on: targetEndpoint, command: "git init", deadline: CommandDeadline.operation)
-            _ = try await fileTransport.run(on: targetEndpoint, command: "git remote add origin '\(remoteURL)'", deadline: CommandDeadline.operation)
+            _ = try await fileTransport.run(on: targetEndpoint, command: commands.addRemote, deadline: CommandDeadline.operation)
             _ = try await fileTransport.run(on: targetEndpoint, command: "git fetch origin", deadline: CommandDeadline.transfer)
-            _ = try await fileTransport.run(on: targetEndpoint, command: "git reset --mixed 'origin/\(branch)'", deadline: CommandDeadline.operation)
+            _ = try await fileTransport.run(on: targetEndpoint, command: commands.reset, deadline: CommandDeadline.operation)
             lastError = nil
             return true
         } catch {
