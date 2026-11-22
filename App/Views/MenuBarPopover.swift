@@ -172,6 +172,15 @@ private struct SyncSessionRow: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
 
+                if let notice = store.timedResumeNotice(for: session.identifier) {
+                    Text(notice)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Dismiss") { store.dismissTimedResumeNotice(for: session.identifier) }
+                        .controlSize(.small)
+                }
+
                 HStack(spacing: 8) {
                     if let cycles = session.successfulCycles, cycles > 0 {
                         Text("\(cycles) cycles")

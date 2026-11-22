@@ -123,15 +123,26 @@ struct MutationObservationTests {
         defer { fixture.cleanUp() }
         let pause = BulkPause(sessionIdentifiers: [replacement.identifier], resumeAt: .distantPast)
         fixture.defaults.set(try JSONEncoder().encode(pause), forKey: "bulkPause")
+        let cleanup = "A displaced conflict file is still on disk."
+        fixture.defaults.set([replacement.identifier: cleanup], forKey: "leftoverNotices")
         let store = SessionStore(provider: commands.cli, defaults: fixture.defaults)
+        let warning = "Timed Pause All left this session paused. Cannot resume \"Replacement\" while \"Original\" is running on the same endpoints."
+        let combinedNotice = "\(warning)\n\n\(cleanup)"
 
         await store.refresh()
 
         #expect(await commands.sessions.map(\.paused) == [false, true])
         #expect(store.bulkPause == nil)
-        #expect(store.lastError == "Could not resume Replacement: Cannot resume \"Replacement\" while \"Original\" is running on the same endpoints.")
+        #expect(store.leftoverNotices[replacement.identifier] == combinedNotice)
+        #expect(ConsoleLog.shared.entries.contains { $0.message == warning && $0.level == .error })
         await store.refresh()
-        #expect(store.lastError == nil)
+        await store.refresh()
+        #expect(store.leftoverNotices[replacement.identifier] == combinedNotice)
+
+        await store.pauseSync(original.identifier)
+        await store.resumeSync(replacement.identifier)
+        #expect(await commands.sessions.map(\.paused) == [true, false])
+        #expect(store.leftoverNotices[replacement.identifier] == cleanup)
     }
 
     @Test("Resume Anyway applies once and a held session needs separate consent")
