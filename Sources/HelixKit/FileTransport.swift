@@ -107,17 +107,18 @@ public struct ReplaceError: LocalizedError {
 public struct ReplacePlan {
     public let destination: EndpointURL
     public let source: EndpointURL
-    /// Where the copy of the source lands, beside the destination: `<name>.helix-incoming-<uuid>`.
+    /// Where the copy of the source lands, beside the destination: `.helix-incoming-<uuid>`.
     public let incoming: EndpointURL
-    /// Where the original waits when one rename cannot replace it: `<name>.helix-replaced-<uuid>`.
+    /// Where the original waits when one rename cannot replace it: `.helix-replaced-<uuid>`.
     public let setAside: EndpointURL
 
     public init(replacing destination: EndpointURL, withCopyOf source: EndpointURL) {
         let token = UUID().uuidString
+        let parent = (destination.path as NSString).deletingLastPathComponent as NSString
         self.destination = destination
         self.source = source
-        incoming = destination.withPath(destination.path + ".helix-incoming-\(token)")
-        setAside = destination.withPath(destination.path + ".helix-replaced-\(token)")
+        incoming = destination.withPath(parent.appendingPathComponent(".helix-incoming-\(token)"))
+        setAside = destination.withPath(parent.appendingPathComponent(".helix-replaced-\(token)"))
     }
 }
 

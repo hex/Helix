@@ -73,6 +73,38 @@ struct FileTransportReplaceDiskTests {
         }
     }
 
+    @Test("Replacement resolves a directory with a 240-byte name")
+    func replacesLongDestinationName() async throws {
+        try await withScratchDirectory { scratch in
+            let (winner, loser) = try makeDirectoryConflict(in: scratch, loserName: String(repeating: "x", count: 240))
+            let plan = ReplacePlan(replacing: .local(path: loser.path), withCopyOf: .local(path: winner.path))
+
+            let outcome = try await FileTransport().replace(plan)
+
+            #expect(outcome == .replaced)
+            #expect(try FileManager.default.contentsOfDirectory(atPath: loser.path) == ["kept.txt"])
+            #expect(try text(at: loser.appendingPathComponent("kept.txt")) == "winner")
+            #expect(try replaceSiblings(in: scratch) == [])
+        }
+    }
+
+    @Test("Replacement names stay beside root-level destinations and paths with trailing slashes")
+    func temporaryNamesStayBesideDestination() {
+        for (path, parent) in [("/", "/"), ("/file", "/"), ("/data/folder/", "/data/"), ("folder/", ""), ("~/data/folder/", "~/data/")] {
+            let plan = ReplacePlan(
+                replacing: .ssh(user: "test", host: "example.test", port: 2222, path: path),
+                withCopyOf: .local(path: "/tmp/winner")
+            )
+            let location = "test@example.test:2222:\(parent)"
+            let incomingPrefix = location + ".helix-incoming-"
+            let token = String(plan.incoming.formatted.dropFirst(incomingPrefix.count))
+
+            #expect(plan.incoming.formatted.hasPrefix(incomingPrefix), "destination \(path)")
+            #expect(token.utf8.count == 36 && UUID(uuidString: token) != nil, "destination \(path)")
+            #expect(plan.setAside.formatted == location + ".helix-replaced-" + token, "destination \(path)")
+        }
+    }
+
     @Test("a directory replaces a directory without nesting inside it")
     func directoryOverDirectory() async throws {
         try await withScratchDirectory { scratch in
@@ -186,7 +218,7 @@ struct FileTransportReplaceDiskTests {
             let siblings = try replaceSiblings(in: scratch)
             try #require(siblings.count == 1)
             let leftover = scratch.appendingPathComponent(siblings[0])
-            #expect(siblings[0].hasPrefix("loser.helix-replaced-"))
+            #expect(siblings[0].hasPrefix(".helix-replaced-"))
             #expect(outcome == .replacedLeavingOriginal(path: leftover.path, reason: "connection lost"))
             #expect(try FileManager.default.contentsOfDirectory(atPath: loser.path) == ["kept.txt"])
             #expect(try text(at: loser.appendingPathComponent("kept.txt")) == "winner")
@@ -195,9 +227,9 @@ struct FileTransportReplaceDiskTests {
     }
 
     /// A loser directory holding "dropped.txt" and a winner directory holding "kept.txt", both in `scratch`.
-    private func makeDirectoryConflict(in scratch: URL) throws -> (winner: URL, loser: URL) {
+    private func makeDirectoryConflict(in scratch: URL, loserName: String = "loser") throws -> (winner: URL, loser: URL) {
         let winner = scratch.appendingPathComponent("winner")
-        let loser = scratch.appendingPathComponent("loser")
+        let loser = scratch.appendingPathComponent(loserName)
         try FileManager.default.createDirectory(at: winner, withIntermediateDirectories: false)
         try FileManager.default.createDirectory(at: loser, withIntermediateDirectories: false)
         try "winner".write(to: winner.appendingPathComponent("kept.txt"), atomically: false, encoding: .utf8)
@@ -243,7 +275,7 @@ struct FileTransportReplaceDiskTests {
             let siblings = try replaceSiblings(in: scratch)
             try #require(siblings.count == 1)
             let leftover = scratch.appendingPathComponent(siblings[0])
-            #expect(siblings[0].hasPrefix("loser.helix-replaced-"))
+            #expect(siblings[0].hasPrefix(".helix-replaced-"))
             #expect(outcome == .replacedLeavingOriginal(path: leftover.path, reason: "connection lost"))
             #expect(try FileManager.default.contentsOfDirectory(atPath: loser.path) == ["kept.txt"])
             #expect(try text(at: loser.appendingPathComponent("kept.txt")) == "winner")
@@ -264,7 +296,7 @@ struct FileTransportReplaceDiskTests {
 
             #expect(try replaceSiblings(in: scratch) == [])
             #expect(error.aftermath == .destinationUnchanged)
-            #expect(error.incoming.hasPrefix("\(loser.path).helix-incoming-"))
+            #expect(error.incoming.hasPrefix(scratch.appendingPathComponent(".helix-incoming-").path))
             #expect(error.localizedDescription == "Could not move \(error.incoming) into place at \(loser.path): connection lost. \(loser.path) is unchanged")
             #expect(try FileManager.default.contentsOfDirectory(atPath: loser.path) == ["dropped.txt"])
             #expect(try text(at: loser.appendingPathComponent("dropped.txt")) == "loser")
@@ -290,8 +322,8 @@ struct FileTransportReplaceDiskTests {
             try #require(siblings.count == 2)
             let incoming = scratch.appendingPathComponent(siblings[0])
             let setAside = scratch.appendingPathComponent(siblings[1])
-            #expect(siblings[0].hasPrefix("loser.helix-incoming-"))
-            #expect(siblings[1].hasPrefix("loser.helix-replaced-"))
+            #expect(siblings[0].hasPrefix(".helix-incoming-"))
+            #expect(siblings[1].hasPrefix(".helix-replaced-"))
             #expect(error.aftermath == .destinationUnverified)
             #expect(error.localizedDescription == "Could not move \(incoming.path) into place at \(loser.path): connection lost. Then could not move the original back from \(setAside.path) to \(loser.path): connection lost. Nothing was deleted: look for the original at \(setAside.path) and for the replacement at \(incoming.path)")
             #expect(FileManager.default.fileExists(atPath: loser.path) == false)
@@ -377,7 +409,7 @@ struct FileTransportReplaceDiskTests {
             let siblings = try replaceSiblings(in: scratch)
             try #require(siblings.count == 1)
             let unusedCopy = scratch.appendingPathComponent(siblings[0])
-            #expect(siblings[0].hasPrefix("loser.txt.helix-incoming-"))
+            #expect(siblings[0].hasPrefix(".helix-incoming-"))
             #expect(error.aftermath == .destinationUnchanged)
             #expect(error.incomingCopy == .unverified(path: unusedCopy.path))
             #expect(error.localizedDescription == "Could not move \(unusedCopy.path) into place at \(loser.path): connection lost. Then could not remove the copy at \(unusedCopy.path): permission denied. \(loser.path) is unchanged, and the unused copy may still be at \(unusedCopy.path)")
