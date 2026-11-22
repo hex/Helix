@@ -82,8 +82,7 @@ public final class SessionStore {
     @ObservationIgnored private var replacementsUnderWay: [String: String] = [:] {
         didSet { persist(replacementsUnderWay, forKey: Self.replacementsUnderWayKey) }
     }
-    /// Set-aside originals that resolved conflicts left on disk for the user to delete, by session identifier.
-    /// A notice does not stop its session from syncing; it stays until dismissed or until the session is gone.
+    /// Per-session cleanup and timed Resume notices. They do not keep a session paused.
     public private(set) var leftoverNotices: [String: String] = [:] {
         didSet { persist(leftoverNotices, forKey: Self.leftoverNoticesKey) }
     }
@@ -137,6 +136,7 @@ public final class SessionStore {
     private static let sessionHoldsKey = "sessionHolds"
     private static let replacementsUnderWayKey = "replacementsUnderWay"
     private static let leftoverNoticesKey = "leftoverNotices"
+    private static let timedResumeNoticePrefix = "Timed Pause All left this session paused. "
     private static let leftoverSyncOriginalsKey = "leftoverSyncOriginals"
     private static let daemonBackgroundPriorityKey = "daemonBackgroundPriority"
     private static let daemonStoppedKey = "daemonStoppedByHelix"
@@ -418,7 +418,7 @@ public final class SessionStore {
     public func duplicateSyncSessionNames(alpha: EndpointURL, beta: EndpointURL) async throws -> [String] {
         let endpoints = SyncEndpointPair(alpha: alpha, beta: beta)
         return try await provider.syncList()
-            .filter { SyncEndpointPair($0) == endpoints }
+            .filter { endpoints.matchesForCreation(SyncEndpointPair($0)) }
             .map { $0.name ?? $0.identifier }
             .sorted()
     }
@@ -754,7 +754,10 @@ public final class SessionStore {
                     case .resumed, .heldBack: return nil
                     }
                 } catch let conflict as SyncResumeConflict {
-                    if record.resumeAt != nil { self.updateBulkPause(replacing: identifier) }
+                    if record.resumeAt != nil {
+                        self.recordTimedResumeRefusal(conflict.message, for: identifier)
+                        self.updateBulkPause(replacing: identifier)
+                    }
                     return conflict.message
                 } catch {
                     return error.localizedDescription
@@ -791,6 +794,7 @@ public final class SessionStore {
             return .heldBack(message: message)
         }
         try await provider.syncResume(identifier, context: .restoring(snapshot))
+        dismissTimedResumeNotice(for: identifier)
         return .resumed
     }
 
@@ -874,6 +878,7 @@ public final class SessionStore {
                 // The hold ends inside the turn, before a resolve waiting behind this resume can set another.
                 self.sessionHolds[identifier] = nil
                 self.replacementsUnderWay[identifier] = nil
+                self.dismissTimedResumeNotice(for: identifier)
                 return (nil, nil)
             } catch let conflict as SyncResumeConflict {
                 return (conflict.message, .overlap(conflict))
@@ -1389,8 +1394,35 @@ public final class SessionStore {
         leftoverNotices[identifier] = nil
     }
 
+    public func timedResumeNotice(for identifier: String) -> String? {
+        sessionNoticeParts(for: identifier).timed
+    }
+
+    public func dismissTimedResumeNotice(for identifier: String) {
+        let parts = sessionNoticeParts(for: identifier)
+        guard parts.timed != nil else { return }
+        leftoverNotices[identifier] = parts.cleanup
+    }
+
+    private func sessionNoticeParts(for identifier: String) -> (timed: String?, cleanup: String?) {
+        guard let notice = leftoverNotices[identifier], notice.hasPrefix(Self.timedResumeNoticePrefix) else {
+            return (nil, leftoverNotices[identifier])
+        }
+        guard let separator = notice.range(of: "\n\n") else { return (notice, nil) }
+        return (String(notice[..<separator.lowerBound]), String(notice[separator.upperBound...]))
+    }
+
+    private func recordTimedResumeRefusal(_ reason: String, for identifier: String) {
+        let message = Self.timedResumeNoticePrefix + reason.split(whereSeparator: \.isNewline).joined(separator: " ")
+        let cleanup = sessionNoticeParts(for: identifier).cleanup
+        leftoverNotices[identifier] = [message, cleanup].compactMap { $0 }.joined(separator: "\n\n")
+        ConsoleLog.shared.log(message, level: .error)
+    }
+
     private func addLeftoverNotice(_ notice: String, for identifier: String) {
-        leftoverNotices[identifier] = ([leftoverNotices[identifier], notice].compactMap { $0 }).joined(separator: " ")
+        let parts = sessionNoticeParts(for: identifier)
+        let cleanup = [parts.cleanup, notice].compactMap { $0 }.joined(separator: " ")
+        leftoverNotices[identifier] = [parts.timed, cleanup].compactMap { $0 }.joined(separator: "\n\n")
     }
 
     private func applyResolve(
@@ -1704,7 +1736,7 @@ public final class SessionStore {
             commands.addRemote,
             "git fetch origin",
             commands.reset,
-        ].joined(separator: "\n")
+        ].joined(separator: " &&\n")
     }
 
     private static func gitSetupCommands(remoteURL: String, branch: String) -> (addRemote: String, reset: String) {

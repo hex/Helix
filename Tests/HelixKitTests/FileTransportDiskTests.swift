@@ -358,19 +358,22 @@ struct FileTransportReplaceDiskTests {
 
 @Suite("Conflict interruptions on disk")
 struct ConflictInterruptionDiskTests {
-    @Test("Conflict resolution restores previously running overlap", arguments: [false, true])
+    @Test("Conflict resolution restores only overlap that was already running", arguments: [false, true], [false, true])
     @MainActor
-    func conflictRestoresPreviouslyRunningOverlap(bulk: Bool) async throws {
+    func conflictRestoresPreviouslyRunningOverlap(bulk: Bool, peerAlreadyRunning: Bool) async throws {
         try await withScratchDirectory { scratch in
             let fixture = try LocalConflictFixture(in: scratch)
             let suite = "ConflictResumeOverlapTests.\(UUID())"
             let defaults = try #require(UserDefaults(suiteName: suite))
             defer { defaults.removePersistentDomain(forName: suite) }
             let peer = makeSyncSession(
-                id: "peer", name: "Other", alpha: fixture.session.alpha, beta: fixture.session.beta
+                id: "peer", name: "Other", paused: !peerAlreadyRunning,
+                alpha: fixture.session.alpha, beta: fixture.session.beta
             )
-            let provider = RecordingProvider(syncSessions: [fixture.session, peer])
-            let store = SessionStore(provider: provider, defaults: defaults)
+            let commands = MutationCommands(
+                sessions: [fixture.session, peer], startingPeerOnPause: peerAlreadyRunning ? nil : peer.identifier
+            )
+            let store = SessionStore(provider: commands.cli, defaults: defaults)
 
             let unresolved = if bulk {
                 await store.resolveConflicts(session: fixture.session, conflicts: [fixture.conflict], winner: .alpha)
@@ -379,8 +382,18 @@ struct ConflictInterruptionDiskTests {
             }
 
             #expect(try String(contentsOf: fixture.loser, encoding: .utf8) == "winner")
-            #expect(unresolved.isEmpty)
-            #expect(provider.calls == ["syncPause:sync_1", "syncResume:sync_1", "syncFlush:sync_1"])
+            #expect(await commands.sessions.map(\.paused) == [!peerAlreadyRunning, false])
+            let writes = await commands.calls.filter { $0.count == 3 }
+            if peerAlreadyRunning {
+                #expect(unresolved.isEmpty)
+                #expect(writes == [
+                    ["sync", "pause", "sync_1"], ["sync", "resume", "sync_1"], ["sync", "flush", "sync_1"],
+                ])
+            } else {
+                #expect(unresolved == ["file.txt"])
+                #expect(writes == [["sync", "pause", "sync_1"]])
+                #expect(store.lastError == "Could not confirm that Mutagen resumed \"project\". Flush was skipped. Check the session status before retrying. Cannot resume \"project\" while \"Other\" is running on the same endpoints.")
+            }
         }
     }
 

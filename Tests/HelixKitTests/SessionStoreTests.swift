@@ -3104,10 +3104,10 @@ struct FixGitMismatchTests {
             path: "/tmp/b'", remoteURL: "ssh://alice@example.test/repo'$( )", branch: "topic';part"
         )
         #expect(instructions == #"""
-        cd '/tmp/b'\'''
-        git init
-        git remote add origin -- 'ssh://alice@example.test/repo'\''$( )'
-        git fetch origin
+        cd '/tmp/b'\''' &&
+        git init &&
+        git remote add origin -- 'ssh://alice@example.test/repo'\''$( )' &&
+        git fetch origin &&
         git reset --mixed 'origin/topic'\'';part'
         """#)
     }
