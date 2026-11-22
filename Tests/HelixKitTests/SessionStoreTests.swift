@@ -669,7 +669,7 @@ struct SessionStoreTests {
 
 @Suite("SessionStore recreateSync")
 struct RecreateSessionTests {
-    private let createEdited = "syncCreate:sync create /tmp/a /tmp/b --name test --paused --mode one-way-safe"
+    private let createEdited = "syncCreate:sync create /tmp/a /tmp/b --name test --paused --mode one-way-safe --no-global-configuration"
 
     @Test("Editing preserves session settings and overrides on both endpoints")
     @MainActor
@@ -698,7 +698,7 @@ struct RecreateSessionTests {
 
             await store.recreateSync(session, options: edited, alpha: "/srv/project", beta: "alice@example.com:/srv/mirror")
 
-            #expect(recorder.calls.first == "\(start) \(modes) \(options) \(vcsFlag) \(limits) \(sessionFlags) \(alpha) \(beta)")
+            #expect(recorder.calls.first == "\(start) \(modes) \(options) \(vcsFlag) \(limits) \(sessionFlags) \(alpha) \(beta) --no-global-configuration")
         }
     }
 
@@ -833,7 +833,7 @@ struct RecreateSessionTests {
 
         #expect(store.lastError == nil)
         #expect(recorder.calls == [
-            "syncCreate:sync create /tmp/a /tmp/b --name test --paused --mode two-way-safe --ignore *.log --ignore node_modules/symlink",
+            "syncCreate:sync create /tmp/a /tmp/b --name test --paused --mode two-way-safe --ignore *.log --ignore node_modules/symlink --no-global-configuration",
             "syncPause:sync_1", "syncResume:sync_0123456789abcdefghijklmnopqrstuvwxyzABCDEFG", "syncTerminate:sync_1",
         ])
     }
@@ -1879,7 +1879,7 @@ struct ConflictResolutionTests {
         defaults.removePersistentDomain(forName: suiteName)
     }
 
-    private let createPaused = "syncCreate:sync create /tmp/a /tmp/b --paused"
+    private let createPaused = "syncCreate:sync create /tmp/a /tmp/b --paused --no-global-configuration"
 
     /// The per-call token in replace's sibling names, read from the copy that lands beside `destination`.
     private func replaceToken(copiedBeside destination: String, in commands: [RecordedCommand]) throws -> String {

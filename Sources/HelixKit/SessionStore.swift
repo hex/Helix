@@ -535,7 +535,8 @@ public final class SessionStore {
 
         let replacement: String
         do {
-            replacement = try await provider.syncCreate(arguments: staged.arguments(alpha: alpha, beta: beta))
+            let arguments = staged.arguments(alpha: alpha, beta: beta) + ["--no-global-configuration"]
+            replacement = try await provider.syncCreate(arguments: arguments)
         } catch {
             let message = syncCreateFailure(error, name: options.name, originalKept: true)
             keepEditRecord = error.isCommandInterruption
