@@ -704,6 +704,7 @@ public final class SessionStore {
         guard !bulkPauseInFlight else { return }
         bulkPauseInFlight = true
         defer { bulkPauseInFlight = false }
+        let resolvingAtStart = Set(resolvesInFlight.keys)
         guard await reloadSessions() else { return }
 
         if let record = bulkPause, record.resumeAt != resumeAt {
@@ -711,17 +712,27 @@ public final class SessionStore {
         }
 
         var failures: [String] = []
-        for session in syncSessions where !session.paused {
+        for session in syncSessions {
             let identifier = session.identifier
-            do {
-                try await provider.syncPause(identifier)
-                let paused = bulkPause?.sessionIdentifiers ?? []
-                if !paused.contains(identifier) {
-                    bulkPause = BulkPause(sessionIdentifiers: paused + [identifier], resumeAt: resumeAt)
+            let wasResolving = resolvingAtStart.contains(identifier) || isResolving(identifier)
+            guard !session.paused || wasResolving else { continue }
+            let failure: String? = await inTurn(on: identifier) {
+                do {
+                    if wasResolving {
+                        let listed = try await self.provider.syncList()
+                        guard listed.contains(where: { $0.identifier == identifier && !$0.paused }) else { return nil }
+                    }
+                    try await self.provider.syncPause(identifier)
+                    let paused = self.bulkPause?.sessionIdentifiers ?? []
+                    if !paused.contains(identifier) {
+                        self.bulkPause = BulkPause(sessionIdentifiers: paused + [identifier], resumeAt: resumeAt)
+                    }
+                    return nil
+                } catch {
+                    return "Could not pause \(session.name ?? identifier): \(error.localizedDescription)"
                 }
-            } catch {
-                failures.append("Could not pause \(session.name ?? session.identifier): \(error.localizedDescription)")
             }
+            if let failure { failures.append(failure) }
         }
         await finishBulkAction(failures: failures)
     }

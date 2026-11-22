@@ -358,6 +358,47 @@ struct FileTransportReplaceDiskTests {
 
 @Suite("Conflict interruptions on disk")
 struct ConflictInterruptionDiskTests {
+    @Test("Pause All includes a session paused by an in-progress conflict resolve", arguments: [false, true])
+    @MainActor
+    func pauseAllDuringConflictResolve(timed: Bool) async throws {
+        try await withScratchDirectory { scratch in
+            let fixture = try LocalConflictFixture(in: scratch)
+            let suite = "ConflictBulkPauseTests.\(UUID())"
+            let defaults = try #require(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let other = makeSyncSession(id: "other", name: "Other")
+            let commands = MutationCommands(sessions: [other, fixture.session])
+            let copying = Gate()
+            let transport = FileTransport { executable, arguments in
+                if executable == "/bin/cp" { await copying.pass() }
+                return try await runProcess(executablePath: executable, arguments: arguments)
+            }
+            let store = SessionStore(provider: commands.cli, fileTransport: transport, defaults: defaults)
+            let resolve = Task {
+                await store.resolveConflict(session: fixture.session, conflict: fixture.conflict, winner: .alpha)
+            }
+            await copying.reached()
+            #expect(await commands.sessions.map(\.paused) == [false, true])
+            let callCount = await commands.calls.count
+            let resumeAt = timed ? Date(timeIntervalSince1970: 2_000_000_000) : nil
+            let pause = Task { await store.pauseAllSync(until: resumeAt) }
+            let limit = ContinuousClock.now.advanced(by: .seconds(2))
+            while await commands.calls.count <= callCount, ContinuousClock.now < limit {
+                await Task.yield()
+            }
+            #expect(await commands.calls.count > callCount)
+            await copying.open()
+            #expect(await resolve.value.isEmpty)
+            await pause.value
+
+            #expect(await commands.sessions.map(\.paused) == [true, true])
+            #expect(store.bulkPause == BulkPause(sessionIdentifiers: [other.identifier, fixture.session.identifier], resumeAt: resumeAt))
+            #expect(try String(contentsOf: fixture.loser, encoding: .utf8) == "winner")
+            await store.resumeBulkPause()
+            #expect(await commands.sessions.map(\.paused) == [false, false])
+        }
+    }
+
     @Test("Conflict resolution restores only overlap that was already running", arguments: [false, true], [false, true])
     @MainActor
     func conflictRestoresPreviouslyRunningOverlap(bulk: Bool, peerAlreadyRunning: Bool) async throws {
