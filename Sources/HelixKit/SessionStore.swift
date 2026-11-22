@@ -58,6 +58,7 @@ public final class SessionStore {
     public private(set) var forwardSessions: [ForwardSession] = []
     public private(set) var daemonStatus = DaemonStatus.stopped
     public var daemonRunning: Bool { daemonStatus == .running || daemonStatus == .startedOutside }
+    public var isMutagenStoppedByHelix: Bool { daemonStatus == .stopped && daemonControl == .stopped }
     public private(set) var daemonStopProgress: String?
     public private(set) var daemonAutoStart = false
     public private(set) var mutagenVersion: String?
@@ -1053,7 +1054,7 @@ public final class SessionStore {
         syncSessions = []
         forwardSessions = []
         backgroundPriorityPID = nil
-        setDaemonPriorityError(daemonBackgroundPriorityRequested ? "Mutagen daemon not found." : nil)
+        setDaemonPriorityError(nil)
         lastError = failure
         schedulePolling(refreshImmediately: false)
         return failure == nil
@@ -1116,7 +1117,7 @@ public final class SessionStore {
     /// Applies the requested priority to the current daemon and retries after a restart or failure.
     private func reapplyDaemonBackgroundPriority() async {
         guard !daemonPriorityInFlight else { return }
-        guard daemonBackgroundPriorityRequested || backgroundPriorityPID != nil else {
+        guard !isMutagenStoppedByHelix, daemonBackgroundPriorityRequested || backgroundPriorityPID != nil else {
             setDaemonPriorityError(nil)
             return
         }

@@ -98,11 +98,19 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
 
                 Toggle("Run sync at background priority", isOn: Binding(
-                    get: { store.daemonBackgroundPriority },
+                    get: {
+                        store.isMutagenStoppedByHelix ? store.daemonBackgroundPriorityRequested : store.daemonBackgroundPriority
+                    },
                     set: { enabled in Task { await store.setDaemonBackgroundPriority(enabled) } }
                 ))
 
-                if let error = store.daemonPriorityError {
+                if store.isMutagenStoppedByHelix {
+                    if store.daemonBackgroundPriorityRequested {
+                        Text("Background priority applies when Mutagen starts.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } else if let error = store.daemonPriorityError {
                     Text(error)
                         .font(.caption)
                         .foregroundStyle(.red)

@@ -1504,6 +1504,30 @@ struct DaemonPriorityTests {
         defaults.removePersistentDomain(forName: suiteName)
     }
 
+    @Test("A deliberate Stop defers background priority without reporting an error")
+    @MainActor
+    func stoppedDaemonDefersBackgroundPriority() async {
+        defer { removeDefaults() }
+        let daemon = RecordingDaemonProcess(pid: nil)
+        let store = SessionStore(provider: FakeProvider(), defaults: defaults, daemonProcess: daemon)
+        await store.setDaemonBackgroundPriority(true)
+        #expect(store.daemonPriorityError == "Mutagen daemon not found.")
+
+        #expect(await store.stopDaemon())
+        #expect(store.daemonStatus == .stopped)
+        #expect(store.daemonPriorityError == nil)
+        #expect(store.daemonBackgroundPriorityRequested)
+
+        await store.setDaemonBackgroundPriority(false)
+        await store.setDaemonBackgroundPriority(true)
+        #expect(store.daemonPriorityError == nil)
+
+        daemon.restart(as: 123)
+        await store.startDaemon()
+        #expect(store.daemonBackgroundPriority)
+        #expect(daemon.calls == ["background:123"])
+    }
+
     @Test("Background priority stays off when the daemon is missing")
     @MainActor
     func noDaemonRunning() async {

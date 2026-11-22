@@ -42,7 +42,7 @@
 - **Launch at login** -- Optional login item via SMAppService
 - **Configurable polling** -- Adjust refresh interval from 2 to 30 seconds
 - **Daemon controls** -- After Stop, Helix does not start Mutagen until you choose Start. Login items and other tools can still start Mutagen. Helix checks for the daemon process at the usual polling interval. If Mutagen starts outside Helix, Manage Sessions takes over without sending a start command. Stop Again requests another stop. Session commands stay unavailable while you leave Helix stopped. Finish any edit, bulk pause or resume, or conflict resolve before stopping. Helix remembers Stop across relaunches and updates. If Stop returns an error, Helix checks the Mutagen process. If the check fails, Helix stays stopped and checks again at the next poll. Settings shows when Stop is waiting for running commands. Stop can wait up to 15 minutes for a transfer-class command, 45 seconds for the stop command, and 15 seconds to check status on failure. Each stage can add up to 250 milliseconds for signal handling.
-- **Background priority** -- Mutagen yields CPU and disk while the Mac is busy, which can slow transfers. Settings shows whether the priority applied and why it failed. Helix retries a saved request after a daemon restart.
+- **Background priority** -- Mutagen yields CPU and disk while the Mac is busy, which can slow transfers. Settings shows whether the priority applied and why it failed. Helix retries a saved request after a daemon restart. After Stop, Settings shows that a pending request will apply when Mutagen starts.
 - **Text size** -- Adjustable text size (System Default, Small, Medium, Large, Extra Large) in Settings
 
 ## Install
