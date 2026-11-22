@@ -414,6 +414,14 @@ public final class SessionStore {
 
     // MARK: - Session Creation
 
+    public func duplicateSyncSessionNames(alpha: EndpointURL, beta: EndpointURL) async throws -> [String] {
+        let endpoints = SyncEndpointPair(alpha: alpha, beta: beta)
+        return try await provider.syncList()
+            .filter { SyncEndpointPair($0) == endpoints }
+            .map { $0.name ?? $0.identifier }
+            .sorted()
+    }
+
     @discardableResult
     public func createSync(options: SyncCreateOptions, alpha: String, beta: String) async -> String? {
         let args = options.arguments(alpha: alpha, beta: beta)
@@ -541,6 +549,7 @@ public final class SessionStore {
         edit["replacement"] = replacement
         defaults.set(edit, forKey: Self.syncEditInProgressKey)
 
+        let restoration = SyncResumeRestoration(identifier: original, listed: listed)
         if !current.paused {
             do {
                 try await provider.syncPause(original)
@@ -554,20 +563,24 @@ public final class SessionStore {
                         original: original, replacement: replacement
                     )
                 }
-                let recovery = await recoverSyncEdit(original: original, replacement: replacement, activationAttempted: false)
+                let recovery = await recoverSyncEdit(
+                    original: original, replacement: replacement, activationAttempted: false, restoration: restoration
+                )
                 keepEditRecord = !recovery.observedEnd
                 if keepEditRecord { return reportInterruptedEdit("\(message) \(recovery.message)", original: original, replacement: replacement) }
                 return await finishSyncEdit("\(message) \(recovery.message)")
             }
             do {
-                try await provider.syncResume(replacement)
+                try await provider.syncResume(replacement, context: .restoring(restoration))
             } catch {
                 let message = "Could not start the edited session: \(error.localizedDescription)."
                 if error.isCommandInterruption {
                     keepEditRecord = true
                     return reportInterruptedEdit(message, original: original, replacement: replacement)
                 }
-                let recovery = await recoverSyncEdit(original: original, replacement: replacement, activationAttempted: true)
+                let recovery = await recoverSyncEdit(
+                    original: original, replacement: replacement, activationAttempted: true, restoration: restoration
+                )
                 keepEditRecord = !recovery.observedEnd
                 if keepEditRecord { return reportInterruptedEdit("\(message) \(recovery.message)", original: original, replacement: replacement) }
                 return await finishSyncEdit("\(message) \(recovery.message)")
@@ -607,7 +620,8 @@ public final class SessionStore {
     private func recoverSyncEdit(
         original: String,
         replacement: String,
-        activationAttempted: Bool
+        activationAttempted: Bool,
+        restoration: SyncResumeRestoration?
     ) async -> (message: String, observedEnd: Bool) {
         var messages: [String] = []
         do {
@@ -633,7 +647,7 @@ public final class SessionStore {
 
         updateBulkPause(replacing: replacement, with: original)
         do {
-            switch try await resumeUnlessHeld(original) {
+            switch try await resumeUnlessHeld(original, restoring: restoration) {
             case .resumed:
                 messages.append("The original session was restored.")
             case .heldBack(let hold):
@@ -705,9 +719,9 @@ public final class SessionStore {
         await finishBulkAction(failures: failures)
     }
 
-    /// Resumes the sessions Pause All paused that are still paused, except held ones. A session that fails
-    /// to resume, that a conflict resolve is working on, or that is being edited stays in the record so the
-    /// next attempt retries it.
+    /// Resumes the sessions Pause All paused that are still paused, except held ones.
+    /// A timed pause reports an endpoint overlap once and leaves its session paused.
+    /// Other failures and sessions busy with an edit or resolve stay in the record for the next attempt.
     public func resumeBulkPause() async {
         if let unavailable = provider.unavailable {
             lastError = unavailable.localizedDescription
@@ -738,6 +752,9 @@ public final class SessionStore {
                     switch try await self.resumeUnlessHeld(identifier) {
                     case .resumed, .heldBack: return nil
                     }
+                } catch let conflict as SyncResumeConflict {
+                    if record.resumeAt != nil { self.updateBulkPause(replacing: identifier) }
+                    return conflict.message
                 } catch {
                     return error.localizedDescription
                 }
@@ -766,11 +783,13 @@ public final class SessionStore {
     /// The only way the store resumes a session that the user did not ask it by name to resume: at the end
     /// of a conflict resolve, for Resume after Pause All, at a timed pause's deadline, and to restore the
     /// original of a failed edit. A held session stays paused.
-    private func resumeUnlessHeld(_ identifier: String) async throws -> UnpromptedResume {
+    private func resumeUnlessHeld(
+        _ identifier: String, restoring snapshot: SyncResumeRestoration? = nil
+    ) async throws -> UnpromptedResume {
         if let message = sessionHolds[identifier] {
             return .heldBack(message: message)
         }
-        try await provider.syncResume(identifier)
+        try await provider.syncResume(identifier, context: .restoring(snapshot))
         return .resumed
     }
 
@@ -816,16 +835,25 @@ public final class SessionStore {
     /// Resumes a session because the user asked for that session; this is what ends its hold.
     /// Refused while a conflict resolve is moving the session's files, and while the session is being edited.
     public func resumeSync(_ identifier: String) async {
-        guard sessionBeingEdited != identifier else {
+        _ = await requestSyncResume(identifier, confirmingHold: sessionHolds[identifier])
+    }
+
+    public func requestSyncResume(
+        _ identifier: String, confirmingHold: String? = nil, overriding conflict: SyncResumeConflict? = nil
+    ) async -> SyncResumePrompt? {
+        guard sessionBeingEdited != identifier, replacementBeingEdited != identifier else {
             lastError = "The session \"\(displayName(of: identifier))\" was not resumed: it is being edited."
-            return
+            return nil
         }
         guard !isResolving(identifier) else {
             lastError = "The session \"\(displayName(of: identifier))\" was not resumed: a conflict resolve is running on it."
-            return
+            return nil
         }
         // The resume takes a turn, so a resolve requested while it is in flight pauses after it.
-        let failure: String? = await inTurn(on: identifier) {
+        let outcome: (failure: String?, prompt: SyncResumePrompt?) = await inTurn(on: identifier) {
+            if let hold = self.sessionHolds[identifier], hold != confirmingHold {
+                return (hold, .held(hold))
+            }
             do {
                 if !self.interruptedEditPairs.isEmpty {
                     let listed = try await self.provider.syncList()
@@ -834,27 +862,27 @@ public final class SessionStore {
                 if let replacement = self.leftoverSyncOriginals[identifier] {
                     let pair = try await self.checkEditPair(original: identifier, replacement: replacement)
                     if let currentReplacement = self.leftoverSyncOriginals[identifier] {
-                        return self.leftoverResumeRefusal(original: identifier, replacement: currentReplacement)
+                        return (self.leftoverResumeRefusal(original: identifier, replacement: currentReplacement), nil)
                     }
                     if pair.replacement != nil {
-                        return self.leftoverResumeRefusal(original: identifier, replacement: replacement)
+                        return (self.leftoverResumeRefusal(original: identifier, replacement: replacement), nil)
                     }
                 }
-                try await self.provider.syncResume(identifier)
+                let context = conflict.map(SyncResumeContext.approved) ?? .ordinary
+                try await self.provider.syncResume(identifier, context: context)
                 // The hold ends inside the turn, before a resolve waiting behind this resume can set another.
                 self.sessionHolds[identifier] = nil
                 self.replacementsUnderWay[identifier] = nil
-                return nil
+                return (nil, nil)
+            } catch let conflict as SyncResumeConflict {
+                return (conflict.message, .overlap(conflict))
             } catch {
-                return error.localizedDescription
+                return (error.localizedDescription, nil)
             }
         }
-        if let failure {
-            lastError = failure
-            return
-        }
-        lastError = nil
-        await refresh()
+        lastError = outcome.failure
+        if outcome.failure == nil { await refresh() }
+        return outcome.prompt
     }
 
     private func leftoverResumeRefusal(original: String, replacement: String) -> String {
@@ -1285,8 +1313,9 @@ public final class SessionStore {
         ConsoleLog.shared.log("resolveConflict: \(winner) wins for root '\(conflict.root)'")
 
         // Pause the session to prevent mutagen from syncing while we modify files
+        let restoration: SyncResumeRestoration?
         do {
-            try await provider.syncPause(session.identifier)
+            restoration = try await provider.pauseForRestoration(session.identifier)
             ConsoleLog.shared.log("  paused session")
         } catch {
             ConsoleLog.shared.log("  pause FAILED: \(error.localizedDescription)", level: .error)
@@ -1311,20 +1340,20 @@ public final class SessionStore {
             case .winnerMissing(let winnerURL):
                 ConsoleLog.shared.log("  winner file no longer exists at \(winnerURL.formatted)", level: .error)
                 lastError = "The file \"\(conflict.root)\" no longer exists at the source. It may have been renamed or deleted. Try refreshing sessions."
-                _ = await resumeAfterConflict(session, keeping: lastError)
+                _ = await resumeAfterConflict(session, keeping: lastError, restoring: restoration)
                 return unresolved
             }
         } catch {
             ConsoleLog.shared.log("  transport FAILED: \(error.localizedDescription)", level: .error)
             lastError = error.localizedDescription
-            _ = await resumeAfterConflict(session, keeping: lastError)
+            _ = await resumeAfterConflict(session, keeping: lastError, restoring: restoration)
             return unresolved
         }
 
         // Resume and flush to let mutagen re-scan with the resolved state.
         // Don't call refresh() here — syncList() right after flush catches mutagen mid-scan
         // with empty conflicts, causing UI flicker. The polling cycle brings authoritative data.
-        guard await resumeAfterConflict(session, keeping: leftoverNotice) else { return unresolved }
+        guard await resumeAfterConflict(session, keeping: leftoverNotice, restoring: restoration) else { return unresolved }
         ConsoleLog.shared.log("  resumed session")
         do {
             try await provider.syncFlush(session.identifier)
@@ -1337,9 +1366,11 @@ public final class SessionStore {
         return []
     }
 
-    private func resumeAfterConflict(_ session: SyncSession, keeping priorNotice: String?) async -> Bool {
+    private func resumeAfterConflict(
+        _ session: SyncSession, keeping priorNotice: String?, restoring snapshot: SyncResumeRestoration?
+    ) async -> Bool {
         do {
-            if case .heldBack(let hold) = try await resumeUnlessHeld(session.identifier) {
+            if case .heldBack(let hold) = try await resumeUnlessHeld(session.identifier, restoring: snapshot) {
                 lastError = hold
                 return false
             }
@@ -1382,8 +1413,9 @@ public final class SessionStore {
             }
         }
 
+        let restoration: SyncResumeRestoration?
         do {
-            try await provider.syncPause(session.identifier)
+            restoration = try await provider.pauseForRestoration(session.identifier)
             ConsoleLog.shared.log("  paused session")
         } catch {
             ConsoleLog.shared.log("  pause FAILED: \(error.localizedDescription)", level: .error)
@@ -1429,7 +1461,9 @@ public final class SessionStore {
         ConsoleLog.shared.log("  resolved \(resolved)/\(conflicts.count) conflicts (\(failed) failed)")
 
         let priorNotice = notices.isEmpty ? nil : notices.joined(separator: " ")
-        guard await resumeAfterConflict(session, keeping: priorNotice) else { return Set(conflicts.map(\.root)) }
+        guard await resumeAfterConflict(session, keeping: priorNotice, restoring: restoration) else {
+            return Set(conflicts.map(\.root))
+        }
         do {
             try await provider.syncFlush(session.identifier)
             if failed > 0 {

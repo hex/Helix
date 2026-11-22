@@ -260,35 +260,36 @@ struct SyncDetailView: View {
     }
 
     private var actionButtons: some View {
-        HStack(spacing: 8) {
-            if actionInProgress != nil {
-                ProgressView()
-                    .controlSize(.small)
-            }
-
-            if session.paused {
-                Button("Resume") {
-                    Task { await runAction("resume") { await store.resumeSync(session.identifier) } }
+        SyncResumeConfirmation(identifier: session.identifier, store: store) { resume, isResuming in
+            let isBusy = actionInProgress != nil || isResuming
+            HStack(spacing: 8) {
+                if isBusy {
+                    ProgressView()
+                        .controlSize(.small)
                 }
-                .disabled(actionInProgress != nil || store.isResolving(session.identifier))
-            } else {
-                Button("Pause") {
-                    Task { await runAction("pause") { await store.pauseSync(session.identifier) } }
+
+                if session.paused {
+                    Button("Resume", action: resume)
+                        .disabled(isBusy || store.isResolving(session.identifier))
+                } else {
+                    Button("Pause") {
+                        Task { await runAction("pause") { await store.pauseSync(session.identifier) } }
+                    }
+                    .disabled(isBusy)
                 }
-                .disabled(actionInProgress != nil)
-            }
 
-            Button("Flush") {
-                Task { await runAction("flush") { await store.flushSync(session.identifier) } }
-            }
-            .disabled(session.paused || actionInProgress != nil)
+                Button("Flush") {
+                    Task { await runAction("flush") { await store.flushSync(session.identifier) } }
+                }
+                .disabled(session.paused || isBusy)
 
-            Button("Reset") {
-                showResetConfirmation = true
+                Button("Reset") {
+                    showResetConfirmation = true
+                }
+                .disabled(isBusy)
             }
-            .disabled(actionInProgress != nil)
+            .controlSize(.small)
         }
-        .controlSize(.small)
     }
 
     private func runAction(_ name: String, _ action: () async -> Void) async {
@@ -1264,5 +1265,60 @@ private struct ChangeLabel: View {
         if change.old == nil, let new = change.new { return "created \(new.kind)" }
         if let old = change.old, let new = change.new { return "\(old.kind) -> \(new.kind)" }
         return "modified"
+    }
+}
+
+struct SyncResumeConfirmation<Content: View>: View {
+    private struct Presentation: Identifiable {
+        let id = UUID()
+        let identifier: String
+        let confirmedHold: String?
+        let prompt: SyncResumePrompt
+    }
+
+    let identifier: String
+    let store: SessionStore
+    @ViewBuilder let content: (@escaping () -> Void, Bool) -> Content
+    @State private var presentation: Presentation?
+    @State private var isResuming = false
+
+    var body: some View {
+        content({ Task { await request(for: identifier) } }, isResuming)
+            .alert(item: $presentation) { presented in
+                switch presented.prompt {
+                case .held(let message):
+                    Alert(
+                        title: Text("Resume Held Session?"),
+                        message: Text(message),
+                        primaryButton: .default(Text("Resume")) {
+                            Task { await request(for: presented.identifier, confirmingHold: message) }
+                        },
+                        secondaryButton: .cancel()
+                    )
+                case .overlap(let conflict):
+                    Alert(
+                        title: Text("Resume on Shared Endpoints?"),
+                        message: Text(conflict.message),
+                        primaryButton: .destructive(Text("Resume Anyway")) {
+                            Task {
+                                await request(
+                                    for: presented.identifier, confirmingHold: presented.confirmedHold, overriding: conflict
+                                )
+                            }
+                        },
+                        secondaryButton: .cancel()
+                    )
+                }
+            }
+    }
+
+    private func request(
+        for identifier: String, confirmingHold: String? = nil, overriding conflict: SyncResumeConflict? = nil
+    ) async {
+        guard !isResuming else { return }
+        isResuming = true
+        defer { isResuming = false }
+        let prompt = await store.requestSyncResume(identifier, confirmingHold: confirmingHold, overriding: conflict)
+        presentation = prompt.map { Presentation(identifier: identifier, confirmedHold: confirmingHold, prompt: $0) }
     }
 }

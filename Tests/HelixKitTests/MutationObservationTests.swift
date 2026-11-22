@@ -128,8 +128,76 @@ struct MutationObservationTests {
         await store.refresh()
 
         #expect(await commands.sessions.map(\.paused) == [false, true])
-        #expect(store.bulkPause == pause)
-        #expect(store.lastError?.contains("while \"Original\" is running on the same endpoints") == true)
+        #expect(store.bulkPause == nil)
+        #expect(store.lastError == "Could not resume Replacement: Cannot resume \"Replacement\" while \"Original\" is running on the same endpoints.")
+        await store.refresh()
+        #expect(store.lastError == nil)
+    }
+
+    @Test("Resume Anyway applies once and a held session needs separate consent")
+    func manualResumeOverrideAppliesOnce() async throws {
+        let target = makeSyncSession(id: "target", name: "Target", paused: true)
+        let peer = makeSyncSession(id: "peer", name: "Other")
+        let commands = MutationCommands(sessions: [target, peer])
+        let fixture = try MutationStoreFixture(commands: commands)
+        defer { fixture.cleanUp() }
+        let hold = "Check the conflict files before resuming."
+        fixture.defaults.set([target.identifier: hold], forKey: "sessionHolds")
+        let store = SessionStore(provider: commands.cli, defaults: fixture.defaults)
+
+        guard case .held(let reason)? = await store.requestSyncResume(target.identifier) else {
+            Issue.record("Expected a hold confirmation")
+            return
+        }
+        #expect(reason == hold)
+        guard case .overlap(let overlap)? = await store.requestSyncResume(target.identifier, confirmingHold: hold) else {
+            Issue.record("Expected a separate same-endpoint confirmation")
+            return
+        }
+        #expect(overlap.localizedDescription == "Cannot resume \"Target\" while \"Other\" is running on the same endpoints.")
+        #expect(await commands.sessions.map(\.paused) == [true, false])
+        #expect(store.sessionHolds == [target.identifier: hold])
+
+        #expect(await store.requestSyncResume(target.identifier, confirmingHold: hold, overriding: overlap) == nil)
+        #expect(await commands.sessions.map(\.paused) == [false, false])
+        #expect(store.sessionHolds.isEmpty)
+
+        await store.pauseSync(target.identifier)
+        #expect(await store.requestSyncResume(target.identifier, overriding: overlap) != nil)
+        #expect(await commands.sessions.map(\.paused) == [true, false])
+    }
+
+    @Test("New Sync finds an existing paused session with the same endpoints in reverse order")
+    func warnsAboutExistingSyncEndpoints() async throws {
+        let existing = makeSyncSession(id: "existing", name: "Existing", paused: true)
+        let other = makeSyncSession(id: "other", name: "Other", beta: makeEndpoint(path: "/tmp/other"))
+        let commands = MutationCommands(sessions: [existing, other])
+        let fixture = try MutationStoreFixture(commands: commands)
+        defer { fixture.cleanUp() }
+
+        let names = try await fixture.store.duplicateSyncSessionNames(
+            alpha: .local(path: "/tmp/b"), beta: .local(path: "/tmp/a")
+        )
+
+        #expect(names == ["Existing"])
+        #expect(await commands.sessions.map(\.identifier) == [existing.identifier, other.identifier])
+    }
+
+    @Test("An edit can restore overlap that existed before it paused the original")
+    func editRestoresPreviouslyRunningOverlap() async throws {
+        let original = makeSyncSession(id: "original", name: "Project")
+        let peer = makeSyncSession(id: "peer", name: "Other")
+        let commands = MutationCommands(sessions: [original, peer])
+        let fixture = try MutationStoreFixture(commands: commands)
+        defer { fixture.cleanUp() }
+
+        let notice = await fixture.store.recreateSync(
+            original, options: SyncCreateOptions(from: original), alpha: "/tmp/a", beta: "/tmp/b"
+        )
+
+        #expect(notice == nil)
+        #expect(await commands.sessions.map(\.identifier) == [peer.identifier, MutationCommands.replacementID])
+        #expect(await commands.sessions.map(\.paused) == [false, false])
     }
 
     @Test("Resume protects the oldest original after the edit records disappear")

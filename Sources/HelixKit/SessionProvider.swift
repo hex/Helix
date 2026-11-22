@@ -60,31 +60,101 @@ struct MutationNotConfirmed: LocalizedError {
     var errorDescription: String? { cause.localizedDescription }
 }
 
-private enum SyncResumeRefusal: LocalizedError {
-    case notListed(String)
-    case matchingSession(target: String, running: String)
+public struct SyncResumeConflict: LocalizedError {
+    @MainActor
+    fileprivate final class Approval {
+        var used = false
+    }
 
-    var errorDescription: String? {
-        switch self {
-        case .notListed(let identifier):
-            "Cannot resume session \(identifier) because Mutagen does not list it."
-        case .matchingSession(let target, let running):
-            "Cannot resume \"\(target)\" while \"\(running)\" is running on the same endpoints."
+    let identifier: String
+    fileprivate let endpoints: SyncEndpointPair
+    fileprivate let peers: Set<String>
+    fileprivate let approval: Approval
+    public let message: String
+
+    public var errorDescription: String? { message }
+}
+
+public enum SyncResumePrompt: Sendable {
+    case held(String)
+    case overlap(SyncResumeConflict)
+}
+
+struct SyncEndpointPair: Equatable, Sendable {
+    private typealias Location = (String, String?, String?, Int?, String?)
+    private let alpha: Location
+    private let beta: Location
+
+    init(_ session: SyncSession) {
+        alpha = Self.location(session.alpha)
+        beta = Self.location(session.beta)
+    }
+
+    init(alpha: EndpointURL, beta: EndpointURL) {
+        self.alpha = Self.location(alpha)
+        self.beta = Self.location(beta)
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        (lhs.alpha == rhs.alpha && lhs.beta == rhs.beta)
+            || (lhs.alpha == rhs.beta && lhs.beta == rhs.alpha)
+    }
+
+    private static func location(_ endpoint: Endpoint) -> Location {
+        (endpoint.protocol_, endpoint.user, endpoint.host, endpoint.port, endpoint.path)
+    }
+
+    private static func location(_ endpoint: EndpointURL) -> Location {
+        switch endpoint {
+        case .local(let path):
+            let expanded = (path as NSString).expandingTildeInPath
+            return ("local", nil, nil, nil, URL(fileURLWithPath: expanded).standardizedFileURL.path)
+        case .ssh(let user, let host, let port, let path):
+            return ("ssh", user, host, port, path)
+        case .docker(let container, let path):
+            return ("docker", nil, container, nil, path)
         }
     }
 }
 
-private extension Endpoint {
-    var location: (String, String?, String?, Int?, String?) {
-        (protocol_, user, host, port, path)
+struct SyncResumeRestoration: Sendable {
+    let endpoints: SyncEndpointPair
+    let peers: Set<String>
+
+    init?(identifier: String, listed: [SyncSession]) {
+        guard let target = listed.first(where: { $0.identifier == identifier }), !target.paused else { return nil }
+        let endpoints = SyncEndpointPair(target)
+        self.endpoints = endpoints
+        peers = Set(listed.lazy.filter {
+            $0.identifier != identifier && !$0.paused && SyncEndpointPair($0) == endpoints
+        }.map(\.identifier))
     }
 }
 
-private extension SyncSession {
-    func sharesEndpoints(with other: SyncSession) -> Bool {
-        (alpha.location == other.alpha.location && beta.location == other.beta.location)
-            || (alpha.location == other.beta.location && beta.location == other.alpha.location)
+enum SyncResumeContext {
+    case ordinary
+    case restoring(SyncResumeRestoration?)
+    case approved(SyncResumeConflict)
+
+    @MainActor
+    func allowedPeers(for target: SyncSession, endpoints: SyncEndpointPair) -> Set<String> {
+        switch self {
+        case .ordinary:
+            return []
+        case .restoring(let snapshot):
+            guard let snapshot, snapshot.endpoints == endpoints else { return [] }
+            return snapshot.peers
+        case .approved(let conflict):
+            guard conflict.identifier == target.identifier, conflict.endpoints == endpoints, !conflict.approval.used else { return [] }
+            conflict.approval.used = true
+            return conflict.peers
+        }
     }
+}
+
+private struct UnlistedSyncSession: LocalizedError {
+    let identifier: String
+    var errorDescription: String? { "Cannot resume session \(identifier) because Mutagen does not list it." }
 }
 
 /// Wraps every provider operation that can start Mutagen implicitly. The underlying provider
@@ -197,7 +267,13 @@ final class ManagedSessionProvider {
         }
     }
 
-    func syncResume(_ identifier: String) async throws {
+    func pauseForRestoration(_ identifier: String) async throws -> SyncResumeRestoration? {
+        let snapshot = SyncResumeRestoration(identifier: identifier, listed: try await syncList())
+        try await syncPause(identifier)
+        return snapshot
+    }
+
+    func syncResume(_ identifier: String, context: SyncResumeContext = .ordinary) async throws {
         // Keep the list and the command together across concurrent resumes.
         if resuming { await withCheckedContinuation { waitingToResume.append($0) } }
         resuming = true
@@ -213,15 +289,24 @@ final class ManagedSessionProvider {
         try await command { provider in
             let listed = try await provider.syncList()
             guard let target = listed.first(where: { $0.identifier == identifier }) else {
-                throw SyncResumeRefusal.notListed(identifier)
+                throw UnlistedSyncSession(identifier: identifier)
             }
-            if let running = listed.first(where: {
-                $0.identifier != identifier && !$0.paused && target.sharesEndpoints(with: $0)
-            }) {
+            let endpoints = SyncEndpointPair(target)
+            let allowed = context.allowedPeers(for: target, endpoints: endpoints)
+            let running = listed.filter {
+                $0.identifier != identifier && !$0.paused && SyncEndpointPair($0) == endpoints
+            }
+            if running.contains(where: { !allowed.contains($0.identifier) }) {
                 let targetName = target.name ?? identifier
-                let runningName = running.name ?? running.identifier
-                throw SyncResumeRefusal.matchingSession(
-                    target: targetName, running: runningName == targetName ? "\(runningName) (\(running.identifier))" : runningName
+                let names = running.map { session in
+                    let name = session.name ?? session.identifier
+                    return name == targetName ? "\"\(name) (\(session.identifier))\"" : "\"\(name)\""
+                }.joined(separator: ", ")
+                let verb = running.count == 1 ? "is" : "are"
+                throw SyncResumeConflict(
+                    identifier: identifier, endpoints: endpoints, peers: Set(running.map(\.identifier)),
+                    approval: SyncResumeConflict.Approval(),
+                    message: "Cannot resume \"\(targetName)\" while \(names) \(verb) running on the same endpoints."
                 )
             }
 

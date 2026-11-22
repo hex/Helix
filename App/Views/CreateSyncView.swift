@@ -42,6 +42,15 @@ struct CreateSyncView: View {
     // Step 4: Review
     @State private var isCreating = false
     @State private var creationError: String?
+    @State private var duplicateCreation: DuplicateCreation?
+
+    private struct DuplicateCreation: Identifiable {
+        let id = UUID()
+        let options: SyncCreateOptions
+        let alpha: EndpointURL
+        let beta: EndpointURL
+        let names: [String]
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -61,6 +70,17 @@ struct CreateSyncView: View {
             navigationButtons
         }
         .frame(width: 560, height: 520)
+        .alert(item: $duplicateCreation) { creation in
+            let names = creation.names.map { "\"\($0)\"" }.joined(separator: ", ")
+            return Alert(
+                title: Text("Create Sync on Shared Endpoints?"),
+                message: Text("Existing sessions use these endpoints: \(names)."),
+                primaryButton: .destructive(Text("Create Anyway")) {
+                    Task { await createSession(confirmed: creation) }
+                },
+                secondaryButton: .cancel()
+            )
+        }
     }
 
     // MARK: - Step Indicator
@@ -359,16 +379,29 @@ struct CreateSyncView: View {
         options.commandPreview(alpha: alphaEndpoint.formatted, beta: betaEndpoint.formatted)
     }
 
-    private func createSession() async {
+    private func createSession(confirmed: DuplicateCreation? = nil) async {
+        guard !isCreating else { return }
         isCreating = true
-        creationError = await store.createSync(
-            options: options,
-            alpha: alphaEndpoint.formatted,
-            beta: betaEndpoint.formatted
-        )
-        isCreating = false
-        if creationError == nil {
-            dismiss()
+        defer { isCreating = false }
+
+        let options = confirmed?.options ?? self.options
+        let alpha = confirmed?.alpha ?? alphaEndpoint
+        let beta = confirmed?.beta ?? betaEndpoint
+        creationError = nil
+        if confirmed == nil {
+            do {
+                let names = try await store.duplicateSyncSessionNames(alpha: alpha, beta: beta)
+                if !names.isEmpty {
+                    duplicateCreation = DuplicateCreation(options: options, alpha: alpha, beta: beta, names: names)
+                    return
+                }
+            } catch {
+                creationError = "Could not check existing sync sessions. \(error.localizedDescription)"
+                return
+            }
         }
+
+        creationError = await store.createSync(options: options, alpha: alpha.formatted, beta: beta.formatted)
+        if creationError == nil { dismiss() }
     }
 }

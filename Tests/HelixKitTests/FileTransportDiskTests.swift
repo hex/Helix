@@ -358,6 +358,32 @@ struct FileTransportReplaceDiskTests {
 
 @Suite("Conflict interruptions on disk")
 struct ConflictInterruptionDiskTests {
+    @Test("Conflict resolution restores previously running overlap", arguments: [false, true])
+    @MainActor
+    func conflictRestoresPreviouslyRunningOverlap(bulk: Bool) async throws {
+        try await withScratchDirectory { scratch in
+            let fixture = try LocalConflictFixture(in: scratch)
+            let suite = "ConflictResumeOverlapTests.\(UUID())"
+            let defaults = try #require(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let peer = makeSyncSession(
+                id: "peer", name: "Other", alpha: fixture.session.alpha, beta: fixture.session.beta
+            )
+            let provider = RecordingProvider(syncSessions: [fixture.session, peer])
+            let store = SessionStore(provider: provider, defaults: defaults)
+
+            let unresolved = if bulk {
+                await store.resolveConflicts(session: fixture.session, conflicts: [fixture.conflict], winner: .alpha)
+            } else {
+                await store.resolveConflict(session: fixture.session, conflict: fixture.conflict, winner: .alpha)
+            }
+
+            #expect(try String(contentsOf: fixture.loser, encoding: .utf8) == "winner")
+            #expect(unresolved.isEmpty)
+            #expect(provider.calls == ["syncPause:sync_1", "syncResume:sync_1", "syncFlush:sync_1"])
+        }
+    }
+
     @Test("A resume deadline reports uncertainty and skips flush after file placement")
     @MainActor
     func resumeDeadlineReportsUnconfirmedSession() async throws {
