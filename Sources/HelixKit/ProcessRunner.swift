@@ -24,7 +24,8 @@ public struct ProcessDeadlineError: LocalizedError, Sendable {
 
 extension Error {
     var isCommandInterruption: Bool {
-        self is CancellationError || self is ProcessDeadlineError
+        if let mutation = self as? MutationNotConfirmed { return mutation.cause.isCommandInterruption }
+        return self is CancellationError || self is ProcessDeadlineError
     }
 }
 
@@ -51,10 +52,10 @@ public actor ProcessRunner {
     private var drainWaiters: [UUID: DrainWaiter] = [:]
     private var children: [ObjectIdentifier: RunningChild] = [:]
     private var isShuttingDown = false
-    private let waitForDeadline: @Sendable (ContinuousClock.Instant) async throws -> Void
+    private let waitForDeadline: @Sendable (SuspendingClock.Instant) async throws -> Void
 
-    init(waitForDeadline: @escaping @Sendable (ContinuousClock.Instant) async throws -> Void = {
-        try await ContinuousClock().sleep(until: $0)
+    init(waitForDeadline: @escaping @Sendable (SuspendingClock.Instant) async throws -> Void = {
+        try await SuspendingClock().sleep(until: $0)
     }) {
         self.waitForDeadline = waitForDeadline
     }
@@ -105,6 +106,24 @@ public actor ProcessRunner {
         return DrainReport(interrupted: count, unfinished: children.count)
     }
 
+    static func canDrainAfterExit(_ process: Process, openPipes: Set<Int32>) -> Bool {
+        // HUP means no writer remains, even if DispatchIO has yet to deliver buffered output.
+        // A descendant holding either pipe open must still be subject to the command deadline.
+        for descriptor in openPipes {
+            var readiness = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+            guard poll(&readiness, 1, 0) == 1, readiness.revents & Int16(POLLHUP) != 0 else { return false }
+        }
+
+        if !process.isRunning { return true }
+
+        // The kernel can report exit while Foundation is still waiting to deliver it.
+        var query = [CTL_KERN, KERN_PROC, KERN_PROC_PID, process.processIdentifier]
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.size
+        guard sysctl(&query, UInt32(query.count), &info, &size, nil, 0) == 0 else { return false }
+        return size == 0 || info.kp_proc.p_stat == Int8(SZOMB)
+    }
+
     private func finishDrain(_ id: UUID) {
         guard let waiter = drainWaiters.removeValue(forKey: id) else { return }
         waiter.timer.cancel()
@@ -118,14 +137,14 @@ private final class RunningChild: @unchecked Sendable {
     private let process = Process()
     private let executablePath: String
     private let deadline: Duration
-    private let waitForDeadline: @Sendable (ContinuousClock.Instant) async throws -> Void
+    private let waitForDeadline: @Sendable (SuspendingClock.Instant) async throws -> Void
     private let stdoutPipe = Pipe()
     private let stderrPipe = Pipe()
 
     private var continuation: CheckedContinuation<String, Error>?
     private var channels: [DispatchIO] = []
     private var deadlineTimer: Task<Void, Never>?
-    private var openPipes = 0
+    private var openPipes: Set<Int32> = []
     private var stdout = Data()
     private var stderr = Data()
     private var exitStatus: Int32?
@@ -136,7 +155,7 @@ private final class RunningChild: @unchecked Sendable {
 
     init(
         executablePath: String, arguments: [String], deadline: Duration,
-        waitForDeadline: @escaping @Sendable (ContinuousClock.Instant) async throws -> Void
+        waitForDeadline: @escaping @Sendable (SuspendingClock.Instant) async throws -> Void
     ) {
         self.executablePath = executablePath
         self.deadline = deadline
@@ -179,7 +198,6 @@ private final class RunningChild: @unchecked Sendable {
             }
 
             // Drain both pipes while the child runs so a full buffer cannot stall it.
-            self.openPipes = 2
             self.channels = [
                 self.drain(self.stdoutPipe.fileHandleForReading, as: \.stdout),
                 self.drain(self.stderrPipe.fileHandleForReading, as: \.stderr),
@@ -189,7 +207,7 @@ private final class RunningChild: @unchecked Sendable {
     }
 
     private func startDeadline() {
-        let expiry = ContinuousClock.now.advanced(by: deadline)
+        let expiry = SuspendingClock.now.advanced(by: deadline)
         let error = ProcessDeadlineError(executablePath: executablePath, deadline: deadline)
         deadlineTimer = Task { [weak self, waitForDeadline] in
             do {
@@ -209,6 +227,9 @@ private final class RunningChild: @unchecked Sendable {
 
     private func beginInterruption(_ error: Error) {
         guard !finished, interruption == nil else { return }
+        if error is ProcessDeadlineError, ProcessRunner.canDrainAfterExit(process, openPipes: openPipes) {
+            return
+        }
         interruption = error
         guard continuation != nil else { return }
 
@@ -232,14 +253,16 @@ private final class RunningChild: @unchecked Sendable {
     }
 
     private func drain(_ handle: FileHandle, as output: ReferenceWritableKeyPath<RunningChild, Data>) -> DispatchIO {
-        let channel = DispatchIO(type: .stream, fileDescriptor: handle.fileDescriptor, queue: queue) { error in
+        let descriptor = handle.fileDescriptor
+        openPipes.insert(descriptor)
+        let channel = DispatchIO(type: .stream, fileDescriptor: descriptor, queue: queue) { error in
             do {
                 try handle.close()
             } catch {
                 self.beginInterruption(error)
             }
             if error != 0 { self.pipeFailed(error) }
-            self.openPipes -= 1
+            self.openPipes.remove(descriptor)
             self.finishIfReady()
         }
         channel.read(offset: 0, length: Int.max, queue: queue) { done, bytes, error in
@@ -257,7 +280,7 @@ private final class RunningChild: @unchecked Sendable {
     }
 
     private func finishIfReady() {
-        guard !finished, !escalating, let exitStatus, openPipes == 0 else { return }
+        guard !finished, !escalating, let exitStatus, openPipes.isEmpty else { return }
         if let interruption {
             complete(.failure(interruption))
         } else if exitStatus == 0 {

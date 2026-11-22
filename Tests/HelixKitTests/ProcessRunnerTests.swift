@@ -82,12 +82,19 @@ struct ProcessDeadlineTests {
         let pidFile = fixturePIDFile()
         defer { try? FileManager.default.removeItem(at: pidFile) }
         let clock = Gate()
-        let runner = ProcessRunner { _ in await clock.pass() }
+        let limit: Duration = .milliseconds(250)
+        let started = SuspendingClock.now
+        let wait: @Sendable (SuspendingClock.Instant) async throws -> Void = { expiry in
+            #expect(expiry >= started.advanced(by: limit))
+            #expect(expiry <= SuspendingClock.now.advanced(by: limit))
+            await clock.pass()
+        }
+        let runner = ProcessRunner(waitForDeadline: wait)
         let call = Task {
             try await runner.run(
                 executablePath: "/bin/sh",
                 arguments: ["-c", "printf '%s\n' \"$$\" > \"$1\"; exec /bin/sleep 8", "helix-test", pidFile.path],
-                deadline: .milliseconds(250)
+                deadline: limit
             )
         }
         defer {
@@ -164,10 +171,35 @@ struct ProcessDeadlineTests {
 
     @Test("A fast command returns its full output")
     func fastCommandSucceeds() async throws {
-        let output = try await withTimeout(seconds: 2) {
-            try await runProcess(executablePath: "/usr/bin/printf", arguments: ["hello"], deadline: .seconds(1))
+        let clock = Gate()
+        defer { Task { await clock.open() } }
+        let runner = ProcessRunner { _ in await clock.pass() }
+        let output = try await withTimeout(seconds: 5) {
+            try await runner.run(executablePath: "/usr/bin/printf", arguments: ["hello"], deadline: .seconds(1))
         }
         #expect(output == "hello")
+    }
+
+    @Test("An exited child can finish draining buffered output after the deadline")
+    func deadlinePreservesBufferedOutputAfterExit() async throws {
+        try await withTimeout(seconds: 5) {
+            let child = Process()
+            let stdout = Pipe()
+            let openPipe = Pipe()
+            child.executableURL = URL(fileURLWithPath: "/usr/bin/printf")
+            child.arguments = ["hello"]
+            child.standardOutput = stdout
+            try child.run()
+            child.waitUntilExit()
+
+            let pendingOutput = stdout.fileHandleForReading.fileDescriptor
+            let stillOpen = openPipe.fileHandleForReading.fileDescriptor
+            #expect(!ProcessRunner.canDrainAfterExit(child, openPipes: [pendingOutput, stillOpen]))
+
+            try openPipe.fileHandleForWriting.close()
+            #expect(ProcessRunner.canDrainAfterExit(child, openPipes: [pendingOutput, stillOpen]))
+            #expect(String(decoding: stdout.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self) == "hello")
+        }
     }
 }
 
@@ -218,8 +250,12 @@ struct ProcessRegistryTests {
         let pid = try await processIdentifier(writtenTo: pidFile)
         defer { endFixture(pid) }
 
-        let result = try await withTimeout(seconds: 2) { await registry.terminateAll(within: .zero) }
+        let budget: Duration = .milliseconds(30)
+        let began = ContinuousClock.now
+        let result = try await withTimeout(seconds: 2) { await registry.terminateAll(within: budget) }
+        let elapsed = began.duration(to: .now)
 
+        #expect(elapsed >= budget)
         #expect(result.interrupted == 1)
         #expect(result.unfinished == 1)
         await #expect(throws: CancellationError.self) {

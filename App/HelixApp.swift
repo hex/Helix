@@ -16,12 +16,14 @@ struct HelixApp: App {
     init() {
         let path = UserDefaults.standard.string(forKey: "cliPath") ?? Self.defaultCLIPath
         let cli = CLI(executablePath: path)
-        _store = State(initialValue: SessionStore(provider: cli, daemonProcess: MutagenDaemon(cliPath: path)))
+        let store = SessionStore(provider: cli, daemonProcess: MutagenDaemon(cliPath: path))
+        _store = State(initialValue: store)
         updaterController = SPUStandardUpdaterController(
             startingUpdater: true,
             updaterDelegate: nil,
             userDriverDelegate: nil
         )
+        appDelegate.store = store
     }
 
     var body: some Scene {
@@ -118,10 +120,12 @@ extension FocusedValues {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var isDrainingCommands = false
+    weak var store: SessionStore?
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if !isDrainingCommands {
             isDrainingCommands = true
+            store?.prepareToQuit()
             Task {
                 let drain = await ProcessRunner.shared.terminateAll()
                 if drain.unfinished > 0 {
