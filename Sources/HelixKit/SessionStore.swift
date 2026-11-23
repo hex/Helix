@@ -34,11 +34,14 @@ public struct BulkPause: Codable, Equatable, Sendable {
     }
 }
 
-public enum HealthStatus: Sendable {
+public enum HealthStatus: Sendable, CaseIterable {
     case healthy
     case active
+    case partiallyPaused
+    case paused
     case warning
     case error
+    case daemonStopped
     case idle
 }
 
@@ -54,8 +57,10 @@ public enum DaemonStatus: String, Sendable {
 public final class SessionStore {
     private typealias SessionLists = (sync: [SyncSession], forward: [ForwardSession])
 
-    public private(set) var syncSessions: [SyncSession] = []
-    public private(set) var forwardSessions: [ForwardSession] = []
+    /// Sync sessions as mutagen lists them, oldest first.
+    private(set) var mutagenSyncSessions: [SyncSession] = []
+    /// Forward sessions as mutagen lists them, oldest first.
+    private(set) var mutagenForwardSessions: [ForwardSession] = []
     public private(set) var daemonStatus = DaemonStatus.stopped
     public var daemonRunning: Bool { daemonStatus == .running || daemonStatus == .startedOutside }
     public var isMutagenStoppedByHelix: Bool { daemonStatus == .stopped && daemonControl == .stopped }
@@ -66,6 +71,15 @@ public final class SessionStore {
     public private(set) var interruptedEditNotice: String?
     public private(set) var refreshCount = 0
     public var pendingSessionSelection: String?
+    public var sortMode: SessionSortMode = .manual {
+        didSet { orderDefaults?.set(sortMode.rawValue, forKey: Self.sortModeKey) }
+    }
+    private(set) var syncOrder: [String] = [] {
+        didSet { orderDefaults?.set(syncOrder, forKey: Self.syncOrderKey) }
+    }
+    private(set) var forwardOrder: [String] = [] {
+        didSet { orderDefaults?.set(forwardOrder, forKey: Self.forwardOrderKey) }
+    }
     public private(set) var bulkPause: BulkPause? {
         didSet { persistBulkPause() }
     }
@@ -112,6 +126,7 @@ public final class SessionStore {
     @ObservationIgnored private var activeSessionLists: [UUID: Task<SessionLists, Error>] = [:]
     private let fileTransport: FileTransport
     private let defaults: UserDefaults
+    private let orderDefaults: UserDefaults?
     private let now: () -> Date
     private var daemonProcess: any DaemonProcess
     @ObservationIgnored private var bulkPauseInFlight = false
@@ -140,13 +155,18 @@ public final class SessionStore {
     private static let leftoverSyncOriginalsKey = "leftoverSyncOriginals"
     private static let daemonBackgroundPriorityKey = "daemonBackgroundPriority"
     private static let daemonStoppedKey = "daemonStoppedByHelix"
+    static let sortModeKey = "sessionSortMode"
+    static let syncOrderKey = "syncSessionOrder"
+    static let forwardOrderKey = "forwardSessionOrder"
 
+    /// - Parameter orderDefaults: where the sort mode and the manual order persist; nil keeps them in memory.
     public init(
         provider: any SessionProvider,
         fileTransport: FileTransport = FileTransport(),
         defaults: UserDefaults = .standard,
         now: @escaping () -> Date = Date.init,
-        daemonProcess: any DaemonProcess = MutagenDaemon(cliPath: CLI.defaultExecutablePath)
+        daemonProcess: any DaemonProcess = MutagenDaemon(cliPath: CLI.defaultExecutablePath),
+        orderDefaults: UserDefaults? = nil
     ) {
         self.provider = ManagedSessionProvider(provider)
         if defaults.bool(forKey: Self.daemonStoppedKey) {
@@ -156,6 +176,12 @@ public final class SessionStore {
         self.defaults = defaults
         self.now = now
         self.daemonProcess = daemonProcess
+        self.orderDefaults = orderDefaults
+        if let orderDefaults {
+            sortMode = orderDefaults.string(forKey: Self.sortModeKey).flatMap(SessionSortMode.init) ?? .manual
+            syncOrder = orderDefaults.stringArray(forKey: Self.syncOrderKey) ?? []
+            forwardOrder = orderDefaults.stringArray(forKey: Self.forwardOrderKey) ?? []
+        }
         daemonBackgroundPriorityRequested = defaults.bool(forKey: Self.daemonBackgroundPriorityKey)
         if let data = defaults.data(forKey: Self.bulkPauseKey) {
             do {
@@ -239,6 +265,38 @@ public final class SessionStore {
         self.daemonProcess = daemonProcess
     }
 
+    /// Sync sessions in the order the sort mode gives.
+    public var syncSessions: [SyncSession] {
+        SessionOrder.sorted(mutagenSyncSessions, by: sortMode, manualOrder: syncOrder)
+    }
+
+    /// Forward sessions in the order the sort mode gives.
+    public var forwardSessions: [ForwardSession] {
+        SessionOrder.sorted(mutagenForwardSessions, by: sortMode, manualOrder: forwardOrder)
+    }
+
+    /// Moves sync sessions within `syncSessions`. Does nothing outside the manual sort mode.
+    public func moveSyncSessions(fromOffsets offsets: IndexSet, toOffset destination: Int) {
+        guard sortMode == .manual else { return }
+        syncOrder = SessionOrder.moving(
+            fromOffsets: offsets,
+            toOffset: destination,
+            keys: mutagenSyncSessions.map(\.orderKey),
+            manualOrder: syncOrder
+        )
+    }
+
+    /// Moves forward sessions within `forwardSessions`. Does nothing outside the manual sort mode.
+    public func moveForwardSessions(fromOffsets offsets: IndexSet, toOffset destination: Int) {
+        guard sortMode == .manual else { return }
+        forwardOrder = SessionOrder.moving(
+            fromOffsets: offsets,
+            toOffset: destination,
+            keys: mutagenForwardSessions.map(\.orderKey),
+            manualOrder: forwardOrder
+        )
+    }
+
     public var totalSessionCount: Int {
         syncSessions.count + forwardSessions.count
     }
@@ -268,31 +326,37 @@ public final class SessionStore {
         syncSessions.reduce(0) { $0 + ($1.conflicts?.count ?? 0) }
     }
 
+    /// Health of the sessions that are not paused, or a paused state when the user paused some or all of them.
     public var overallHealth: HealthStatus {
         if !daemonRunning {
-            return .error
+            return .daemonStopped
         }
         if syncSessions.isEmpty && forwardSessions.isEmpty {
             return .idle
         }
-        let running = syncSessions.filter { !$0.paused }
-        let hasDisconnected = running.contains { $0.phase == .disconnected }
-            || forwardSessions.contains { $0.source.connected == false || $0.destination.connected == false }
+        let runningSyncs = syncSessions.filter { !$0.paused }
+        let runningForwards = forwardSessions.filter { !$0.paused }
+        if runningSyncs.isEmpty && runningForwards.isEmpty {
+            return .paused
+        }
+        let hasDisconnected = runningSyncs.contains { $0.phase == .disconnected }
+            || runningForwards.contains { $0.source.connected == false || $0.destination.connected == false }
         if hasDisconnected {
             return .error
         }
-        let hasConflicts = running.contains { $0.conflicts?.isEmpty == false || ($0.excludedConflicts ?? 0) > 0 }
-        let hasProblems = running.contains { $0.alpha.hasProblems || $0.beta.hasProblems }
-        let hasHalted = running.contains { $0.phase == .halted }
-        let failsToConnect = running.contains { $0.phase == .connecting && !($0.lastError ?? "").isEmpty }
+        let hasConflicts = runningSyncs.contains { $0.conflicts?.isEmpty == false || ($0.excludedConflicts ?? 0) > 0 }
+        let hasProblems = runningSyncs.contains { $0.alpha.hasProblems || $0.beta.hasProblems }
+        let hasHalted = runningSyncs.contains { $0.phase == .halted }
+        let failsToConnect = runningSyncs.contains { $0.phase == .connecting && !($0.lastError ?? "").isEmpty }
         if hasConflicts || hasProblems || hasHalted || failsToConnect {
             return .warning
         }
-        let hasActive = running.contains { $0.phase == .working || $0.phase == .connecting }
+        let hasActive = runningSyncs.contains { $0.phase == .working || $0.phase == .connecting }
         if hasActive {
             return .active
         }
-        return .healthy
+        let hasPaused = runningSyncs.count < syncSessions.count || runningForwards.count < forwardSessions.count
+        return hasPaused ? .partiallyPaused : .healthy
     }
 
     public func refresh() async {
@@ -326,8 +390,10 @@ public final class SessionStore {
         do {
             let lists = try await request.value
             guard activeSessionLists[id] != nil else { return false }
-            if force || syncDigest(lists.sync) != syncDigest(syncSessions) { syncSessions = lists.sync }
-            if force || forwardDigest(lists.forward) != forwardDigest(forwardSessions) { forwardSessions = lists.forward }
+            if force || syncDigest(lists.sync) != syncDigest(mutagenSyncSessions) { mutagenSyncSessions = lists.sync }
+            if force || forwardDigest(lists.forward) != forwardDigest(mutagenForwardSessions) {
+                mutagenForwardSessions = lists.forward
+            }
             forgetSessions(notListedIn: lists.sync)
             recoverInterruptedEditPairs(listed: lists.sync)
             forgetMissingEditPairs(existingEditPairs, listed: lists.sync)
@@ -608,10 +674,12 @@ public final class SessionStore {
             leftoverSyncOriginals[original] = replacement
             return await finishSyncEdit(
                 "The edited session \(replacement) is ready. Could not remove original session \(original): \(error.localizedDescription).",
-                replacement: replacement
+                replacement: replacement,
+                inPlaceOf: current,
+                listedBefore: listed
             )
         }
-        return await finishSyncEdit(nil, replacement: replacement)
+        return await finishSyncEdit(nil, replacement: replacement, inPlaceOf: current, listedBefore: listed)
     }
 
     private func reportInterruptedEdit(_ message: String, original: String? = nil, replacement: String? = nil) -> String {
@@ -667,9 +735,25 @@ public final class SessionStore {
         return (messages.joined(separator: " "), true)
     }
 
-    private func finishSyncEdit(_ message: String?, replacement: String? = nil) async -> String? {
-        if await reloadSessions(), let replacement, syncSessions.contains(where: { $0.identifier == replacement }) {
+    /// - Parameters:
+    ///   - original: the edited session, whose place in the manual order the listed replacement takes.
+    ///   - listedBefore: the sync sessions Mutagen listed when the edit began.
+    private func finishSyncEdit(
+        _ message: String?,
+        replacement: String? = nil,
+        inPlaceOf original: SyncSession? = nil,
+        listedBefore: [SyncSession] = []
+    ) async -> String? {
+        if await reloadSessions(), let replacement,
+           let recreated = mutagenSyncSessions.first(where: { $0.identifier == replacement }) {
             pendingSessionSelection = replacement
+            if let original {
+                syncOrder = SessionOrder.replacing(
+                    original.orderKey,
+                    with: recreated.orderKey,
+                    in: SessionOrder.filledIn(syncOrder, with: listedBefore.map(\.orderKey))
+                )
+            }
         }
         if let message { lastError = message }
         return lastError
@@ -971,7 +1055,11 @@ public final class SessionStore {
     }
 
     public func terminateSync(_ identifier: String) async {
-        await performAction { try await provider.syncTerminate(identifier) }
+        let key = mutagenSyncSessions.first { $0.identifier == identifier }?.orderKey
+        guard await performAction({ try await provider.syncTerminate(identifier) }) == nil, let key else { return }
+        if !mutagenSyncSessions.contains(where: { $0.identifier != identifier && $0.orderKey == key }) {
+            syncOrder.removeAll { $0 == key }
+        }
     }
 
     // MARK: - Forward Actions
@@ -985,7 +1073,11 @@ public final class SessionStore {
     }
 
     public func terminateForward(_ identifier: String) async {
-        await performAction { try await provider.forwardTerminate(identifier) }
+        let key = mutagenForwardSessions.first { $0.identifier == identifier }?.orderKey
+        guard await performAction({ try await provider.forwardTerminate(identifier) }) == nil, let key else { return }
+        if !mutagenForwardSessions.contains(where: { $0.identifier != identifier && $0.orderKey == key }) {
+            forwardOrder.removeAll { $0 == key }
+        }
     }
 
     // MARK: - Daemon
@@ -1080,8 +1172,8 @@ public final class SessionStore {
 
         daemonControl = .stopped
         daemonStatus = .stopped
-        syncSessions = []
-        forwardSessions = []
+        mutagenSyncSessions = []
+        mutagenForwardSessions = []
         backgroundPriorityPID = nil
         setDaemonPriorityError(nil)
         lastError = failure

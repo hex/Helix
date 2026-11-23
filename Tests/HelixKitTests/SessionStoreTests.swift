@@ -132,14 +132,14 @@ struct SessionStoreTests {
         #expect(store.overallHealth == .warning)
     }
 
-    @Test("Health status is error when daemon not running")
+    @Test("Health status is daemonStopped when daemon not running")
     @MainActor
-    func healthError() async {
+    func healthDaemonStopped() async {
         let provider = FakeProvider(isDaemonRunning: false)
         let store = SessionStore(provider: provider)
         await store.refresh()
 
-        #expect(store.overallHealth == .error)
+        #expect(store.overallHealth == .daemonStopped)
     }
 
     @Test("Health status is error when session disconnected")
@@ -151,17 +151,6 @@ struct SessionStoreTests {
         await store.refresh()
 
         #expect(store.overallHealth == .error)
-    }
-
-    @Test("Health status ignores the disconnected status of a paused session")
-    @MainActor
-    func healthPausedSession() async {
-        let paused = makeSyncSession(id: "sync_1", name: "resting", status: "disconnected", paused: true)
-        let watching = makeSyncSession(id: "sync_2", name: "ok", status: "watching")
-        let store = SessionStore(provider: FakeProvider(syncSessions: [paused, watching]))
-        await store.refresh()
-
-        #expect(store.overallHealth == .healthy)
     }
 
     @Test("Refresh publishes a session whose only change is staging progress")
@@ -301,7 +290,89 @@ struct SessionStoreTests {
         let paused = try decoder.decode(SyncSession.self, from: Data(pausedJSON.utf8))
         store.replaceProvider(FakeProvider(syncSessions: [paused]))
         await store.refresh()
-        #expect(store.overallHealth == .healthy)
+        #expect(store.overallHealth == .paused)
+    }
+
+    @Test("Health status is partiallyPaused when a paused sync sits beside healthy ones")
+    @MainActor
+    func healthPartiallyPausedSync() async {
+        let store = await storeWith(syncs: [
+            makeSyncSession(id: "sync_1", name: "running"),
+            makeSyncSession(id: "sync_2", name: "paused", status: "disconnected", paused: true)
+        ])
+
+        #expect(store.overallHealth == .partiallyPaused)
+    }
+
+    @Test("Health status is partiallyPaused when a paused forward sits beside a healthy sync")
+    @MainActor
+    func healthPartiallyPausedForward() async {
+        let store = await storeWith(
+            syncs: [makeSyncSession(id: "sync_1", name: "running")],
+            forwards: [makeForwardSession(id: "fwd_1", name: "paused", paused: true, connected: false)]
+        )
+
+        #expect(store.overallHealth == .partiallyPaused)
+    }
+
+    @Test("Health status is paused when every session is paused")
+    @MainActor
+    func healthAllPaused() async {
+        let store = await storeWith(
+            syncs: [makeSyncSession(id: "sync_1", name: "s1", status: "disconnected", paused: true)],
+            forwards: [makeForwardSession(id: "fwd_1", name: "f1", paused: true, connected: false)]
+        )
+
+        #expect(store.overallHealth == .paused)
+    }
+
+    @Test("Health status is error when a running forward is disconnected")
+    @MainActor
+    func healthForwardDisconnected() async {
+        let store = await storeWith(forwards: [makeForwardSession(id: "fwd_1", name: "f1", connected: false)])
+
+        #expect(store.overallHealth == .error)
+    }
+
+    @Test("A disconnected running session outranks a paused one")
+    @MainActor
+    func healthErrorOutranksPause() async {
+        let store = await storeWith(syncs: [
+            makeSyncSession(id: "sync_1", name: "broken", status: "disconnected"),
+            makeSyncSession(id: "sync_2", name: "paused", status: "disconnected", paused: true)
+        ])
+
+        #expect(store.overallHealth == .error)
+    }
+
+    @Test("An active sync outranks a paused one")
+    @MainActor
+    func healthActiveOutranksPause() async {
+        let store = await storeWith(syncs: [
+            makeSyncSession(id: "sync_1", name: "busy", status: "staging-beta"),
+            makeSyncSession(id: "sync_2", name: "paused", status: "disconnected", paused: true)
+        ])
+
+        #expect(store.overallHealth == .active)
+    }
+
+    @Test("Conflicts on a paused session do not raise a warning")
+    @MainActor
+    func healthIgnoresPausedConflicts() async {
+        let conflict = Conflict(root: "test", alphaChanges: [], betaChanges: [])
+        let store = await storeWith(syncs: [
+            makeSyncSession(id: "sync_1", name: "running"),
+            makeSyncSession(id: "sync_2", name: "paused", status: "disconnected", paused: true, conflicts: [conflict])
+        ])
+
+        #expect(store.overallHealth == .partiallyPaused)
+    }
+
+    @MainActor
+    private func storeWith(syncs: [SyncSession] = [], forwards: [ForwardSession] = []) async -> SessionStore {
+        let store = SessionStore(provider: FakeProvider(syncSessions: syncs, forwardSessions: forwards))
+        await store.refresh()
+        return store
     }
 
     @Test("Total session count includes both sync and forward")
@@ -1827,7 +1898,8 @@ func makeSyncSession(
     ignorePaths: [String]? = nil,
     alpha: Endpoint = makeEndpoint(path: "/tmp/a"),
     beta: Endpoint = makeEndpoint(path: "/tmp/b"),
-    lastError: String? = nil
+    lastError: String? = nil,
+    successfulCycles: Int = 0
 ) -> SyncSession {
     SyncSession(
         identifier: id,
@@ -1838,7 +1910,7 @@ func makeSyncSession(
         labels: nil,
         paused: paused,
         status: status,
-        successfulCycles: 0,
+        successfulCycles: successfulCycles,
         mode: "two-way-safe",
         alpha: alpha,
         beta: beta,
@@ -3433,7 +3505,9 @@ final class CallLog: @unchecked Sendable {
 func makeForwardSession(
     id: String,
     name: String?,
-    paused: Bool = false
+    paused: Bool = false,
+    connected: Bool = true,
+    destinationHost: String? = "host"
 ) -> ForwardSession {
     ForwardSession(
         identifier: id,
@@ -3443,8 +3517,10 @@ func makeForwardSession(
         name: name,
         labels: nil,
         paused: paused,
-        source: ForwardEndpoint(protocol_: "local", user: nil, host: nil, port: nil, connected: true),
-        destination: ForwardEndpoint(protocol_: "ssh", user: "test", host: "host", port: nil, connected: true),
+        source: ForwardEndpoint(protocol_: "local", user: nil, host: nil, port: nil, connected: connected),
+        destination: ForwardEndpoint(
+            protocol_: destinationHost == nil ? "local" : "ssh", user: "test", host: destinationHost, port: nil, connected: connected
+        ),
         sourceEndpoint: "tcp:localhost:8080",
         destinationEndpoint: "tcp:localhost:3000",
         socket: nil

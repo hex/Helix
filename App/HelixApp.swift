@@ -16,7 +16,7 @@ struct HelixApp: App {
     init() {
         let path = UserDefaults.standard.string(forKey: "cliPath") ?? Self.defaultCLIPath
         let cli = CLI(executablePath: path)
-        let store = SessionStore(provider: cli, daemonProcess: MutagenDaemon(cliPath: path))
+        let store = SessionStore(provider: cli, daemonProcess: MutagenDaemon(cliPath: path), orderDefaults: .standard)
         _store = State(initialValue: store)
         updaterController = SPUStandardUpdaterController(
             startingUpdater: true,
