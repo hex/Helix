@@ -34,12 +34,23 @@ public struct BulkPause: Codable, Equatable, Sendable {
     }
 }
 
-public enum HealthStatus: Sendable {
+public enum HealthStatus: Sendable, CaseIterable {
     case healthy
     case active
+    case partiallyPaused
+    case paused
     case warning
     case error
+    case daemonStopped
     case idle
+
+    /// This status with the paused states reported as healthy.
+    public var ignoringPause: HealthStatus {
+        switch self {
+        case .partiallyPaused, .paused: .healthy
+        default: self
+        }
+    }
 }
 
 public enum DaemonStatus: String, Sendable {
@@ -268,31 +279,37 @@ public final class SessionStore {
         syncSessions.reduce(0) { $0 + ($1.conflicts?.count ?? 0) }
     }
 
+    /// Health of the sessions that are not paused, or a paused state when the user paused some or all of them.
     public var overallHealth: HealthStatus {
         if !daemonRunning {
-            return .error
+            return .daemonStopped
         }
         if syncSessions.isEmpty && forwardSessions.isEmpty {
             return .idle
         }
-        let running = syncSessions.filter { !$0.paused }
-        let hasDisconnected = running.contains { $0.phase == .disconnected }
-            || forwardSessions.contains { $0.source.connected == false || $0.destination.connected == false }
+        let runningSyncs = syncSessions.filter { !$0.paused }
+        let runningForwards = forwardSessions.filter { !$0.paused }
+        if runningSyncs.isEmpty && runningForwards.isEmpty {
+            return .paused
+        }
+        let hasDisconnected = runningSyncs.contains { $0.phase == .disconnected }
+            || runningForwards.contains { $0.source.connected == false || $0.destination.connected == false }
         if hasDisconnected {
             return .error
         }
-        let hasConflicts = running.contains { $0.conflicts?.isEmpty == false || ($0.excludedConflicts ?? 0) > 0 }
-        let hasProblems = running.contains { $0.alpha.hasProblems || $0.beta.hasProblems }
-        let hasHalted = running.contains { $0.phase == .halted }
-        let failsToConnect = running.contains { $0.phase == .connecting && !($0.lastError ?? "").isEmpty }
+        let hasConflicts = runningSyncs.contains { $0.conflicts?.isEmpty == false || ($0.excludedConflicts ?? 0) > 0 }
+        let hasProblems = runningSyncs.contains { $0.alpha.hasProblems || $0.beta.hasProblems }
+        let hasHalted = runningSyncs.contains { $0.phase == .halted }
+        let failsToConnect = runningSyncs.contains { $0.phase == .connecting && !($0.lastError ?? "").isEmpty }
         if hasConflicts || hasProblems || hasHalted || failsToConnect {
             return .warning
         }
-        let hasActive = running.contains { $0.phase == .working || $0.phase == .connecting }
+        let hasActive = runningSyncs.contains { $0.phase == .working || $0.phase == .connecting }
         if hasActive {
             return .active
         }
-        return .healthy
+        let hasPaused = runningSyncs.count < syncSessions.count || runningForwards.count < forwardSessions.count
+        return hasPaused ? .partiallyPaused : .healthy
     }
 
     public func refresh() async {
